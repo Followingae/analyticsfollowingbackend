@@ -45,3 +45,8 @@
 2025-07-26 12:56:12,647 - app.scrapers.inhouse_scraper - INFO - Extracted profile data keys: ['biography', 'username', 'profile_pic_url']
 2025-07-26 12:57:20,533 - app.scrapers.inhouse_scraper - INFO - Scraping profile: https://www.instagram.com/mkbhd/
 2025-07-26 12:57:21,741 - app.scrapers.inhouse_scraper - INFO - Extracted profile data keys: ['full_name', 'username']
+2025-07-26 13:43:08,577 - app.scrapers.inhouse_scraper - INFO - Scraping profile: https://www.instagram.com/umairrali/
+2025-07-26 13:43:10,193 - app.scrapers.inhouse_scraper - INFO - Extracted profile data keys: ['biography', 'username', 'profile_pic_url']
+2025-07-26 13:44:02,467 - app.scrapers.smartproxy_client - DEBUG - Making request to https://scraper-api.decodo.com/v2/scrape with payload: {'target': 'instagram_graphql_profile', 'query': 'umairrali'}
+2025-07-26 13:44:34,840 - app.scrapers.smartproxy_client - DEBUG - Response status: 200
+2025-07-26 13:44:34,842 - app.scrapers.smartproxy_client - DEBUG - Response data keys: ['results']
