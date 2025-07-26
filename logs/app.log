@@ -26,3 +26,22 @@
 2025-07-26 12:41:09,611 - app.scrapers.smartproxy_client - DEBUG - Making request to https://scraper-api.decodo.com/v2/scrape with payload: {'target': 'instagram_graphql_profile', 'query': 'mkbhd'}
 2025-07-26 12:41:43,362 - app.scrapers.smartproxy_client - DEBUG - Response status: 200
 2025-07-26 12:41:43,362 - app.scrapers.smartproxy_client - DEBUG - Response data keys: ['status', 'status_code', 'message', 'task_id']
+2025-07-26 12:53:38,349 - app.scrapers.smartproxy_client - DEBUG - Making request to https://scraper-api.decodo.com/v2/scrape with payload: {'target': 'instagram_graphql_profile', 'query': 'instagram'}
+2025-07-26 12:53:46,851 - app.scrapers.smartproxy_client - DEBUG - Response status: 200
+2025-07-26 12:53:46,852 - app.scrapers.smartproxy_client - DEBUG - Response data keys: ['status', 'status_code', 'message', 'task_id']
+2025-07-26 12:54:04,490 - app.scrapers.smartproxy_client - DEBUG - Making request to https://scraper-api.decodo.com/v2/scrape with payload: {'target': 'instagram_graphql_hashtag', 'query': 'mkbhd'}
+2025-07-26 12:54:04,984 - app.scrapers.smartproxy_client - DEBUG - Response status: 410
+2025-07-26 12:54:04,985 - app.scrapers.smartproxy_client - ERROR - API request failed with status 410: {"status":"failed","message":"The target instagram_graphql_hashtag is disabled"}
+2025-07-26 12:54:04,985 - app.api.routes - ERROR - SmartProxy API error for hashtag mkbhd: API request failed: 410 - {"status":"failed","message":"The target instagram_graphql_hashtag is disabled"}
+2025-07-26 12:54:21,089 - app.scrapers.smartproxy_client - DEBUG - Making request to https://scraper-api.decodo.com/v2/scrape with payload: {'target': 'instagram_graphql_profile', 'query': 'mkbhd'}
+2025-07-26 12:54:56,601 - app.scrapers.smartproxy_client - DEBUG - Response status: 200
+2025-07-26 12:54:56,601 - app.scrapers.smartproxy_client - DEBUG - Response data keys: ['status', 'status_code', 'message', 'task_id']
+2025-07-26 12:55:13,482 - app.scrapers.smartproxy_client - DEBUG - Making request to https://scraper-api.decodo.com/v2/scrape with payload: {'target': 'instagram_graphql_profile', 'query': 'mkbhd'}
+2025-07-26 12:55:24,517 - app.scrapers.smartproxy_client - DEBUG - Response status: 200
+2025-07-26 12:55:24,517 - app.scrapers.smartproxy_client - DEBUG - Response data keys: ['status', 'status_code', 'message', 'task_id']
+2025-07-26 12:55:46,525 - app.scrapers.inhouse_scraper - INFO - Scraping profile: https://www.instagram.com/instagram/
+2025-07-26 12:55:48,630 - app.scrapers.inhouse_scraper - INFO - Extracted profile data keys: ['biography', 'username', 'profile_pic_url']
+2025-07-26 12:56:09,903 - app.scrapers.inhouse_scraper - INFO - Scraping profile: https://www.instagram.com/mkbhd/
+2025-07-26 12:56:12,647 - app.scrapers.inhouse_scraper - INFO - Extracted profile data keys: ['biography', 'username', 'profile_pic_url']
+2025-07-26 12:57:20,533 - app.scrapers.inhouse_scraper - INFO - Scraping profile: https://www.instagram.com/mkbhd/
+2025-07-26 12:57:21,741 - app.scrapers.inhouse_scraper - INFO - Extracted profile data keys: ['full_name', 'username']
