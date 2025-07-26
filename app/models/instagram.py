@@ -55,20 +55,56 @@ class HashtagAnalytics(BaseModel):
     related_hashtags: List[str] = Field(default_factory=list, description="Related hashtags")
 
 
+class EngagementMetrics(BaseModel):
+    like_rate: float = Field(0.0, description="Average like rate percentage")
+    comment_rate: float = Field(0.0, description="Average comment rate percentage")
+    save_rate: float = Field(0.0, description="Estimated save rate percentage")
+    share_rate: float = Field(0.0, description="Estimated share rate percentage")
+    reach_rate: float = Field(0.0, description="Estimated reach rate percentage")
+
+
+class AudienceInsights(BaseModel):
+    primary_age_group: Optional[str] = Field(None, description="Primary age demographic")
+    gender_split: Dict[str, float] = Field(default_factory=dict, description="Gender distribution")
+    top_locations: List[str] = Field(default_factory=list, description="Top audience locations")
+    activity_times: List[str] = Field(default_factory=list, description="When audience is most active")
+    interests: List[str] = Field(default_factory=list, description="Audience interests")
+
+
+class CompetitorAnalysis(BaseModel):
+    similar_accounts: List[str] = Field(default_factory=list, description="Similar accounts in niche")
+    competitive_score: float = Field(0.0, description="Competitiveness in niche (1-10)")
+    market_position: str = Field("", description="Position in market (leader, challenger, etc.)")
+    growth_opportunities: List[str] = Field(default_factory=list, description="Growth opportunities")
+
+
+class ContentPerformance(BaseModel):
+    top_performing_content_types: List[str] = Field(default_factory=list, description="Best performing content types")
+    optimal_posting_frequency: str = Field("", description="Recommended posting frequency")
+    content_themes: List[str] = Field(default_factory=list, description="Successful content themes")
+    hashtag_effectiveness: Dict[str, float] = Field(default_factory=dict, description="Hashtag performance scores")
+
+
 class ProfileAnalysisResponse(BaseModel):
     profile: InstagramProfile = Field(..., description="Profile information")
     recent_posts: List[InstagramPost] = Field(default_factory=list, description="Recent posts analysis")
     hashtag_analysis: List[HashtagAnalytics] = Field(default_factory=list, description="Hashtag performance")
     
+    # Enhanced analysis
+    engagement_metrics: EngagementMetrics = Field(default_factory=EngagementMetrics, description="Detailed engagement metrics")
+    audience_insights: AudienceInsights = Field(default_factory=AudienceInsights, description="Audience demographics and behavior")
+    competitor_analysis: CompetitorAnalysis = Field(default_factory=CompetitorAnalysis, description="Competitive analysis")
+    content_performance: ContentPerformance = Field(default_factory=ContentPerformance, description="Content performance insights")
+    
     # Comprehensive analysis
     content_strategy: Dict[str, Any] = Field(default_factory=dict, description="Content strategy insights")
     best_posting_times: List[str] = Field(default_factory=list, description="Optimal posting times")
-    audience_insights: Dict[str, Any] = Field(default_factory=dict, description="Audience demographics")
     growth_recommendations: List[str] = Field(default_factory=list, description="Growth recommendations")
     
     # Meta information
     analysis_timestamp: datetime = Field(default_factory=datetime.now, description="When analysis was performed")
     data_quality_score: float = Field(1.0, description="Quality of scraped data (0-1)")
+    scraping_method: str = Field("inhouse", description="Method used for data collection")
 
 
 class SmartProxyRequest(BaseModel):
