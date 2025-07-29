@@ -50,6 +50,10 @@ def get_allowed_origins() -> List[str]:
             "http://127.0.0.1:3000", 
             "http://localhost:3001",
             "https://localhost:3000",
+            # Add production URLs even in debug mode for testing
+            "https://analyticsfollowingfrontend.vercel.app",
+            "https://analytics.following.ae",
+            "https://analyticsfollowingfrontend-followingaes-projects.vercel.app",
             "*"  # Allow all in development
         ]
     else:
@@ -65,12 +69,17 @@ def get_allowed_origins() -> List[str]:
             "https://analytics.following.ae"
         ]
         
-        # Add common Vercel deployment patterns
+        # Add your specific frontend URLs
         vercel_origins = [
+            "https://analyticsfollowingfrontend.vercel.app",
+            "https://analytics.following.ae",
+            "https://analyticsfollowingfrontend-followingaes-projects.vercel.app",
             "https://analytics-following-frontend.vercel.app",
-            "https://barakat-frontend.vercel.app",
+            "https://barakat-frontend.vercel.app", 
             "https://following-frontend.vercel.app",
-            "https://analytics-frontend.vercel.app"
+            "https://analytics-frontend.vercel.app",
+            # Add wildcard patterns for common naming
+            "https://*.vercel.app"
         ]
         
         return base_origins + default_origins + vercel_origins
