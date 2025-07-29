@@ -307,13 +307,28 @@ class ProductionSupabaseAuthService:
             # Sync to database
             await self._ensure_user_in_database(user, user_metadata)
             
+            # Handle datetime parsing safely
+            try:
+                if user.created_at:
+                    if isinstance(user.created_at, str):
+                        # Parse string datetime
+                        created_at = datetime.fromisoformat(user.created_at.replace('Z', '+00:00'))
+                    else:
+                        # Already datetime object
+                        created_at = user.created_at
+                else:
+                    created_at = datetime.now()
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Failed to parse created_at in registration: {e}, using current time")
+                created_at = datetime.now()
+            
             user_response = UserResponse(
                 id=user.id,
                 email=user.email,
                 full_name=user_metadata.get("full_name", ""),
                 role=UserRole(user_metadata.get("role", "free")),
                 status=UserStatus.ACTIVE,
-                created_at=datetime.fromisoformat(user.created_at.replace('Z', '+00:00')) if user.created_at else datetime.now(),
+                created_at=created_at,
                 last_login=None
             )
             
@@ -346,6 +361,21 @@ class ProductionSupabaseAuthService:
             user = user_response.user
             user_metadata = user.user_metadata or {}
             
+            # Handle datetime parsing safely
+            try:
+                if user.created_at:
+                    if isinstance(user.created_at, str):
+                        # Parse string datetime
+                        created_at = datetime.fromisoformat(user.created_at.replace('Z', '+00:00'))
+                    else:
+                        # Already datetime object
+                        created_at = user.created_at
+                else:
+                    created_at = datetime.now()
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Failed to parse created_at in get_current_user: {e}, using current time")
+                created_at = datetime.now()
+                
             user_in_db = UserInDB(
                 id=user.id,
                 supabase_user_id=user.id,
@@ -353,7 +383,7 @@ class ProductionSupabaseAuthService:
                 full_name=user_metadata.get("full_name", ""),
                 role=UserRole(user_metadata.get("role", "free")),
                 status=UserStatus.ACTIVE,
-                created_at=datetime.fromisoformat(user.created_at.replace('Z', '+00:00')) if user.created_at else datetime.now(),
+                created_at=created_at,
                 updated_at=datetime.now(),
                 last_login=datetime.now()
             )
