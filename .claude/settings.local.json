@@ -27,7 +27,9 @@
       "Bash(start:*)",
       "Bash(del test_client_backend.py)",
       "Bash(git commit:*)",
-      "Bash(git remote set-url:*)"
+      "Bash(git remote set-url:*)",
+      "Bash(chmod:*)",
+      "Bash(docker build:*)"
     ],
     "deny": []
   }
