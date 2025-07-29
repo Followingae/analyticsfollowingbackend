@@ -13,3 +13,6 @@ sqlalchemy==2.0.23
 passlib[bcrypt]==1.7.4
 python-jose[cryptography]==3.3.0
 email-validator==2.1.0
+tenacity==8.2.3
+beautifulsoup4==4.12.2
+asyncio-throttle==1.0.2
