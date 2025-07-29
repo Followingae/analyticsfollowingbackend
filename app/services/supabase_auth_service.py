@@ -410,6 +410,164 @@ class ProductionSupabaseAuthService:
             logger.error(f"❌ Logout failed: {e}")
             return False
     
+    async def get_user_dashboard_stats(self, user_id: str):
+        """Get comprehensive dashboard statistics for user"""
+        await self.ensure_initialized()
+        
+        try:
+            import asyncpg
+            from app.core.config import settings
+            from app.models.auth import UserDashboardStats, UserSearchHistory
+            
+            if not settings.DATABASE_URL:
+                logger.warning("⚠️ DATABASE_URL not available for dashboard stats")
+                # Return empty stats if no database connection
+                return UserDashboardStats(
+                    total_searches=0,
+                    searches_this_month=0,
+                    favorite_profiles=[],
+                    recent_searches=[],
+                    account_created=datetime.now(),
+                    last_active=datetime.now()
+                )
+            
+            conn = await asyncpg.connect(settings.DATABASE_URL)
+            
+            try:
+                # Get total searches for user
+                total_searches = await conn.fetchval(
+                    "SELECT COUNT(*) FROM user_searches WHERE user_id = $1",
+                    user_id
+                ) or 0
+                
+                # Get searches this month
+                searches_this_month = await conn.fetchval(
+                    """
+                    SELECT COUNT(*) FROM user_searches 
+                    WHERE user_id = $1 AND search_timestamp >= date_trunc('month', CURRENT_DATE)
+                    """,
+                    user_id
+                ) or 0
+                
+                # Get recent searches
+                recent_search_rows = await conn.fetch(
+                    """
+                    SELECT id, user_id, instagram_username, search_timestamp, 
+                           analysis_type, search_metadata
+                    FROM user_searches 
+                    WHERE user_id = $1 
+                    ORDER BY search_timestamp DESC 
+                    LIMIT 10
+                    """,
+                    user_id
+                )
+                
+                recent_searches = [
+                    UserSearchHistory(
+                        id=str(row['id']),
+                        user_id=str(row['user_id']),
+                        instagram_username=row['instagram_username'],
+                        search_timestamp=row['search_timestamp'],
+                        analysis_type=row['analysis_type'],
+                        search_metadata=row['search_metadata'] or {}
+                    )
+                    for row in recent_search_rows
+                ]
+                
+                # Get user creation date
+                user_created = await conn.fetchval(
+                    "SELECT created_at FROM users WHERE id = $1",
+                    user_id
+                ) or datetime.now()
+                
+                # Get favorite profiles (unlocked profiles)
+                favorite_profiles = await conn.fetch(
+                    """
+                    SELECT p.username FROM user_profile_access upa
+                    JOIN profiles p ON p.id = upa.profile_id
+                    WHERE upa.user_id = $1
+                    ORDER BY upa.last_accessed DESC
+                    LIMIT 10
+                    """,
+                    user_id
+                )
+                
+                favorite_profile_list = [row['username'] for row in favorite_profiles]
+                
+                return UserDashboardStats(
+                    total_searches=total_searches,
+                    searches_this_month=searches_this_month,
+                    favorite_profiles=favorite_profile_list,
+                    recent_searches=recent_searches,
+                    account_created=user_created,
+                    last_active=datetime.now()
+                )
+                
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get dashboard stats for user {user_id}: {e}")
+            # Return empty stats on error
+            return UserDashboardStats(
+                total_searches=0,
+                searches_this_month=0,
+                favorite_profiles=[],
+                recent_searches=[],
+                account_created=datetime.now(),
+                last_active=datetime.now()
+            )
+    
+    async def get_user_search_history(self, user_id: str, page: int = 1, page_size: int = 20):
+        """Get user's search history with pagination"""
+        await self.ensure_initialized()
+        
+        try:
+            import asyncpg
+            from app.core.config import settings
+            from app.models.auth import UserSearchHistory
+            
+            if not settings.DATABASE_URL:
+                logger.warning("⚠️ DATABASE_URL not available for search history")
+                return []
+            
+            conn = await asyncpg.connect(settings.DATABASE_URL)
+            
+            try:
+                offset = (page - 1) * page_size
+                
+                # Get search history with pagination
+                search_rows = await conn.fetch(
+                    """
+                    SELECT id, user_id, instagram_username, search_timestamp, 
+                           analysis_type, search_metadata
+                    FROM user_searches 
+                    WHERE user_id = $1 
+                    ORDER BY search_timestamp DESC 
+                    LIMIT $2 OFFSET $3
+                    """,
+                    user_id, page_size, offset
+                )
+                
+                return [
+                    UserSearchHistory(
+                        id=str(row['id']),
+                        user_id=str(row['user_id']),
+                        instagram_username=row['instagram_username'],
+                        search_timestamp=row['search_timestamp'],
+                        analysis_type=row['analysis_type'],
+                        search_metadata=row['search_metadata'] or {}
+                    )
+                    for row in search_rows
+                ]
+                
+            finally:
+                await conn.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get search history for user {user_id}: {e}")
+            return []
+    
     async def health_check(self) -> Dict[str, Any]:
         """Comprehensive health check for auth service"""
         health_status = {
