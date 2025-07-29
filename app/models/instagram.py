@@ -104,7 +104,7 @@ class ProfileAnalysisResponse(BaseModel):
     # Meta information
     analysis_timestamp: datetime = Field(default_factory=datetime.now, description="When analysis was performed")
     data_quality_score: float = Field(1.0, description="Quality of scraped data (0-1)")
-    scraping_method: str = Field("inhouse", description="Method used for data collection")
+    scraping_method: str = Field("decodo", description="Method used for data collection")
 
 
 class SmartProxyRequest(BaseModel):

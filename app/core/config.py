@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # Redis (optional)
     REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
     
+    # Database Configuration
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+    SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
+    
+    # Authentication Configuration
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "change-this-to-a-secure-secret-key-in-production")
+    
     # SmartProxy/Decodo API endpoints
     SMARTPROXY_BASE_URL: str = "https://scraper-api.decodo.com/v2"
     SMARTPROXY_INSTAGRAM_ENDPOINT: str = f"{SMARTPROXY_BASE_URL}/scrape"
