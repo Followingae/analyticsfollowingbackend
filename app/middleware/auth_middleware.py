@@ -7,7 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, List
 import logging
 
-from app.services.auth_service import auth_service
+from app.services.supabase_auth_service import supabase_auth_service as auth_service
 from app.models.auth import UserInDB, UserRole
 
 logger = logging.getLogger(__name__)

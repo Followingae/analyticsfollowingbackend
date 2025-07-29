@@ -14,7 +14,7 @@ from app.models.auth import (
     TokenRefreshRequest, PasswordResetRequest, PasswordResetConfirm,
     UserInDB, UserDashboardStats, UserSearchHistoryResponse
 )
-from app.services.auth_service import auth_service
+from app.services.supabase_auth_service import supabase_auth_service as auth_service
 from app.middleware.auth_middleware import (
     get_current_user, get_current_active_user, get_optional_user,
     require_premium, require_admin, check_user_rate_limit,

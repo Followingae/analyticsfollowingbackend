@@ -29,7 +29,9 @@
       "Bash(git commit:*)",
       "Bash(git remote set-url:*)",
       "Bash(chmod:*)",
-      "Bash(docker build:*)"
+      "Bash(docker build:*)",
+      "Bash(rg:*)",
+      "Bash(sed:*)"
     ],
     "deny": []
   }

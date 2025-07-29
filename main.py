@@ -9,7 +9,7 @@ from app.api.routes import router
 from app.api.auth_routes import router as auth_router
 from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
-from app.services.auth_service import auth_service
+from app.services.supabase_auth_service import supabase_auth_service as auth_service
 
 
 @asynccontextmanager  
@@ -109,6 +109,8 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Enhanced health check with system info"""
+    auth_health = await auth_service.health_check()
+    
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -117,8 +119,17 @@ async def health_check():
             "decodo_integration": True,
             "retry_mechanism": True,
             "enhanced_reliability": True
+        },
+        "services": {
+            "auth": auth_health
         }
     }
+
+
+@app.get("/auth/health")
+async def auth_health_check():
+    """Dedicated auth service health check"""
+    return await auth_service.health_check()
 
 
 @app.get("/api")
