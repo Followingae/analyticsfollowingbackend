@@ -126,10 +126,6 @@ async def health_check():
     }
 
 
-@app.get("/auth/health")
-async def auth_health_check():
-    """Dedicated auth service health check"""
-    return await auth_service.health_check()
 
 
 @app.get("/api")

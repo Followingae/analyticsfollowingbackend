@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
+@router.get("/health")
+async def auth_health_check():
+    """Dedicated auth service health check"""
+    return await auth_service.health_check()
+
+
 @router.post("/register", response_model=UserResponse)
 async def register_user(user_data: UserCreate, background_tasks: BackgroundTasks):
     """

@@ -152,13 +152,28 @@ class ProductionSupabaseAuthService:
                 user_role = UserRole.FREE
             
             # Create UserResponse
+            # Handle datetime parsing safely
+            try:
+                if user.created_at:
+                    if isinstance(user.created_at, str):
+                        # Parse string datetime
+                        created_at = datetime.fromisoformat(user.created_at.replace('Z', '+00:00'))
+                    else:
+                        # Already datetime object
+                        created_at = user.created_at
+                else:
+                    created_at = datetime.now()
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Failed to parse created_at: {e}, using current time")
+                created_at = datetime.now()
+            
             user_response = UserResponse(
                 id=user.id,
                 email=user.email or login_data.email,
                 full_name=user_metadata.get("full_name", ""),
                 role=user_role,
                 status=UserStatus.ACTIVE,
-                created_at=datetime.fromisoformat(user.created_at.replace('Z', '+00:00')) if user.created_at else datetime.now(),
+                created_at=created_at,
                 last_login=datetime.now(),
                 profile_picture_url=user_metadata.get("avatar_url")
             )
