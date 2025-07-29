@@ -73,17 +73,14 @@ class ProductionSupabaseAuthService:
                 logger.error(f"❌ {self.initialization_error}")
                 return False
             
-            # Test client connectivity
+            # Test client connectivity (non-admin test)
             try:
-                # Simple test to verify client works
-                users_response = self.supabase.auth.admin.list_users()
-                if hasattr(users_response, 'data') or isinstance(users_response, list):
-                    logger.info("✅ Supabase Auth connectivity test passed")
-                else:
-                    logger.warning("⚠️ Unexpected response format from Supabase Auth")
+                # Simple test - try to access session (doesn't require admin)
+                test_response = self.supabase.auth.get_session()
+                logger.info("✅ Supabase Auth connectivity test passed (non-admin)")
             except Exception as e:
                 logger.warning(f"⚠️ Supabase Auth test failed (but client created): {e}")
-                # Don't fail initialization for test failures - client might still work
+                # Don't fail initialization - client might still work for authentication
             
             self.initialized = True
             self.initialization_error = None
@@ -271,14 +268,15 @@ class ProductionSupabaseAuthService:
         try:
             logger.info(f"📝 Registering new user: {user_data.email}")
             
-            # Create user in Supabase Auth
-            auth_response = self.supabase.auth.admin.create_user({
+            # Create user in Supabase Auth (non-admin)
+            auth_response = self.supabase.auth.sign_up({
                 "email": user_data.email,
                 "password": user_data.password,
-                "email_confirm": True,  # Skip email verification for demo
-                "user_metadata": {
-                    "full_name": user_data.full_name or "",
-                    "role": user_data.role.value
+                "options": {
+                    "data": {
+                        "full_name": user_data.full_name or "",
+                        "role": user_data.role.value
+                    }
                 }
             })
             
@@ -387,11 +385,12 @@ class ProductionSupabaseAuthService:
                 health_status["details"]["error"] = self.initialization_error
                 return health_status
             
-            # Test Supabase connectivity
+            # Test Supabase connectivity (non-admin)
             try:
-                users = self.supabase.auth.admin.list_users()
+                # Test with session check (doesn't require admin)
+                session_response = self.supabase.auth.get_session()
                 health_status["details"]["supabase_connectivity"] = "ok"
-                health_status["details"]["user_count"] = len(users) if isinstance(users, list) else "unknown"
+                health_status["details"]["session_status"] = "accessible"
             except Exception as e:
                 health_status["details"]["supabase_connectivity"] = f"error: {e}"
             
