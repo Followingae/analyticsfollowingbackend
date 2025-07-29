@@ -55,12 +55,25 @@ def get_allowed_origins() -> List[str]:
     else:
         # Production origins
         allowed = os.getenv("ALLOWED_ORIGINS", "").split(",")
-        return [origin.strip() for origin in allowed if origin.strip()] + [
+        base_origins = [origin.strip() for origin in allowed if origin.strip()]
+        
+        # Add default production domains
+        default_origins = [
             "https://following.ae",
-            "https://www.following.ae",
+            "https://www.following.ae", 
             "https://app.following.ae",
             "https://analytics.following.ae"
         ]
+        
+        # Add common Vercel deployment patterns
+        vercel_origins = [
+            "https://analytics-following-frontend.vercel.app",
+            "https://barakat-frontend.vercel.app",
+            "https://following-frontend.vercel.app",
+            "https://analytics-frontend.vercel.app"
+        ]
+        
+        return base_origins + default_origins + vercel_origins
 
 app.add_middleware(
     CORSMiddleware,
