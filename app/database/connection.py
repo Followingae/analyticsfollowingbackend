@@ -43,14 +43,7 @@ async def init_database():
             pool_recycle=300,
             pool_size=5,
             max_overflow=10,
-            echo=False,
-            connect_args={
-                "statement_cache_size": 0,
-                "prepared_statement_cache_size": 0,
-                "server_settings": {
-                    "statement_timeout": "300000",
-                }
-            }
+            echo=False
         )
         
         # Create session factory

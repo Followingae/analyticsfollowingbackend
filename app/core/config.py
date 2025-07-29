@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     
     # API Configuration
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
-    API_PORT: int = int(os.getenv("API_PORT", "8000"))
-    DEBUG: bool = os.getenv("DEBUG", "true").lower() == "true"
+    API_PORT: int = int(os.getenv("PORT", os.getenv("API_PORT", "8080")))
+    DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
     
     # Rate Limiting
     MAX_REQUESTS_PER_HOUR: int = int(os.getenv("MAX_REQUESTS_PER_HOUR", "500"))

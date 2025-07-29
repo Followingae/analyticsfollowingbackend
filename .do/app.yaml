@@ -1,0 +1,41 @@
+name: analytics-following-backend
+services:
+- name: web
+  source_dir: /
+  github:
+    repo: your-repo/analyticsfollowingbackend
+    branch: main
+  run_command: python -m uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1
+  environment_slug: python
+  instance_count: 1
+  instance_size_slug: basic-xxs
+  http_port: 8080
+  health_check:
+    http_path: /health
+  env:
+  - key: DEBUG
+    value: "false"
+  - key: API_HOST
+    value: "0.0.0.0"
+  - key: API_PORT
+    value: "8080"
+  - key: SMARTPROXY_USERNAME
+    scope: RUN_TIME
+    type: SECRET
+  - key: SMARTPROXY_PASSWORD
+    scope: RUN_TIME
+    type: SECRET
+  - key: DATABASE_URL
+    scope: RUN_TIME
+    type: SECRET
+  - key: SUPABASE_URL
+    scope: RUN_TIME
+    type: SECRET
+  - key: SUPABASE_KEY
+    scope: RUN_TIME
+    type: SECRET
+  - key: JWT_SECRET_KEY
+    scope: RUN_TIME
+    type: SECRET
+  - key: ALLOWED_ORIGINS
+    value: "https://following.ae,https://www.following.ae,https://app.following.ae"
