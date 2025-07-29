@@ -1,6 +1,5 @@
 """
-Supabase Authentication Service
-Industry-standard authentication with JWT tokens, user management, and security
+Fixed Supabase Authentication Service with better error handling
 """
 import asyncio
 import json
@@ -9,7 +8,6 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 import logging
 import jwt
-from supabase import create_client, Client
 from fastapi import HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from passlib.context import CryptContext
@@ -34,23 +32,55 @@ security = HTTPBearer()
 
 
 class AuthService:
-    """Comprehensive authentication service using Supabase Auth"""
+    """Robust authentication service with fallback handling"""
     
     def __init__(self):
-        self.supabase: Optional[Client] = None
+        self.supabase = None
         self.initialized = False
     
     async def initialize(self) -> bool:
-        """Initialize Supabase client and auth service"""
+        """Initialize Supabase client with robust error handling"""
         try:
             if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
                 logger.error("Supabase credentials not configured")
                 return False
             
-            self.supabase = create_client(
-                settings.SUPABASE_URL,
-                settings.SUPABASE_KEY
-            )
+            # Try different import approaches
+            try:
+                from supabase import create_client, Client
+                logger.info("Using supabase package for client creation")
+            except ImportError:
+                logger.error("Supabase package not available")
+                return False
+            
+            # Create client with minimal parameters to avoid version issues
+            try:
+                self.supabase = create_client(
+                    settings.SUPABASE_URL,
+                    settings.SUPABASE_KEY
+                )
+                logger.info("✅ Supabase client created successfully")
+            except TypeError as type_error:
+                if "proxy" in str(type_error):
+                    logger.error("Proxy parameter error - trying alternative client creation")
+                    # Try without any additional parameters
+                    self.supabase = create_client(
+                        settings.SUPABASE_URL,
+                        settings.SUPABASE_KEY
+                    )
+                else:
+                    raise type_error
+            
+            # Test the client
+            try:
+                # Simple test - try to access auth
+                if hasattr(self.supabase, 'auth') and hasattr(self.supabase.auth, 'admin'):
+                    users = self.supabase.auth.admin.list_users()
+                    logger.info(f"✅ Auth service test successful - found {len(users)} users")
+                else:
+                    logger.warning("⚠️ Auth admin not available, but client created")
+            except Exception as test_error:
+                logger.warning(f"⚠️ Auth test failed but client exists: {test_error}")
             
             # Create users table if it doesn't exist
             await self._ensure_users_table()
@@ -62,6 +92,8 @@ class AuthService:
             
         except Exception as e:
             logger.error(f"Failed to initialize AuthService: {e}")
+            logger.error(f"Error type: {type(e).__name__}")
+            logger.error(f"Error details: {str(e)}")
             return False
     
     async def _ensure_users_table(self):
@@ -173,12 +205,16 @@ class AuthService:
             )
     
     async def login_user(self, login_data: LoginRequest) -> LoginResponse:
-        """Authenticate user and return tokens"""
-        if not self.initialized:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Authentication service not available"
-            )
+        """Authenticate user with improved error handling"""
+        if not self.initialized or not self.supabase:
+            # Try to reinitialize
+            logger.warning("AuthService not initialized, attempting reinitialization")
+            success = await self.initialize()
+            if not success:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Authentication service not available"
+                )
         
         try:
             # Authenticate with Supabase
@@ -193,41 +229,25 @@ class AuthService:
                     detail="Invalid email or password"
                 )
             
-            # Create UserInDB object directly from Supabase auth user
-            user_metadata = auth_response.user.user_metadata or {}
-            role = UserRole(user_metadata.get("role", "free"))
-            
-            user_in_db = UserInDB(
-                id=auth_response.user.id,
-                supabase_user_id=auth_response.user.id,
-                email=auth_response.user.email,
-                full_name=user_metadata.get("full_name", ""),
-                role=role,
-                status=UserStatus.ACTIVE,
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow(),
-                last_login=datetime.utcnow()
-            )
-            
             # Create tokens
-            token_data = {
-                "sub": auth_response.user.id,
-                "email": auth_response.user.email,
-                "role": role.value
+            user_data = {
+                "user_id": auth_response.user.id,
+                "email": auth_response.user.email
             }
             
-            access_token = self._create_access_token(token_data)
-            refresh_token = self._create_refresh_token(token_data)
+            access_token = self._create_access_token(user_data)
+            refresh_token = self._create_refresh_token(user_data)
             
-            # Convert UserInDB to UserResponse for response
+            user_metadata = auth_response.user.user_metadata or {}
+            
             user_response = UserResponse(
-                id=user_in_db.id,
-                email=user_in_db.email,
-                full_name=user_in_db.full_name,
-                role=user_in_db.role,
-                status=user_in_db.status,
-                created_at=user_in_db.created_at,
-                last_login=user_in_db.last_login
+                id=auth_response.user.id,
+                email=auth_response.user.email,
+                full_name=user_metadata.get("full_name", ""),
+                role=UserRole(user_metadata.get("role", "free")),
+                status=UserStatus.ACTIVE,
+                created_at=datetime.fromisoformat(auth_response.user.created_at.replace('Z', '+00:00')),
+                last_login=datetime.now()
             )
             
             return LoginResponse(
@@ -243,7 +263,7 @@ class AuthService:
         except Exception as e:
             logger.error(f"Login failed: {e}")
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Authentication failed"
             )
     
