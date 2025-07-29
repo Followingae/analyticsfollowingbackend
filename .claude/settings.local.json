@@ -26,7 +26,8 @@
       "Bash(start /B python:*)",
       "Bash(start:*)",
       "Bash(del test_client_backend.py)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git remote set-url:*)"
     ],
     "deny": []
   }
