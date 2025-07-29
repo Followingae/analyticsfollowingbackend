@@ -6,7 +6,7 @@ pydantic-settings==2.1.0
 python-dotenv==1.0.0
 
 # HTTP Clients
-httpx==0.24.1
+httpx>=0.26.0
 requests==2.31.0
 
 # Database & Storage
