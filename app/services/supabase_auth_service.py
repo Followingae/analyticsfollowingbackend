@@ -434,22 +434,22 @@ class ProductionSupabaseAuthService:
             conn = await asyncpg.connect(settings.DATABASE_URL)
             
             try:
-                # Get total searches for user
+                # Get total searches for user (user_searches.user_id is VARCHAR)
                 total_searches = await conn.fetchval(
                     "SELECT COUNT(*) FROM user_searches WHERE user_id = $1",
-                    user_id
+                    str(user_id)
                 ) or 0
                 
-                # Get searches this month
+                # Get searches this month (user_searches.user_id is VARCHAR)
                 searches_this_month = await conn.fetchval(
                     """
                     SELECT COUNT(*) FROM user_searches 
                     WHERE user_id = $1 AND search_timestamp >= date_trunc('month', CURRENT_DATE)
                     """,
-                    user_id
+                    str(user_id)
                 ) or 0
                 
-                # Get recent searches
+                # Get recent searches (user_searches.user_id is VARCHAR)
                 recent_search_rows = await conn.fetch(
                     """
                     SELECT id, user_id, instagram_username, search_timestamp, 
@@ -459,7 +459,7 @@ class ProductionSupabaseAuthService:
                     ORDER BY search_timestamp DESC 
                     LIMIT 10
                     """,
-                    user_id
+                    str(user_id)
                 )
                 
                 recent_searches = [
@@ -474,22 +474,22 @@ class ProductionSupabaseAuthService:
                     for row in recent_search_rows
                 ]
                 
-                # Get user creation date
+                # Get user creation date (users.id is UUID)
                 user_created = await conn.fetchval(
-                    "SELECT created_at FROM users WHERE id = $1",
-                    user_id
+                    "SELECT created_at FROM users WHERE id = $1::uuid",
+                    str(user_id)
                 ) or datetime.now()
                 
-                # Get favorite profiles (unlocked profiles)
+                # Get favorite profiles (unlocked profiles) - user_profile_access.user_id is UUID
                 favorite_profiles = await conn.fetch(
                     """
                     SELECT p.username FROM user_profile_access upa
                     JOIN profiles p ON p.id = upa.profile_id
-                    WHERE upa.user_id = $1
+                    WHERE upa.user_id = $1::uuid
                     ORDER BY upa.last_accessed DESC
                     LIMIT 10
                     """,
-                    user_id
+                    str(user_id)
                 )
                 
                 favorite_profile_list = [row['username'] for row in favorite_profiles]
@@ -536,7 +536,7 @@ class ProductionSupabaseAuthService:
             try:
                 offset = (page - 1) * page_size
                 
-                # Get search history with pagination
+                # Get search history with pagination (user_searches.user_id is VARCHAR)
                 search_rows = await conn.fetch(
                     """
                     SELECT id, user_id, instagram_username, search_timestamp, 
@@ -546,7 +546,7 @@ class ProductionSupabaseAuthService:
                     ORDER BY search_timestamp DESC 
                     LIMIT $2 OFFSET $3
                     """,
-                    user_id, page_size, offset
+                    str(user_id), page_size, offset
                 )
                 
                 return [

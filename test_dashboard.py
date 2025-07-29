@@ -1,55 +1,62 @@
 """
-Test dashboard endpoint
+Test Dashboard Functionality
 """
-import requests
+import asyncio
+import httpx
 import json
 
-def test_dashboard():
-    """Test dashboard endpoint"""
-    try:
-        # 1. Login
-        print("1. Logging in...")
-        login_response = requests.post(
-            "http://127.0.0.1:8000/api/v1/auth/login",
-            json={
-                "email": "client@analyticsfollowing.com",
-                "password": "ClientPass2024!"
-            },
-            timeout=10
-        )
-        
-        if login_response.status_code == 200:
-            login_data = login_response.json()
-            access_token = login_data["access_token"]
-            print("SUCCESS: Login successful!")
-            
-            # 2. Test dashboard
-            print("\n2. Testing dashboard...")
-            dashboard_response = requests.get(
-                "http://127.0.0.1:8000/api/v1/auth/dashboard",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json"
-                },
-                timeout=10
+async def test_dashboard():
+    base_url = "https://analytics-following-backend-5qfwj.ondigitalocean.app"
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # Login first
+        print("=== TESTING LOGIN ===")
+        try:
+            login_response = await client.post(
+                f"{base_url}/api/v1/auth/login",
+                json={"email": "demo@prospectbrands.com", "password": "ProspectDemo2024!"},
+                headers={"Content-Type": "application/json"}
             )
             
-            if dashboard_response.status_code == 200:
-                dashboard_data = dashboard_response.json()
-                print("SUCCESS: Dashboard working!")
-                print(f"   Total searches: {dashboard_data.get('total_searches')}")
-                print(f"   Searches this month: {dashboard_data.get('searches_this_month')}")
-                print(f"   Account created: {dashboard_data.get('account_created')}")
-                print(f"   Recent searches: {len(dashboard_data.get('recent_searches', []))}")
+            if login_response.status_code == 200:
+                login_data = login_response.json()
+                token = login_data.get("access_token")
+                print("LOGIN SUCCESS!")
+                print(f"User: {login_data.get('user', {}).get('email')}")
+                print(f"Role: {login_data.get('user', {}).get('role')}")
+                print(f"Token: {token[:20]}...")
+                
+                # Test dashboard
+                print("\n=== TESTING DASHBOARD ===")
+                dashboard_response = await client.get(
+                    f"{base_url}/api/v1/auth/dashboard",
+                    headers={"Authorization": f"Bearer {token}"}
+                )
+                
+                print(f"Dashboard Status: {dashboard_response.status_code}")
+                if dashboard_response.status_code == 200:
+                    dashboard_data = dashboard_response.json()
+                    print("DASHBOARD SUCCESS!")
+                    print(f"Total Searches: {dashboard_data.get('total_searches')}")
+                    print(f"Searches This Month: {dashboard_data.get('searches_this_month')}")
+                    print(f"Favorite Profiles: {dashboard_data.get('favorite_profiles')}")
+                    print(f"Recent Searches: {len(dashboard_data.get('recent_searches', []))}")
+                    print(f"Account Created: {dashboard_data.get('account_created')}")
+                    return True
+                else:
+                    print(f"DASHBOARD FAILED: {dashboard_response.text}")
+                    return False
             else:
-                print(f"FAILED: Dashboard failed: {dashboard_response.status_code}")
-                print(f"   Error: {dashboard_response.text}")
-        else:
-            print(f"FAILED: Login failed: {login_response.status_code}")
-            print(f"   Error: {login_response.text}")
-            
-    except Exception as e:
-        print(f"FAILED: Test failed: {e}")
+                print(f"LOGIN FAILED: {login_response.text}")
+                return False
+        except Exception as e:
+            print(f"ERROR: {e}")
+            return False
 
 if __name__ == "__main__":
-    test_dashboard()
+    success = asyncio.run(test_dashboard())
+    print(f"\n=== RESULT ===")
+    if success:
+        print("DASHBOARD IS WORKING!")
+    else:
+        print("DASHBOARD NEEDS FIXING")
