@@ -353,6 +353,7 @@ def extract_profile_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             'biography': user_data.get('biography', ''),
             'external_url': user_data.get('external_url'),
             'profile_pic_url': user_data.get('profile_pic_url'),
+            'profile_pic_url_hd': user_data.get('profile_pic_url_hd'),
             'followers_count': followers_count,
             'following_count': following_count,
             'posts_count': posts_count,

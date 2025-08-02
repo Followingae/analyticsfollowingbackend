@@ -3,7 +3,7 @@ FINAL UNIFIED DATABASE MODELS - Complete Instagram Analytics Platform
 Contains ALL tables required for the platform with real Decodo integration
 Includes campaigns, all Decodo datapoints, and proper relationships
 """
-from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, Text, Float, ARRAY, ForeignKey, Date, Index, CheckConstraint
+from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, Text, Float, ARRAY, ForeignKey, Date, Index, CheckConstraint, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -134,24 +134,26 @@ class UserProfileAccess(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
     
-    # Access details
-    granted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
-    access_type = Column(String(50), nullable=False)  # 'search', 'refresh', 'premium', 'campaign'
+    # Access details - matching actual database schema
+    granted_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=True, server_default=text("now() + interval '30 days'"), index=True)
+    created_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     
-    # Usage tracking
-    first_accessed = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    last_accessed = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    access_count = Column(Integer, default=1)
+    # Removed columns that don't exist in actual DB:
+    # - access_type
+    # - first_accessed 
+    # - last_accessed
+    # - access_count
     
     # Relationships
     user = relationship("User", back_populates="user_profile_access")
     profile = relationship("Profile", back_populates="user_access")
     
+    # Constraints and indexes matching actual database
     __table_args__ = (
-        Index('idx_user_profile_access_expires', 'expires_at'),
-        Index('idx_user_profile_access_user_profile', 'user_id', 'profile_id'),
-        Index('idx_user_profile_access_active', 'expires_at', 'user_id'),
+        Index('idx_user_profile_access_user_id', 'user_id'),
+        Index('idx_user_profile_access_profile_id', 'profile_id'),  
+        Index('idx_user_profile_access_expires_at', 'expires_at'),
     )
 
 
@@ -196,6 +198,7 @@ class Profile(Base):
     biography = Column(Text, nullable=True)
     external_url = Column(Text, nullable=True)
     profile_pic_url = Column(Text, nullable=True)
+    profile_pic_url_hd = Column(Text, nullable=True)  # High definition profile picture
     
     # Statistics
     followers_count = Column(BigInteger, nullable=True)

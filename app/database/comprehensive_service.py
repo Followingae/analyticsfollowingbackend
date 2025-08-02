@@ -814,7 +814,7 @@ class ComprehensiveDataService:
     # USER OPERATION FUNCTIONS - CRITICAL FOR SESSION MANAGEMENT
     # ==========================================================================
     
-    async def grant_profile_access(self, db: AsyncSession, user_id: str, profile_id: UUID, access_type: str = 'search') -> bool:
+    async def grant_profile_access(self, db: AsyncSession, user_id: str, profile_id: UUID) -> bool:
         """Grant user 30-day access to a profile - FIXED with robust error handling"""
         try:
             # CRITICAL FIX: Convert Supabase user ID to database user ID
@@ -884,9 +884,8 @@ class ComprehensiveDataService:
                         profile_id=profile_id,
                         granted_at=datetime.now(timezone.utc),
                         expires_at=expires_at,
-                        last_accessed=datetime.now(timezone.utc),
-                        access_type=access_type or 'search',  # Ensure no null values
-                        access_count=1
+                        # Removed columns that don't exist in actual DB:
+                        # - last_accessed, access_type, access_count
                     )
                     db.add(access_record)
                     logger.info(f"Granted new profile access for user {db_user_id} to profile {profile_id}")
@@ -1105,14 +1104,13 @@ class ComprehensiveDataService:
             if access_record:
                 # Update existing access
                 access_record.expires_at = expires_at
-                access_record.access_type = 'search'
+                # access_type removed - column doesn't exist
                 logger.info(f"Updated access for user {user_id} to profile {username}")
             else:
                 # Create new access
                 new_access = UserProfileAccess(
                     user_id=UUID(user_id),
                     profile_id=profile.id,
-                    access_type='search',
                     expires_at=expires_at
                 )
                 db.add(new_access)

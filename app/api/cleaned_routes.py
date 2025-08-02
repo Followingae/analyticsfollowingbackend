@@ -271,7 +271,7 @@ async def refresh_profile_data(
         
         # Grant access and record search
         await comprehensive_service.grant_profile_access(
-            db, current_user.id, profile.id, 'refresh'
+            db, current_user.id, profile.id
         )
         
         await comprehensive_service.record_user_search(
