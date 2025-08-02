@@ -16,7 +16,7 @@ class FrontendHeadersMiddleware(BaseHTTPMiddleware):
         
         # Log incoming requests for debugging
         client_ip = request.client.host if request.client else "unknown"
-        logger.info(f"🌐 {request.method} {request.url.path} from {client_ip}")
+        logger.info(f"GLOBAL: {request.method} {request.url.path} from {client_ip}")
         
         # Log request headers for CORS debugging
         origin = request.headers.get("origin", "none")
@@ -28,7 +28,7 @@ class FrontendHeadersMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
         except Exception as e:
             # Log any unhandled exceptions that cause 500 errors
-            logger.error(f"💥 UNHANDLED EXCEPTION in {request.url.path}: {str(e)}")
+            logger.error(f"EXPLOSION: UNHANDLED EXCEPTION in {request.url.path}: {str(e)}")
             logger.error(f"   Exception type: {type(e).__name__}")
             logger.error(f"   Client: {client_ip}")
             raise
@@ -38,11 +38,11 @@ class FrontendHeadersMiddleware(BaseHTTPMiddleware):
         
         # Log response status with different emojis for errors
         if response.status_code >= 500:
-            logger.error(f"   💥 Response: {response.status_code} in {process_time:.3f}s")
+            logger.error(f"   ERROR Response: {response.status_code} in {process_time:.3f}s")
         elif response.status_code >= 400:
-            logger.warning(f"   ⚠️  Response: {response.status_code} in {process_time:.3f}s")
+            logger.warning(f"   WARNING Response: {response.status_code} in {process_time:.3f}s")
         else:
-            logger.info(f"   ✅ Response: {response.status_code} in {process_time:.3f}s")
+            logger.info(f"   SUCCESS Response: {response.status_code} in {process_time:.3f}s")
         
         # Add custom headers for frontend
         response.headers["X-API-Version"] = "2.0.0"

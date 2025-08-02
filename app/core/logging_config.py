@@ -37,3 +37,7 @@ def setup_logging():
     
     # Enable debug for smartproxy client
     logging.getLogger("app.scrapers.smartproxy_client").setLevel(logging.DEBUG)
+    
+    # CRITICAL: Enable detailed database storage logging
+    logging.getLogger("app.database.robust_storage").setLevel(logging.DEBUG)
+    logging.getLogger("app.database").setLevel(logging.INFO)

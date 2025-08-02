@@ -35,7 +35,7 @@ class PostgresDirectClient:
                 max_size=5,
                 server_settings={"statement_cache_size": "0"}
             )
-            logger.info("✅ Direct PostgreSQL pool initialized")
+            logger.info("SUCCESS: Direct PostgreSQL pool initialized")
             return True
         except Exception as e:
             logger.error(f"Failed to initialize PostgreSQL pool: {e}")

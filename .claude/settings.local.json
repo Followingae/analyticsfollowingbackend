@@ -31,8 +31,15 @@
       "Bash(chmod:*)",
       "Bash(docker build:*)",
       "Bash(rg:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "Bash(git config:*)",
+      "Bash(cp:*)",
+      "Bash(tasklist:*)",
+      "Bash(echo:*)",
+      "Bash(true)",
+      "Bash(del:*)"
     ],
     "deny": []
-  }
+  },
+  "$schema": "https://json.schemastore.org/claude-code-settings.json"
 }

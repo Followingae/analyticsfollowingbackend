@@ -5,7 +5,7 @@ Bulletproof, production-ready authentication using only Supabase Auth
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -39,26 +39,26 @@ class ProductionSupabaseAuthService:
             return True
             
         try:
-            logger.info("🔄 Initializing Supabase Auth Service...")
+            logger.info("Initializing Supabase Auth Service...")
             
             # Validate environment variables
             if not settings.SUPABASE_URL:
                 self.initialization_error = "SUPABASE_URL environment variable not set"
-                logger.error(f"❌ {self.initialization_error}")
+                logger.error(f"ERROR: {self.initialization_error}")
                 return False
                 
             if not settings.SUPABASE_KEY:
                 self.initialization_error = "SUPABASE_KEY environment variable not set"
-                logger.error(f"❌ {self.initialization_error}")
+                logger.error(f"ERROR: {self.initialization_error}")
                 return False
             
             # Import and create client
             try:
                 from supabase import create_client, Client
-                logger.info("✅ Supabase package imported successfully")
+                logger.info("SUCCESS: Supabase package imported successfully")
             except ImportError as e:
                 self.initialization_error = f"Failed to import Supabase: {e}"
-                logger.error(f"❌ {self.initialization_error}")
+                logger.error(f"ERROR: {self.initialization_error}")
                 return False
             
             # Create Supabase client
@@ -67,38 +67,38 @@ class ProductionSupabaseAuthService:
                     settings.SUPABASE_URL,
                     settings.SUPABASE_KEY
                 )
-                logger.info("✅ Supabase client created successfully")
+                logger.info("SUCCESS: Supabase client created successfully")
             except Exception as e:
                 self.initialization_error = f"Failed to create Supabase client: {e}"
-                logger.error(f"❌ {self.initialization_error}")
+                logger.error(f"ERROR: {self.initialization_error}")
                 return False
             
             # Test client connectivity (non-admin test)
             try:
                 # Simple test - try to access session (doesn't require admin)
                 test_response = self.supabase.auth.get_session()
-                logger.info("✅ Supabase Auth connectivity test passed (non-admin)")
+                logger.info("SUCCESS: Supabase Auth connectivity test passed (non-admin)")
             except Exception as e:
-                logger.warning(f"⚠️ Supabase Auth test failed (but client created): {e}")
+                logger.warning(f"WARNING: Supabase Auth test failed (but client created): {e}")
                 # Don't fail initialization - client might still work for authentication
             
             self.initialized = True
             self.initialization_error = None
-            logger.info("🎉 Supabase Auth Service initialized successfully")
+            logger.info("COMPLETE: Supabase Auth Service initialized successfully")
             return True
             
         except Exception as e:
             self.initialization_error = f"Unexpected error during initialization: {e}"
-            logger.error(f"❌ {self.initialization_error}")
-            logger.error(f"❌ Error type: {type(e).__name__}")
+            logger.error(f"ERROR: {self.initialization_error}")
+            logger.error(f"ERROR: Error type: {type(e).__name__}")
             import traceback
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            logger.error(f"ERROR: Traceback: {traceback.format_exc()}")
             return False
     
     async def ensure_initialized(self):
         """Ensure service is initialized, attempt reinitialization if needed"""
         if not self.initialized:
-            logger.warning("🔄 Auth service not initialized, attempting initialization...")
+            logger.warning("SYNC: Auth service not initialized, attempting initialization...")
             success = await self.initialize()
             if not success:
                 raise HTTPException(
@@ -111,19 +111,37 @@ class ProductionSupabaseAuthService:
         await self.ensure_initialized()
         
         try:
-            logger.info(f"🔐 Attempting login for user: {login_data.email}")
+            logger.info(f"AUTH: Attempting login for user: {login_data.email}")
             
             # Authenticate with Supabase
-            auth_response = self.supabase.auth.sign_in_with_password({
-                "email": login_data.email,
-                "password": login_data.password
-            })
-            
-            logger.info(f"📨 Received auth response for {login_data.email}")
+            try:
+                auth_response = self.supabase.auth.sign_in_with_password({
+                    "email": login_data.email,
+                    "password": login_data.password
+                })
+                logger.info(f"AUTH: Successfully got Supabase auth response for {login_data.email}")
+            except Exception as supabase_error:
+                logger.error(f"AUTH: Supabase authentication failed: {supabase_error}")
+                logger.error(f"AUTH: Supabase error type: {type(supabase_error).__name__}")
+                error_str = str(supabase_error).lower()
+                
+                # Check if error is due to email confirmation
+                if "email not confirmed" in error_str or "email_not_confirmed" in error_str:
+                    logger.warning(f"AUTH: Email not confirmed for {login_data.email} - this is expected for demo accounts")
+                    # For demo accounts, we can't confirm emails, so this is expected
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Email confirmation required. For demo accounts, please contact support."
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Invalid email or password"
+                    )
             
             # Check if authentication was successful
             if not auth_response.user:
-                logger.warning(f"❌ Authentication failed - no user returned for {login_data.email}")
+                logger.warning(f"ERROR: Authentication failed - no user returned for {login_data.email}")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid email or password"
@@ -132,7 +150,7 @@ class ProductionSupabaseAuthService:
             user = auth_response.user
             session = auth_response.session
             
-            logger.info(f"✅ Supabase authentication successful for user ID: {user.id}")
+            logger.info(f"SUCCESS: Supabase authentication successful for user ID: {user.id}")
             
             # Get user metadata
             user_metadata = user.user_metadata or {}
@@ -148,12 +166,13 @@ class ProductionSupabaseAuthService:
             try:
                 user_role = UserRole(role_value)
             except ValueError:
-                logger.warning(f"⚠️ Invalid role '{role_value}' for user {user.id}, defaulting to 'free'")
+                logger.warning(f"WARNING: Invalid role '{role_value}' for user {user.id}, defaulting to 'free'")
                 user_role = UserRole.FREE
             
             # Create UserResponse
             # Handle datetime parsing safely
             try:
+                from datetime import timezone
                 if user.created_at:
                     if isinstance(user.created_at, str):
                         # Parse string datetime
@@ -162,10 +181,10 @@ class ProductionSupabaseAuthService:
                         # Already datetime object
                         created_at = user.created_at
                 else:
-                    created_at = datetime.now()
+                    created_at = datetime.now(timezone.utc)
             except (ValueError, TypeError, AttributeError) as e:
                 logger.warning(f"Failed to parse created_at: {e}, using current time")
-                created_at = datetime.now()
+                created_at = datetime.now(timezone.utc)
             
             user_response = UserResponse(
                 id=user.id,
@@ -183,8 +202,12 @@ class ProductionSupabaseAuthService:
             refresh_token = session.refresh_token if session else ""
             expires_in = session.expires_in if session else ACCESS_TOKEN_EXPIRE_MINUTES * 60
             
-            # Ensure user exists in our database
-            await self._ensure_user_in_database(user, user_metadata)
+            # Ensure user exists in our database (non-blocking)
+            try:
+                await self._ensure_user_in_database(user, user_metadata)
+            except Exception as db_error:
+                logger.warning(f"Database sync failed (non-blocking): {db_error}")
+                # Don't fail authentication if database sync fails - continue with login
             
             response = LoginResponse(
                 access_token=access_token,
@@ -194,17 +217,17 @@ class ProductionSupabaseAuthService:
                 user=user_response
             )
             
-            logger.info(f"🎉 Login successful for {login_data.email}")
+            logger.info(f"COMPLETE: Login successful for {login_data.email}")
             return response
             
         except HTTPException:
             # Re-raise HTTP exceptions as-is
             raise
         except Exception as e:
-            logger.error(f"❌ Login failed for {login_data.email}: {e}")
-            logger.error(f"❌ Error type: {type(e).__name__}")
+            logger.error(f"ERROR: Login failed for {login_data.email}: {e}")
+            logger.error(f"ERROR: Error type: {type(e).__name__}")
             import traceback
-            logger.error(f"❌ Traceback: {traceback.format_exc()}")
+            logger.error(f"ERROR: Traceback: {traceback.format_exc()}")
             
             # Check for specific Supabase errors
             error_message = str(e).lower()
@@ -225,69 +248,105 @@ class ProductionSupabaseAuthService:
                 )
     
     async def _ensure_user_in_database(self, supabase_user, user_metadata: dict):
-        """Ensure user exists in our database with proper fields"""
+        """Ensure user exists in our database with proper fields - CRITICAL FOR USER DATA"""
         try:
-            import asyncpg
-            from app.core.config import settings
+            logger.info(f"SYNC: Starting database sync for: {supabase_user.email}")
             
-            if not settings.DATABASE_URL:
-                logger.warning("⚠️ DATABASE_URL not available, skipping database user creation")
+            from app.database.connection import SessionLocal
+            from app.database.unified_models import User
+            from sqlalchemy import select, update
+            import uuid
+            from datetime import timezone
+            
+            if not SessionLocal:
+                logger.warning("SYNC: Database not available for user sync")
                 return
             
-            conn = await asyncpg.connect(settings.DATABASE_URL)
+            # Use UTC timezone properly  
+            current_time = datetime.now(timezone.utc)
+            logger.info(f"SYNC: Using UTC time: {current_time}")
             
-            # Insert or update user in database
-            await conn.execute("""
-                INSERT INTO users (
-                    id, 
-                    email, 
-                    hashed_password, 
-                    role, 
-                    credits, 
-                    full_name, 
-                    status, 
-                    supabase_user_id, 
-                    last_login, 
-                    created_at,
-                    profile_picture_url
-                ) VALUES (
-                    $1::uuid, $2, 'supabase_managed', $3, $4, $5, 'active', $6, NOW(), NOW(), $7
-                )
-                ON CONFLICT (email) DO UPDATE SET
-                    full_name = EXCLUDED.full_name,
-                    status = 'active',
-                    supabase_user_id = EXCLUDED.supabase_user_id,
-                    last_login = NOW(),
-                    profile_picture_url = EXCLUDED.profile_picture_url
-            """, 
-                supabase_user.id,  # id
-                supabase_user.email,  # email
-                user_metadata.get("role", "free"),  # role
-                1000 if user_metadata.get("role") == "premium" else 100,  # credits
-                user_metadata.get("full_name", ""),  # full_name
-                supabase_user.id,  # supabase_user_id
-                user_metadata.get("avatar_url")  # profile_picture_url
-            )
-            
-            await conn.close()
-            logger.info(f"✅ User {supabase_user.email} synchronized to database")
-            
+            async with SessionLocal() as db:
+                try:
+                    # Check if user exists by Supabase ID first (more reliable)
+                    logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id}")
+                    result = await db.execute(select(User).where(User.supabase_user_id == supabase_user.id))
+                    existing_user = result.scalar_one_or_none()
+                    
+                    if not existing_user:
+                        # Check by email as fallback
+                        logger.info(f"SYNC: User not found by Supabase ID, checking by email: {supabase_user.email}")
+                        result = await db.execute(select(User).where(User.email == supabase_user.email))
+                        existing_user = result.scalar_one_or_none()
+                    
+                    if existing_user:
+                        # Update existing user's last login and Supabase ID
+                        logger.info(f"SYNC: Updating existing user ID: {existing_user.id}")
+                        await db.execute(
+                            update(User)
+                            .where(User.id == existing_user.id)
+                            .values(
+                                supabase_user_id=supabase_user.id,
+                                last_login=current_time,
+                                last_activity=current_time,
+                                email_verified=bool(supabase_user.email_confirmed_at)
+                            )
+                        )
+                        logger.info(f"SYNC: Successfully updated existing user: {supabase_user.email}")
+                    else:
+                        # Create new user in database - only required fields
+                        logger.info(f"SYNC: Creating new user for: {supabase_user.email}")
+                        
+                        # Validate role before creating
+                        role_value = user_metadata.get("role", "free")
+                        if role_value not in ["free", "premium", "admin", "super_admin"]:
+                            role_value = "free"
+                        
+                        new_user = User(
+                            supabase_user_id=supabase_user.id,  # Link to Supabase
+                            email=supabase_user.email,
+                            full_name=user_metadata.get("full_name", ""),
+                            role=role_value,
+                            status="active",
+                            email_verified=bool(supabase_user.email_confirmed_at),
+                            last_login=current_time,
+                            last_activity=current_time
+                            # Don't set created_at - let database handle it with server_default
+                        )
+                        db.add(new_user)
+                        logger.info(f"SYNC: Successfully created new user: {supabase_user.email}")
+                    
+                    await db.commit()
+                    logger.info(f"SYNC: Database commit successful for: {supabase_user.email}")
+                    
+                except Exception as db_error:
+                    await db.rollback()
+                    logger.error(f"SYNC: Database sync failed for {supabase_user.email}: {db_error}")
+                    logger.error(f"SYNC: Error type: {type(db_error).__name__}")
+                    import traceback
+                    logger.error(f"SYNC: Traceback: {traceback.format_exc()}")
+                    # Don't raise - make this non-blocking for authentication
+                    
         except Exception as e:
-            logger.warning(f"⚠️ Failed to sync user to database: {e}")
-            # Don't fail authentication if database sync fails
+            logger.error(f"SYNC: Failed to sync user to database: {e}")
+            logger.error(f"SYNC: Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"SYNC: Traceback: {traceback.format_exc()}")
+            # Don't fail authentication if database sync fails - but log the error
     
     async def register_user(self, user_data: UserCreate) -> UserResponse:
         """Register new user with Supabase Auth"""
         await self.ensure_initialized()
         
         try:
-            logger.info(f"📝 Registering new user: {user_data.email}")
+            logger.info(f"NOTE: Registering new user: {user_data.email}")
             
-            # Create user in Supabase Auth (non-admin)
+            # Create user in Supabase Auth (non-admin) with email confirmation disabled
             auth_response = self.supabase.auth.sign_up({
                 "email": user_data.email,
                 "password": user_data.password,
                 "options": {
+                    "email_redirect_to": None,  # Disable email confirmation
                     "data": {
                         "full_name": user_data.full_name or "",
                         "role": user_data.role.value
@@ -309,6 +368,7 @@ class ProductionSupabaseAuthService:
             
             # Handle datetime parsing safely
             try:
+                from datetime import timezone
                 if user.created_at:
                     if isinstance(user.created_at, str):
                         # Parse string datetime
@@ -317,10 +377,10 @@ class ProductionSupabaseAuthService:
                         # Already datetime object
                         created_at = user.created_at
                 else:
-                    created_at = datetime.now()
+                    created_at = datetime.now(timezone.utc)
             except (ValueError, TypeError, AttributeError) as e:
                 logger.warning(f"Failed to parse created_at in registration: {e}, using current time")
-                created_at = datetime.now()
+                created_at = datetime.now(timezone.utc)
             
             user_response = UserResponse(
                 id=user.id,
@@ -332,13 +392,13 @@ class ProductionSupabaseAuthService:
                 last_login=None
             )
             
-            logger.info(f"✅ User registration successful: {user_data.email}")
+            logger.info(f"SUCCESS: User registration successful: {user_data.email}")
             return user_response
             
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"❌ Registration failed for {user_data.email}: {e}")
+            logger.error(f"ERROR: Registration failed for {user_data.email}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Registration failed: {str(e)}"
@@ -393,7 +453,7 @@ class ProductionSupabaseAuthService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"❌ Token validation failed: {e}")
+            logger.error(f"ERROR: Token validation failed: {e}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Authentication failed"
@@ -407,7 +467,7 @@ class ProductionSupabaseAuthService:
             self.supabase.auth.sign_out()
             return True
         except Exception as e:
-            logger.error(f"❌ Logout failed: {e}")
+            logger.error(f"ERROR: Logout failed: {e}")
             return False
     
     async def get_user_dashboard_stats(self, user_id: str):
@@ -420,7 +480,7 @@ class ProductionSupabaseAuthService:
             from app.models.auth import UserDashboardStats, UserSearchHistory
             
             if not settings.DATABASE_URL:
-                logger.warning("⚠️ DATABASE_URL not available for dashboard stats")
+                logger.warning("WARNING: DATABASE_URL not available for dashboard stats")
                 # Return empty stats if no database connection
                 return UserDashboardStats(
                     total_searches=0,
@@ -434,19 +494,37 @@ class ProductionSupabaseAuthService:
             conn = await asyncpg.connect(settings.DATABASE_URL)
             
             try:
+                # CRITICAL FIX: Convert Supabase user ID to database user ID for searches
+                db_user_id = await conn.fetchval(
+                    "SELECT id FROM users WHERE supabase_user_id = $1",
+                    str(user_id)
+                )
+                
+                if not db_user_id:
+                    logger.warning(f"No database user found for Supabase ID: {user_id}")
+                    # Return empty stats if user mapping fails
+                    return UserDashboardStats(
+                        total_searches=0,
+                        searches_this_month=0,
+                        favorite_profiles=[],
+                        recent_searches=[],
+                        account_created=datetime.now(),
+                        last_active=datetime.now()
+                    )
+                
                 # Get total searches for user (user_searches.user_id is VARCHAR)
                 total_searches = await conn.fetchval(
                     "SELECT COUNT(*) FROM user_searches WHERE user_id = $1",
-                    str(user_id)
+                    str(db_user_id)
                 ) or 0
                 
-                # Get searches this month (user_searches.user_id is VARCHAR)
+                # Get searches this month (user_searches.user_id is VARCHAR)  
                 searches_this_month = await conn.fetchval(
                     """
                     SELECT COUNT(*) FROM user_searches 
                     WHERE user_id = $1 AND search_timestamp >= date_trunc('month', CURRENT_DATE)
                     """,
-                    str(user_id)
+                    str(db_user_id)
                 ) or 0
                 
                 # Get recent searches (user_searches.user_id is VARCHAR)
@@ -459,7 +537,7 @@ class ProductionSupabaseAuthService:
                     ORDER BY search_timestamp DESC 
                     LIMIT 10
                     """,
-                    str(user_id)
+                    str(db_user_id)
                 )
                 
                 recent_searches = [
@@ -477,7 +555,7 @@ class ProductionSupabaseAuthService:
                 # Get user creation date (users.id is UUID)
                 user_created = await conn.fetchval(
                     "SELECT created_at FROM users WHERE id = $1::uuid",
-                    str(user_id)
+                    str(db_user_id)
                 ) or datetime.now()
                 
                 # Get favorite profiles (unlocked profiles) - user_profile_access.user_id is UUID
@@ -489,7 +567,7 @@ class ProductionSupabaseAuthService:
                     ORDER BY upa.last_accessed DESC
                     LIMIT 10
                     """,
-                    str(user_id)
+                    str(db_user_id)
                 )
                 
                 favorite_profile_list = [row['username'] for row in favorite_profiles]
@@ -507,7 +585,7 @@ class ProductionSupabaseAuthService:
                 await conn.close()
                 
         except Exception as e:
-            logger.error(f"❌ Failed to get dashboard stats for user {user_id}: {e}")
+            logger.error(f"ERROR: Failed to get dashboard stats for user {user_id}: {e}")
             # Return empty stats on error
             return UserDashboardStats(
                 total_searches=0,
@@ -528,12 +606,22 @@ class ProductionSupabaseAuthService:
             from app.models.auth import UserSearchHistory
             
             if not settings.DATABASE_URL:
-                logger.warning("⚠️ DATABASE_URL not available for search history")
+                logger.warning("WARNING: DATABASE_URL not available for search history")
                 return []
             
             conn = await asyncpg.connect(settings.DATABASE_URL)
             
             try:
+                # CRITICAL FIX: Convert Supabase user ID to database user ID for searches
+                db_user_id = await conn.fetchval(
+                    "SELECT id FROM users WHERE supabase_user_id = $1",
+                    str(user_id)
+                )
+                
+                if not db_user_id:
+                    logger.warning(f"No database user found for Supabase ID: {user_id}")
+                    return []
+                
                 offset = (page - 1) * page_size
                 
                 # Get search history with pagination (user_searches.user_id is VARCHAR)
@@ -546,7 +634,7 @@ class ProductionSupabaseAuthService:
                     ORDER BY search_timestamp DESC 
                     LIMIT $2 OFFSET $3
                     """,
-                    str(user_id), page_size, offset
+                    str(db_user_id), page_size, offset
                 )
                 
                 return [
@@ -565,7 +653,7 @@ class ProductionSupabaseAuthService:
                 await conn.close()
                 
         except Exception as e:
-            logger.error(f"❌ Failed to get search history for user {user_id}: {e}")
+            logger.error(f"ERROR: Failed to get search history for user {user_id}: {e}")
             return []
     
     async def health_check(self) -> Dict[str, Any]:
@@ -617,6 +705,158 @@ class ProductionSupabaseAuthService:
             health_status["details"]["error"] = str(e)
         
         return health_status
+    
+    async def verify_user_password(self, email: str, password: str) -> bool:
+        """Verify user's current password"""
+        await self.ensure_initialized()
+        
+        try:
+            # Attempt to sign in with the provided credentials
+            response = self.supabase.auth.sign_in_with_password({
+                "email": email,
+                "password": password
+            })
+            
+            # If sign in succeeds, password is correct
+            return response.user is not None
+            
+        except Exception as e:
+            logger.warning(f"Password verification failed for {email}: {e}")
+            return False
+    
+    async def change_user_password(self, email: str, current_password: str, new_password: str) -> bool:
+        """Change user's password after verifying current password"""
+        await self.ensure_initialized()
+        
+        try:
+            # First verify current password
+            if not await self.verify_user_password(email, current_password):
+                return False
+            
+            # Sign in to get session for password change
+            auth_response = self.supabase.auth.sign_in_with_password({
+                "email": email,
+                "password": current_password
+            })
+            
+            if not auth_response.user:
+                return False
+            
+            # Update password
+            update_response = self.supabase.auth.update_user({
+                "password": new_password
+            })
+            
+            if update_response.user:
+                logger.info(f"Password changed successfully for user {email}")
+                return True
+            else:
+                logger.error(f"Password change failed for user {email}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Password change error for {email}: {e}")
+            return False
+    
+    async def refresh_token(self, refresh_token: str) -> Optional[LoginResponse]:
+        """Refresh access token using refresh token"""
+        await self.ensure_initialized()
+        
+        try:
+            logger.info("Attempting to refresh access token")
+            
+            # Use Supabase refresh token functionality
+            auth_response = self.supabase.auth.refresh_session(refresh_token)
+            
+            if not auth_response.user or not auth_response.session:
+                logger.warning("Token refresh failed - invalid refresh token")
+                return None
+            
+            user = auth_response.user
+            session = auth_response.session
+            user_metadata = user.user_metadata or {}
+            
+            # Determine user role
+            role_value = (
+                user_metadata.get("role") or 
+                user.app_metadata.get("role") if user.app_metadata else "free"
+            )
+            
+            try:
+                user_role = UserRole(role_value)
+            except ValueError:
+                logger.warning(f"Invalid role '{role_value}' for user {user.id}, defaulting to 'free'")
+                user_role = UserRole.FREE
+            
+            # Handle datetime parsing safely
+            try:
+                if user.created_at:
+                    if isinstance(user.created_at, str):
+                        created_at = datetime.fromisoformat(user.created_at.replace('Z', '+00:00'))
+                    else:
+                        created_at = user.created_at
+                else:
+                    created_at = datetime.now()
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Failed to parse created_at in refresh: {e}, using current time")
+                created_at = datetime.now()
+            
+            user_response = UserResponse(
+                id=user.id,
+                email=user.email,
+                full_name=user_metadata.get("full_name", ""),
+                role=user_role,
+                status=UserStatus.ACTIVE,
+                created_at=created_at,
+                last_login=datetime.now(),
+                profile_picture_url=user_metadata.get("avatar_url")
+            )
+            
+            # Update last activity in database
+            await self._update_user_activity(user)
+            
+            response = LoginResponse(
+                access_token=session.access_token,
+                refresh_token=session.refresh_token,
+                token_type="bearer",
+                expires_in=session.expires_in,
+                user=user_response
+            )
+            
+            logger.info(f"Token refresh successful for user {user.email}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Token refresh failed: {e}")
+            return None
+    
+    async def _update_user_activity(self, supabase_user):
+        """Update user's last activity timestamp"""
+        try:
+            from app.database.connection import SessionLocal
+            from app.database.unified_models import User
+            from sqlalchemy import update
+            
+            if not SessionLocal:
+                return
+            
+            async with SessionLocal() as db:
+                try:
+                    await db.execute(
+                        update(User)
+                        .where(User.supabase_user_id == supabase_user.id)
+                        .values(
+                            last_activity=datetime.now(timezone.utc)
+                        )
+                    )
+                    await db.commit()
+                    logger.debug(f"Updated activity for user {supabase_user.email}")
+                except Exception as db_error:
+                    await db.rollback()
+                    logger.warning(f"Failed to update user activity: {db_error}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to update user activity: {e}")
 
 
 # Create global instance

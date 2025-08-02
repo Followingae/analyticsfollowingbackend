@@ -63,6 +63,18 @@ class UserResponse(UserBase):
     created_at: datetime
     last_login: Optional[datetime] = None
     profile_picture_url: Optional[str] = None
+    
+    # Profile information fields
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    company: Optional[str] = None
+    job_title: Optional[str] = None
+    phone_number: Optional[str] = None
+    bio: Optional[str] = None
+    
+    # Preferences
+    timezone: Optional[str] = "UTC"
+    language: Optional[str] = "en"
 
 
 class LoginRequest(BaseModel):

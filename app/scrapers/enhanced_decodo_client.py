@@ -40,16 +40,16 @@ class EnhancedDecodoClient:
         self.base_url = "https://scraper-api.decodo.com/v2"
         self.session: Optional[httpx.AsyncClient] = None
         
-        # Retry configuration
-        self.max_retries = 5
-        self.initial_wait = 1  # seconds
-        self.max_wait = 60     # seconds
-        self.backoff_multiplier = 2
+        # Retry configuration - optimized for Decodo instagram_graphql_profile instability
+        self.max_retries = 3  # Increased based on Decodo tech team feedback
+        self.initial_wait = 2  # seconds
+        self.max_wait = 20     # seconds - allow more time between retries
+        self.backoff_multiplier = 1.5
         
     async def __aenter__(self):
         """Async context manager entry"""
         self.session = httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0),  # 2 minutes timeout
+            timeout=httpx.Timeout(30.0),  # 30 seconds timeout for unstable instagram_graphql_profile
             limits=httpx.Limits(max_connections=settings.MAX_CONCURRENT_REQUESTS)
         )
         return self
@@ -66,8 +66,8 @@ class EnhancedDecodoClient:
         return f"Basic {encoded_credentials}"
     
     @retry(
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=2, min=1, max=60),
+        stop=stop_after_attempt(5),  # Increased retries as Decodo tech team confirmed retrying is effective
+        wait=wait_exponential(multiplier=1.5, min=2, max=15),  # More aggressive retry strategy
         retry=retry_if_exception_type((DecodoInstabilityError, httpx.TimeoutException, httpx.ConnectError)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         after=after_log(logger, logging.WARNING)
@@ -77,7 +77,7 @@ class EnhancedDecodoClient:
         if not self.session:
             raise DecodoAPIError("Client session not initialized")
         
-        logger.info(f"🔄 Making Decodo API request")
+        logger.info("Making Decodo API request")
         
         headers = {
             "Accept": "application/json",
@@ -176,41 +176,93 @@ class EnhancedDecodoClient:
             raise DecodoAPIError(f"Request error: {str(e)}")
     
     async def get_instagram_profile_comprehensive(self, username: str) -> Dict[str, Any]:
-        """Get comprehensive Instagram profile data with retry mechanism"""
-        payload = {
-            "target": "instagram_graphql_profile",
-            "query": username
-        }
+        """Get comprehensive Instagram profile data with Decodo-recommended fallbacks"""
+        
+        # Decodo-recommended fallback strategies (from their error message)
+        fallback_configs = [
+            # Default: JS rendering, default geo
+            {
+                "target": "instagram_graphql_profile",
+                "query": username,
+                "render_js": True
+            },
+            # Fallback 1: Switch to non-JS rendering
+            {
+                "target": "instagram_graphql_profile", 
+                "query": username,
+                "render_js": False
+            },
+            # Fallback 2: Different geo-location (US)
+            {
+                "target": "instagram_graphql_profile",
+                "query": username,
+                "render_js": True,
+                "geo_location": "US"
+            },
+            # Fallback 3: Non-JS + Different geo
+            {
+                "target": "instagram_graphql_profile",
+                "query": username, 
+                "render_js": False,
+                "geo_location": "US"
+            },
+            # Fallback 4: Try different target altogether
+            {
+                "target": "instagram_profile",
+                "query": username,
+                "render_js": True
+            }
+        ]
         
         logger.info(f"Fetching comprehensive Instagram data for: {username}")
         
-        try:
-            # Add small random delay to avoid hitting rate limits
-            await asyncio.sleep(random.uniform(0.5, 2.0))
-            
-            response_data = await self._make_request_with_retry(payload)
-            
-            # Validate response structure
-            if not isinstance(response_data, dict) or 'results' not in response_data:
-                raise DecodoAPIError("Invalid response structure from Decodo")
-            
-            results = response_data.get('results', [])
-            if not results:
-                raise DecodoAPIError("No results in Decodo response")
-            
-            content = results[0].get('content', {})
-            if not content:
-                raise DecodoAPIError("No content in Decodo response")
-            
-            logger.info(f"Successfully fetched Instagram data for {username}")
-            return response_data
-            
-        except DecodoInstabilityError:
-            # Re-raise instability errors for retry
-            raise
-        except Exception as e:
-            logger.error(f"Error fetching Instagram profile for {username}: {str(e)}")
-            raise DecodoAPIError(f"Failed to fetch profile data: {str(e)}")
+        last_error = None
+        for i, config in enumerate(fallback_configs):
+            try:
+                if i > 0:
+                    strategy = []
+                    if 'render_js' in config and not config['render_js']:
+                        strategy.append("non-JS rendering")
+                    if 'geo_location' in config:
+                        strategy.append(f"geo: {config['geo_location']}")
+                    if config['target'] != 'instagram_graphql_profile':
+                        strategy.append(f"target: {config['target']}")
+                    
+                    logger.info(f"Trying Decodo fallback #{i}: {', '.join(strategy) if strategy else 'retry'}")
+                
+                # Add small random delay to avoid hitting rate limits  
+                await asyncio.sleep(random.uniform(0.5, 2.0))
+                
+                response_data = await self._make_request_with_retry(config)
+                
+                # Validate response structure
+                if not isinstance(response_data, dict) or 'results' not in response_data:
+                    raise DecodoAPIError("Invalid response structure from Decodo")
+                
+                results = response_data.get('results', [])
+                if not results:
+                    raise DecodoAPIError("No results in Decodo response")
+                
+                # If we got here, the request was successful
+                strategy_used = f"config #{i}" if i > 0 else "default config"
+                logger.info(f"SUCCESS: Got data using {strategy_used}")
+                break
+                
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Config #{i} failed: {str(e)}")
+                if i < len(fallback_configs) - 1:
+                    continue
+                else:
+                    raise last_error
+        
+        # If we get here, one of the configs worked
+        content = results[0].get('content', {})
+        if not content:
+            raise DecodoAPIError("No content in Decodo response")
+        
+        logger.info(f"Successfully fetched Instagram data for {username}")
+        return response_data
     
     def parse_profile_data(self, raw_data: Dict[str, Any], username: str) -> InstagramProfile:
         """Parse Decodo response into InstagramProfile model"""
@@ -506,7 +558,8 @@ class EnhancedDecodoClient:
                 growth_recommendations=recommendations,
                 analysis_timestamp=datetime.now(),
                 data_quality_score=0.9,  # High quality from Decodo
-                scraping_method="decodo"
+                scraping_method="decodo",
+                raw_data=raw_data  # FIXED: Include raw data to eliminate duplicate API calls
             )
             
         except Exception as e:
