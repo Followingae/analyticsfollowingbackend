@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "permissions": {
     "allow": [
       "Bash(taskkill:*)",
@@ -37,9 +38,9 @@
       "Bash(tasklist:*)",
       "Bash(echo:*)",
       "Bash(true)",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "Bash(touch:*)"
     ],
     "deny": []
-  },
-  "$schema": "https://json.schemastore.org/claude-code-settings.json"
+  }
 }
