@@ -23,6 +23,7 @@ from app.middleware.auth_middleware import (
 )
 from app.database.connection import get_db
 from app.database.unified_models import User
+from app.database.comprehensive_service import comprehensive_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -402,6 +403,38 @@ async def get_user_dashboard(current_user: UserInDB = Depends(get_current_active
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to load dashboard data"
+        )
+
+
+@router.get("/unlocked-profiles")
+async def get_unlocked_profiles(
+    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
+    page_size: int = Query(20, ge=1, le=50, description="Results per page (max 50)"),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all profiles the user has unlocked/has access to
+    
+    Returns paginated list of all profiles the user can view.
+    This is used for the creators page to show all unlocked profiles.
+    Includes profile data, access timestamps, and expiry information.
+    """
+    try:
+        # Limit page size to prevent abuse
+        page_size = min(page_size, 50)
+        
+        unlocked_profiles = await comprehensive_service.get_user_unlocked_profiles(
+            db, current_user.id, page, page_size
+        )
+        
+        return JSONResponse(content=unlocked_profiles)
+        
+    except Exception as e:
+        logger.error(f"Failed to get unlocked profiles for user {current_user.id}: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail="Failed to retrieve unlocked profiles"
         )
 
 

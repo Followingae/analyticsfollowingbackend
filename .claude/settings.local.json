@@ -39,7 +39,8 @@
       "Bash(echo:*)",
       "Bash(true)",
       "Bash(del:*)",
-      "Bash(touch:*)"
+      "Bash(touch:*)",
+      "Bash(cmd //c:*)"
     ],
     "deny": []
   }

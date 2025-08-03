@@ -77,8 +77,6 @@ class EnhancedDecodoClient:
         if not self.session:
             raise DecodoAPIError("Client session not initialized")
         
-        logger.info("Making Decodo API request")
-        
         headers = {
             "Accept": "application/json",
             "Authorization": self._get_auth_header(),
@@ -86,9 +84,7 @@ class EnhancedDecodoClient:
             "User-Agent": "Analytics-Backend/1.0"
         }
         
-        logger.info(f"Making Decodo request (attempt): {payload}")
-        logger.info(f"Request headers: {headers}")
-        logger.info(f"Making POST to: {self.base_url}/scrape")
+        logger.info(f"Making Decodo request: {payload.get('target', 'unknown')} for {payload.get('query', 'unknown')}")
         
         try:
             response = await self.session.post(
@@ -97,15 +93,14 @@ class EnhancedDecodoClient:
                 headers=headers
             )
             
-            logger.info(f"Decodo response status: {response.status_code}")
-            logger.info(f"Response headers: {dict(response.headers)}")
-            
-            # Log full response for debugging
-            try:
-                response_text = response.text
-                logger.info(f"Full response body: {response_text[:2000]}...")  # First 2000 chars
-            except Exception as e:
-                logger.info(f"Could not log response body: {e}")
+            # Only log response details for errors
+            if response.status_code != 200:
+                logger.info(f"Decodo response status: {response.status_code}")
+                try:
+                    response_text = response.text
+                    logger.info(f"Response body: {response_text[:500]}...")  # First 500 chars for errors
+                except Exception:
+                    pass
             
             # Handle different response statuses
             if response.status_code == 401:
@@ -126,7 +121,6 @@ class EnhancedDecodoClient:
             # Parse JSON response
             try:
                 response_data = response.json()
-                logger.debug(f"Response data keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
                 
                 # Check for API-level errors in the response
                 if isinstance(response_data, dict):
@@ -140,14 +134,13 @@ class EnhancedDecodoClient:
                             logger.warning(f"Decodo returned status response, will retry: {status} - {message}")
                             raise DecodoInstabilityError(f"Decodo processing status: {status} - {message}")
                     
-                    # Check for error messages that indicate instability
+                    # Check for error messages that indicate configuration issues
                     if 'results' not in response_data or not response_data.get('results'):
                         # Check for specific error messages
                         error_msg = response_data.get('message', '')
                         status = response_data.get('status', '')
                         
                         if 'failed' in error_msg.lower() or 'error' in status.lower():
-                            logger.warning(f"Decodo API returned error, will retry: {error_msg}")
                             raise DecodoInstabilityError(f"Decodo API error: {error_msg}")
                     
                     # Check if results contain actual data
@@ -155,10 +148,8 @@ class EnhancedDecodoClient:
                     if results and len(results) > 0:
                         content = results[0].get('content', {})
                         if not content or 'data' not in content:
-                            logger.warning("Empty content received, will retry...")
                             raise DecodoInstabilityError("Empty content received from Decodo")
                 
-                logger.info(f"Successfully parsed response data with keys: {list(response_data.keys()) if isinstance(response_data, dict) else 'Not a dict'}")
                 return response_data
                 
             except json.JSONDecodeError as e:
@@ -166,10 +157,8 @@ class EnhancedDecodoClient:
                 raise DecodoAPIError(f"Invalid JSON response: {str(e)}")
                 
         except httpx.TimeoutException:
-            logger.warning("Request timeout, will retry...")
             raise DecodoInstabilityError("Request timeout")
         except httpx.ConnectError as e:
-            logger.warning(f"Connection error, will retry: {str(e)}")
             raise DecodoInstabilityError(f"Connection error: {str(e)}")
         except httpx.RequestError as e:
             logger.error(f"HTTP request error: {str(e)}")
@@ -220,15 +209,7 @@ class EnhancedDecodoClient:
         for i, config in enumerate(fallback_configs):
             try:
                 if i > 0:
-                    strategy = []
-                    if 'render_js' in config and not config['render_js']:
-                        strategy.append("non-JS rendering")
-                    if 'geo_location' in config:
-                        strategy.append(f"geo: {config['geo_location']}")
-                    if config['target'] != 'instagram_graphql_profile':
-                        strategy.append(f"target: {config['target']}")
-                    
-                    logger.info(f"Trying Decodo fallback #{i}: {', '.join(strategy) if strategy else 'retry'}")
+                    logger.info(f"Trying fallback config #{i}")
                 
                 # Add small random delay to avoid hitting rate limits  
                 await asyncio.sleep(random.uniform(0.5, 2.0))
@@ -244,13 +225,12 @@ class EnhancedDecodoClient:
                     raise DecodoAPIError("No results in Decodo response")
                 
                 # If we got here, the request was successful
-                strategy_used = f"config #{i}" if i > 0 else "default config"
-                logger.info(f"SUCCESS: Got data using {strategy_used}")
+                if i > 0:
+                    logger.info(f"Success using fallback config #{i}")
                 break
                 
             except Exception as e:
                 last_error = e
-                logger.warning(f"Config #{i} failed: {str(e)}")
                 if i < len(fallback_configs) - 1:
                     continue
                 else:
@@ -267,22 +247,15 @@ class EnhancedDecodoClient:
     def parse_profile_data(self, raw_data: Dict[str, Any], username: str) -> InstagramProfile:
         """Parse Decodo response into InstagramProfile model"""
         try:
-            logger.debug(f"Raw data structure: {list(raw_data.keys()) if isinstance(raw_data, dict) else 'Not a dict'}")
-            
             # Navigate to user data
             results = raw_data.get('results', [])
             if not results:
-                logger.error(f"No results in response for {username}. Full response: {raw_data}")
+                logger.error(f"No results in response for {username}")
                 raise DecodoAPIError("No results in response")
             
             content = results[0].get('content', {})
-            logger.debug(f"Content keys: {list(content.keys()) if isinstance(content, dict) else 'No content'}")
-            
             data = content.get('data', {})
-            logger.debug(f"Data keys: {list(data.keys()) if isinstance(data, dict) else 'No data'}")
-            
             user_data = data.get('user', {})
-            logger.debug(f"User data keys: {list(user_data.keys()) if isinstance(user_data, dict) else 'No user data'}")
             
             if not user_data:
                 logger.error(f"No user data found in response for {username}")
@@ -500,15 +473,11 @@ class EnhancedDecodoClient:
             audience_insights = self._extract_audience_insights(raw_data)
             
             # Generate detailed engagement metrics
-            logger.info(f"Profile engagement_rate for {username}: {profile.engagement_rate}")
-            
             like_rate = round(profile.engagement_rate * 0.8, 2)
             comment_rate = round(profile.engagement_rate * 0.15, 2)
             save_rate = round(profile.engagement_rate * 0.03, 2)
             share_rate = round(profile.engagement_rate * 0.02, 2)
             reach_rate = min(50.0, profile.followers / 1000)
-            
-            logger.info(f"Calculated engagement metrics - Like: {like_rate}, Comment: {comment_rate}, Save: {save_rate}, Share: {share_rate}, Reach: {reach_rate}")
             
             engagement_metrics = EngagementMetrics(
                 like_rate=like_rate,
@@ -523,8 +492,6 @@ class EnhancedDecodoClient:
             market_position = self._get_market_position(profile)
             growth_opportunities = self._get_growth_opportunities(profile)
             
-            logger.info(f"Competitor analysis - Score: {competitive_score}, Position: {market_position}, Opportunities: {growth_opportunities}")
-            
             competitor_analysis = CompetitorAnalysis(
                 similar_accounts=[],  # Would need niche analysis
                 competitive_score=competitive_score,
@@ -535,8 +502,6 @@ class EnhancedDecodoClient:
             # Generate content performance
             top_content_types = ["Photos", "Carousel", "Video"] if profile.engagement_rate > 2.0 else ["Video", "Photos", "Carousel"]
             posting_frequency = self._get_posting_frequency(profile)
-            
-            logger.info(f"Content performance - Top types: {top_content_types}, Frequency: {posting_frequency}")
             
             content_performance = ContentPerformance(
                 top_performing_content_types=top_content_types,

@@ -44,6 +44,7 @@ class ComprehensiveDataService:
                     settings.DATABASE_URL,
                     min_size=2,
                     max_size=10,
+                    command_timeout=30,  # 30 second command timeout
                     server_settings={"statement_cache_size": "100"}
                 )
                 logger.info("Comprehensive service connection pool initialized successfully")
@@ -51,6 +52,109 @@ class ComprehensiveDataService:
                 logger.warning("Database URL not configured for comprehensive service")
         except Exception as e:
             logger.error(f"Failed to initialize connection pool: {e}")
+    
+    async def check_db_health(self, db: AsyncSession) -> bool:
+        """Check if database connection is healthy"""
+        try:
+            # Simple health check query with timeout
+            result = await asyncio.wait_for(
+                db.execute(text("SELECT 1")), 
+                timeout=5.0
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Database health check failed: {e}")
+            return False
+    
+    async def retry_db_operation(self, operation, db: AsyncSession, max_retries: int = 2):
+        """Retry database operations with health checks"""
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    # Check health before retry
+                    if not await self.check_db_health(db):
+                        logger.warning(f"Database unhealthy on retry attempt {attempt}")
+                        # Try to recover
+                        try:
+                            await db.rollback()
+                        except:
+                            pass
+                
+                return await operation()
+                
+            except Exception as e:
+                if attempt == max_retries:
+                    logger.error(f"Database operation failed after {max_retries + 1} attempts: {e}")
+                    raise
+                else:
+                    logger.warning(f"Database operation failed on attempt {attempt + 1}, retrying: {e}")
+                    await asyncio.sleep(0.5 * (attempt + 1))  # Exponential backoff
+
+    # ==========================================================================
+    # PROFILE DATA DELETION - FOR COMPLETE REFRESH
+    # ==========================================================================
+    
+    async def delete_complete_profile_data(self, db: AsyncSession, username: str):
+        """COMPLETELY DELETE all data for a profile (for force refresh)"""
+        logger.info(f"DELETION: Starting complete data deletion for {username}")
+        
+        try:
+            # Get profile to delete
+            profile = await self.get_profile_by_username(db, username)
+            if not profile:
+                logger.info(f"No profile found for {username}, nothing to delete")
+                return
+            
+            profile_id = profile.id
+            logger.info(f"Found profile {username} with ID {profile_id}, deleting all related data")
+            
+            # Delete in proper order to avoid foreign key constraints
+            
+            # 1. Delete campaign profile associations first
+            logger.info("Deleting campaign profile associations...")
+            await db.execute(delete(CampaignProfile).where(CampaignProfile.profile_id == profile_id))
+            
+            # 2. Delete campaign posts (via subquery to find posts belonging to this profile)
+            logger.info("Deleting campaign posts for this profile...")
+            subquery = select(Post.id).where(Post.profile_id == profile_id)
+            await db.execute(delete(CampaignPost).where(CampaignPost.post_id.in_(subquery)))
+            
+            # 3. Delete analytics and metadata
+            logger.info("Deleting analytics and metadata...")
+            await db.execute(delete(AudienceDemographics).where(AudienceDemographics.profile_id == profile_id))
+            await db.execute(delete(CreatorMetadata).where(CreatorMetadata.profile_id == profile_id))
+            
+            # Delete comment sentiment for this profile's posts
+            logger.info("Deleting comment sentiment data...")
+            posts_subquery = select(Post.id).where(Post.profile_id == profile_id)
+            await db.execute(delete(CommentSentiment).where(CommentSentiment.post_id.in_(posts_subquery)))
+            
+            # 4. Delete related profiles and mentions
+            logger.info("Deleting related profiles and mentions...")
+            await db.execute(delete(RelatedProfile).where(RelatedProfile.profile_id == profile_id))
+            await db.execute(delete(Mention).where(Mention.profile_id == profile_id))
+            
+            # 5. Delete user access records (but keep user searches for history)
+            logger.info("Deleting user access records...")
+            await db.execute(delete(UserProfileAccess).where(UserProfileAccess.profile_id == profile_id))
+            await db.execute(delete(UserFavorite).where(UserFavorite.profile_id == profile_id))
+            
+            # 6. Delete all posts (this should cascade to remaining associations)
+            logger.info("Deleting all posts...")
+            await db.execute(delete(Post).where(Post.profile_id == profile_id))
+            
+            # 7. Finally delete the profile itself
+            logger.info("Deleting profile...")
+            await db.execute(delete(Profile).where(Profile.id == profile_id))
+            
+            # Commit all deletions
+            await db.commit()
+            logger.info(f"SUCCESS: Completely deleted all data for {username}")
+            
+        except Exception as e:
+            logger.error(f"ERROR: Failed to delete profile data for {username}: {e}")
+            await db.rollback()
+            raise ValueError(f"Failed to delete profile data: {e}")
 
     # ==========================================================================
     # PROFILE DATA STORAGE - COMPREHENSIVE DECODO MAPPING
@@ -1100,9 +1204,137 @@ class ComprehensiveDataService:
             logger.error(f"Error mapping user IDs: {str(e)}")
             return None
     
+    async def get_user_unlocked_profiles(self, db: AsyncSession, user_id: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
+        """Get all profiles that user has access to (for creators page)"""
+        try:
+            from datetime import datetime, timezone
+            from uuid import UUID
+            
+            logger.info(f"Getting unlocked profiles for user {user_id}, page {page}")
+            
+            # Convert string user_id to UUID (Supabase auth ID is already a UUID string)
+            try:
+                user_uuid = UUID(user_id)
+            except (ValueError, TypeError) as e:
+                logger.error(f"Invalid user_id format: {user_id}, error: {e}")
+                raise ValueError(f"Invalid user_id format: {user_id}")
+            
+            # Calculate offset
+            offset = (page - 1) * page_size
+            
+            # Get current time for consistent timestamp comparison
+            current_time = datetime.now(timezone.utc)
+            
+            # Get all profile access records for this user that haven't expired
+            access_query = select(UserProfileAccess, Profile).join(
+                Profile, UserProfileAccess.profile_id == Profile.id
+            ).where(
+                and_(
+                    UserProfileAccess.user_id == user_uuid,
+                    or_(
+                        UserProfileAccess.expires_at.is_(None),
+                        UserProfileAccess.expires_at > current_time
+                    )
+                )
+            ).order_by(UserProfileAccess.granted_at.desc()).offset(offset).limit(page_size)
+            
+            # Execute queries with retry and timeout protection
+            async def execute_queries():
+                # Use asyncio.wait_for to add timeout protection
+                result = await asyncio.wait_for(db.execute(access_query), timeout=30.0)
+                access_records = result.all()
+                
+                # Count total accessible profiles - reuse current_time for consistency
+                count_query = select(func.count(UserProfileAccess.id)).where(
+                    and_(
+                        UserProfileAccess.user_id == user_uuid,
+                        or_(
+                            UserProfileAccess.expires_at.is_(None),
+                            UserProfileAccess.expires_at > current_time
+                        )
+                    )
+                )
+                total_result = await asyncio.wait_for(db.execute(count_query), timeout=30.0)
+                total_count = total_result.scalar()
+                
+                return access_records, total_count
+            
+            try:
+                access_records, total_count = await self.retry_db_operation(execute_queries, db)
+                
+            except asyncio.TimeoutError:
+                logger.error(f"Database query timeout for user {user_id}")
+                raise ValueError("Database query timeout - please try again")
+            except Exception as db_error:
+                logger.error(f"Database error for user {user_id}: {str(db_error)}")
+                raise ValueError(f"Database operation failed: {str(db_error)}")
+            
+            # Format response
+            profiles = []
+            for access_record, profile in access_records:
+                # Calculate days until expiry
+                days_remaining = None
+                if access_record.expires_at:
+                    time_diff = access_record.expires_at - datetime.now(timezone.utc)
+                    days_remaining = max(0, time_diff.days)
+                
+                profile_data = {
+                    "username": profile.username,
+                    "full_name": profile.full_name or "",
+                    "profile_pic_url": profile.profile_pic_url or "",
+                    "profile_pic_url_hd": profile.profile_pic_url_hd or "",
+                    "followers_count": profile.followers_count or 0,
+                    "posts_count": profile.posts_count or 0,
+                    "is_verified": profile.is_verified or False,
+                    "is_private": profile.is_private or False,
+                    "engagement_rate": float(profile.engagement_rate or 0),
+                    "influence_score": float(profile.influence_score or 0),
+                    
+                    # Access information
+                    "access_granted_at": access_record.granted_at.isoformat(),
+                    "access_expires_at": access_record.expires_at.isoformat() if access_record.expires_at else None,
+                    "days_remaining": days_remaining,
+                    "profile_id": str(profile.id)
+                }
+                profiles.append(profile_data)
+            
+            return {
+                "profiles": profiles,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total_count": total_count,
+                    "total_pages": (total_count + page_size - 1) // page_size,
+                    "has_next": page * page_size < total_count,
+                    "has_previous": page > 1
+                },
+                "meta": {
+                    "user_id": user_id,
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                    "note": "All image URLs are pre-proxied to eliminate CORS issues"
+                }
+            }
+            
+        except Exception as e:
+            import traceback
+            error_details = str(e) if str(e) else repr(e)
+            logger.error(f"Failed to get unlocked profiles for user {user_id}: {error_details}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Full traceback: {traceback.format_exc()}")
+            raise ValueError(f"Failed to retrieve unlocked profiles: {error_details}")
+
     async def get_user_profile_access(self, db: AsyncSession, user_id: str, username: str) -> Optional[Dict]:
         """Check if user has access to profile and return cached data if available"""
         try:
+            from uuid import UUID
+            
+            # Convert string user_id to UUID
+            try:
+                user_uuid = UUID(user_id)
+            except (ValueError, TypeError) as e:
+                logger.error(f"Invalid user_id format: {user_id}, error: {e}")
+                return None
+            
             # Find profile by username
             result = await db.execute(
                 select(Profile).where(Profile.username == username)
@@ -1117,7 +1349,7 @@ class ComprehensiveDataService:
             access = await db.execute(
                 select(UserProfileAccess).where(
                     and_(
-                        UserProfileAccess.user_id == UUID(user_id),
+                        UserProfileAccess.user_id == user_uuid,
                         UserProfileAccess.profile_id == profile.id,
                         UserProfileAccess.expires_at > datetime.now(timezone.utc)
                     )
@@ -1173,6 +1405,15 @@ class ComprehensiveDataService:
     async def grant_user_profile_access(self, db: AsyncSession, user_id: str, username: str) -> bool:
         """Grant user access to a profile for 30 days"""
         try:
+            from uuid import UUID
+            
+            # Convert string user_id to UUID
+            try:
+                user_uuid = UUID(user_id)
+            except (ValueError, TypeError) as e:
+                logger.error(f"Invalid user_id format: {user_id}, error: {e}")
+                return False
+            
             # Find profile by username
             result = await db.execute(
                 select(Profile).where(Profile.username == username)
@@ -1190,7 +1431,7 @@ class ComprehensiveDataService:
             existing_access = await db.execute(
                 select(UserProfileAccess).where(
                     and_(
-                        UserProfileAccess.user_id == UUID(user_id),
+                        UserProfileAccess.user_id == user_uuid,
                         UserProfileAccess.profile_id == profile.id
                     )
                 )
@@ -1205,7 +1446,7 @@ class ComprehensiveDataService:
             else:
                 # Create new access
                 new_access = UserProfileAccess(
-                    user_id=UUID(user_id),
+                    user_id=user_uuid,
                     profile_id=profile.id,
                     expires_at=expires_at
                 )

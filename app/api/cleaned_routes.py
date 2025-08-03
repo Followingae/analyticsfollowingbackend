@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.models.auth import UserInDB
 from app.database.connection import get_db
 from app.database.comprehensive_service import comprehensive_service
+from app.database.robust_storage import proxy_instagram_url
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient, DecodoAPIError, DecodoInstabilityError
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
 from app.cache import profile_cache
@@ -29,15 +30,15 @@ router = APIRouter()
 # =============================================================================
 
 @retry(
-    stop=stop_after_attempt(2),  # Only 2 retries for faster response
+    stop=stop_after_attempt(2),  # Reduced to 2 to limit total retries to max 10
     wait=wait_exponential(multiplier=1.2, min=1, max=10),
     retry=retry_if_exception_type((DecodoAPIError, DecodoInstabilityError)),  # REMOVED Exception - don't retry on database errors
     reraise=True
 )
 async def _fetch_with_retry(db: AsyncSession, username: str):
     """
-    Fetch profile data from Decodo with up to 2 retries
-    Optimized for faster response times
+    Fetch profile data from Decodo with up to 3 retries
+    Uses optimized configuration order starting with most successful patterns
     """
     try:
         # Get Decodo data
@@ -101,8 +102,8 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
                     "is_verified": user_data.get('is_verified', False),
                     "is_private": user_data.get('is_private', False),
                     "is_business_account": user_data.get('is_business_account', False),
-                    "profile_pic_url": profile.profile_pic_url if profile else user_data.get('profile_pic_url', ''),
-                    "profile_pic_url_hd": profile.profile_pic_url_hd if profile else user_data.get('profile_pic_url_hd', ''),
+                    "profile_pic_url": profile.profile_pic_url if profile else proxy_instagram_url(user_data.get('profile_pic_url', '')),
+                    "profile_pic_url_hd": profile.profile_pic_url_hd if profile else proxy_instagram_url(user_data.get('profile_pic_url_hd', '')),
                     "external_url": user_data.get('external_url', ''),
                     "engagement_rate": analytics_data["engagement_rate"],
                     "business_category_name": user_data.get('business_category_name', ''),
@@ -292,7 +293,7 @@ async def refresh_profile_data(
     """
     try:
         # Always fetch fresh data from Decodo with retry mechanism
-        logger.info(f"Force refreshing data from Decodo for {username} (with up to 5 retries)")
+        logger.info(f"Force refreshing data from Decodo for {username} (with optimized config strategy)")
         profile, is_new = await _fetch_with_retry(db, username)
         
         # Grant access and record search
@@ -325,6 +326,82 @@ async def refresh_profile_data(
     except Exception as e:
         logger.error(f"Unexpected error refreshing {username}: {str(e)}")
         raise HTTPException(status_code=500, detail="Refresh failed")
+
+
+@router.post("/instagram/profile/{username}/force-refresh")
+async def force_refresh_profile_data(
+    username: str = Path(..., description="Instagram username"),
+    db: AsyncSession = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    COMPLETE PROFILE DATA REPLACEMENT - Manual Refresh
+    
+    This endpoint completely OVERWRITES all existing profile data:
+    - Deletes ALL existing posts, analytics, and profile data
+    - Fetches completely fresh data from Decodo API
+    - Stores 100% new data with proper URL proxying
+    - Returns full profile data (same format as main profile endpoint)
+    
+    Use this for manual refresh buttons when you need to replace everything.
+    """
+    try:
+        logger.info(f"FORCE REFRESH: Starting complete data replacement for {username}")
+        
+        # STEP 1: Delete ALL existing data for this profile
+        logger.info(f"STEP 1: Deleting all existing data for {username}")
+        await comprehensive_service.delete_complete_profile_data(db, username)
+        
+        # STEP 2: Fetch completely fresh data from Decodo with retry mechanism
+        logger.info(f"STEP 2: Fetching fresh data from Decodo for {username}")
+        response_data = await _fetch_with_retry(db, username)
+        
+        # STEP 3: Grant user access to refreshed profile
+        logger.info(f"STEP 3: Granting user access to refreshed {username}")
+        await comprehensive_service.grant_user_profile_access(
+            db, current_user.id, username
+        )
+        
+        # STEP 4: Record this as a force refresh search
+        await comprehensive_service.record_user_search(
+            db, current_user.id, username, 'force_refresh',
+            metadata={
+                "complete_data_replacement": True,
+                "refresh_timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+        
+        # STEP 5: Return complete profile data (same format as main endpoint)
+        logger.info(f"SUCCESS: Complete profile refresh for {username}")
+        
+        # Add refresh metadata to response
+        response_data["meta"]["refresh_type"] = "complete_replacement"
+        response_data["meta"]["refreshed_at"] = datetime.now(timezone.utc).isoformat()
+        response_data["meta"]["all_data_replaced"] = True
+        
+        return JSONResponse(content=response_data)
+        
+    except (DecodoAPIError, DecodoInstabilityError) as e:
+        logger.error(f"Force refresh failed for {username}: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "refresh_service_unavailable",
+                "message": f"Unable to refresh '{username}' data. Please try again in a few minutes.",
+                "retry_after": 300,
+                "username": username
+            }
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error in force refresh for {username}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "refresh_failed",
+                "message": f"Failed to refresh '{username}'. Please try again later.",
+                "details": str(e)[:200]
+            }
+        )
 
 
 # =============================================================================
@@ -705,6 +782,7 @@ async def api_status():
             "profile_posts": "/api/v1/instagram/profile/{username}/posts",
             "detailed_analytics": "/api/v1/instagram/profile/{username}/analytics",
             "profile_refresh": "/api/v1/instagram/profile/{username}/refresh",
+            "profile_force_refresh": "/api/v1/instagram/profile/{username}/force-refresh",
             "image_proxy": "/api/v1/proxy-image",
             "search_suggestions": "/api/v1/search/suggestions/{partial_username}",
             "health_check": "/api/v1/health"
