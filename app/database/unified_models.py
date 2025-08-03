@@ -16,6 +16,92 @@ Base = declarative_base()
 # USER MANAGEMENT TABLES
 # =============================================================================
 
+class AuthUser(Base):
+    """Supabase auth.users table model - READ ONLY, managed by Supabase"""
+    __tablename__ = "auth_users"
+    __table_args__ = {
+        'schema': 'auth', 
+        'extend_existing': True,
+        'info': {'skip_create': True}  # Skip during table creation
+    }
+    
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    email = Column(String(255))
+    created_at = Column(DateTime(timezone=True))
+    updated_at = Column(DateTime(timezone=True))
+    raw_user_meta_data = Column(JSONB)
+    raw_app_meta_data = Column(JSONB)
+
+
+class UserProfile(Base):
+    """Bridge table linking auth_users to user data"""
+    __tablename__ = "user_profiles"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.auth_users.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+    
+    # Profile information
+    full_name = Column(Text)
+    first_name = Column(Text)
+    last_name = Column(Text)
+    company = Column(Text)
+    job_title = Column(Text)
+    phone_number = Column(Text)
+    bio = Column(Text)
+    profile_picture_url = Column(Text)
+    
+    # Settings and preferences
+    preferences = Column(JSONB, nullable=False, default=lambda: {})
+    timezone = Column(Text, default='UTC')
+    language = Column(Text, default='en')
+    
+    # Privacy settings
+    profile_visibility = Column(Boolean, default=True)
+    data_analytics_enabled = Column(Boolean, default=True)
+    
+    # Notification settings
+    notification_preferences = Column(JSONB, nullable=False, default=lambda: {
+        "email_notifications": True,
+        "push_notifications": True,
+        "marketing_emails": False,
+        "security_alerts": True,
+        "weekly_reports": True
+    })
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    auth_user = relationship("AuthUser")
+
+
+class SearchHistory(Base):
+    """Additional search tracking table"""
+    __tablename__ = "search_history"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # Search details
+    search_query = Column(Text, nullable=False)
+    search_timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    user_agent = Column(Text)
+    ip_address = Column(Text)
+    
+    # Search metadata
+    search_type = Column(String(50), index=True)  # 'profile', 'hashtag', 'location'
+    results_count = Column(Integer, default=0)
+    search_duration_ms = Column(Integer)
+    
+    # Relationships
+    profile = relationship("Profile")
+    
+    __table_args__ = (
+        Index('idx_search_history_timestamp', 'search_timestamp'),
+        Index('idx_search_history_profile', 'profile_id'),
+    )
+
 class User(Base):
     """Complete user management with credits, subscriptions, and preferences"""
     __tablename__ = "users"
@@ -98,7 +184,7 @@ class UserSearch(Base):
     """Comprehensive search history with metadata"""
     __tablename__ = "user_searches"
     
-    id = Column(String(255), primary_key=True, default=lambda: str(uuid_lib.uuid4()))
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     
     # Search details
@@ -235,6 +321,7 @@ class Profile(Base):
     related_profiles = relationship("RelatedProfile", back_populates="profile", cascade="all, delete-orphan")
     mentions = relationship("Mention", back_populates="profile", cascade="all, delete-orphan")
     campaign_profiles = relationship("CampaignProfile", back_populates="profile")
+    search_history = relationship("SearchHistory", back_populates="profile", cascade="all, delete-orphan")
     
     __table_args__ = (
         Index('idx_profiles_username_lower', func.lower(username)),

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.auth import UserInDB
-from app.database import get_db
+from app.database.connection import SessionLocal
 from app.database.comprehensive_service import comprehensive_service
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient, DecodoAPIError, DecodoInstabilityError
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
@@ -112,7 +112,6 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
 async def analyze_instagram_profile(
     username: str = Path(..., description="Instagram username"),
     detailed: bool = Query(True, description="Include detailed analysis"),
-    db: AsyncSession = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)  # SECURITY: Authentication restored
 ):
     """
@@ -131,37 +130,39 @@ async def analyze_instagram_profile(
         
         # STEP 1: Check if profile exists in database at all (regardless of user access)
         try:
-            existing_profile = await comprehensive_service.get_profile_by_username(db, username)
-            
-            if existing_profile:
-                logger.info(f"Profile {username} exists in database - granting user access and returning cached data")
+            async with SessionLocal() as db:
+                existing_profile = await comprehensive_service.get_profile_by_username(db, username)
                 
-                # Profile exists - grant THIS user access and return the data
-                await comprehensive_service.grant_user_profile_access(
-                    db, current_user.id, username
-                )
-                
-                # Return the existing profile data
-                cached_data = await comprehensive_service.get_user_profile_access(
-                    db, current_user.id, username
-                )
-                return JSONResponse(content=cached_data)
+                if existing_profile:
+                    logger.info(f"Profile {username} exists in database - granting user access and returning cached data")
+                    
+                    # Profile exists - grant THIS user access and return the data
+                    await comprehensive_service.grant_user_profile_access(
+                        db, current_user.id, username
+                    )
+                    
+                    # Return the existing profile data
+                    cached_data = await comprehensive_service.get_user_profile_access(
+                        db, current_user.id, username
+                    )
+                    return JSONResponse(content=cached_data)
                 
         except Exception as cache_error:
             logger.warning(f"Database check failed, proceeding with fresh fetch: {cache_error}")
         
         # STEP 2: Profile doesn't exist in database - fetch from Decodo and store
         logger.info(f"Fetching fresh data from Decodo for {username}")
-        response_data = await _fetch_with_retry(db, username)
-        
-        # STEP 3: Grant user access to this profile for 30 days
-        try:
-            await comprehensive_service.grant_user_profile_access(
-                db, current_user.id, username
-            )
-            logger.info(f"SUCCESS: Granted user access to {username}")
-        except Exception as access_error:
-            logger.warning(f"Failed to grant user access: {access_error}")
+        async with SessionLocal() as db:
+            response_data = await _fetch_with_retry(db, username)
+            
+            # STEP 3: Grant user access to this profile for 30 days
+            try:
+                await comprehensive_service.grant_user_profile_access(
+                    db, current_user.id, username
+                )
+                logger.info(f"SUCCESS: Granted user access to {username}")
+            except Exception as access_error:
+                logger.warning(f"Failed to grant user access: {access_error}")
         
         # STEP 4: Return the data from _fetch_with_retry
         logger.info(f"SUCCESS: Profile analysis complete for {username}")
@@ -198,7 +199,6 @@ async def analyze_instagram_profile(
 @router.get("/instagram/profile/{username}/analytics")
 async def get_detailed_analytics(
     username: str = Path(..., description="Instagram username"),
-    db: AsyncSession = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
@@ -215,9 +215,10 @@ async def get_detailed_analytics(
         logger.info(f"Getting detailed analytics for {username} from DATABASE ONLY")
         
         # ONLY check database - NO Decodo calls allowed
-        cached_profile = await comprehensive_service.get_user_profile_access(
-            db, current_user.id, username
-        )
+        async with SessionLocal() as db:
+            cached_profile = await comprehensive_service.get_user_profile_access(
+                db, current_user.id, username
+            )
         
         if not cached_profile:
             logger.warning(f"No cached data found for {username} - user needs to search first")
@@ -255,7 +256,6 @@ async def get_detailed_analytics(
 async def refresh_profile_data(
     username: str = Path(..., description="Instagram username"),
     force_refresh: bool = Query(False, description="Force refresh even if recently updated"),
-    db: AsyncSession = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
@@ -267,21 +267,22 @@ async def refresh_profile_data(
     try:
         # Always fetch fresh data from Decodo with retry mechanism
         logger.info(f"Force refreshing data from Decodo for {username} (with up to 5 retries)")
-        profile, is_new = await _fetch_with_retry(db, username)
-        
-        # Grant access and record search
-        await comprehensive_service.grant_profile_access(
-            db, current_user.id, profile.id
-        )
-        
-        await comprehensive_service.record_user_search(
-            db, current_user.id, username, 'refresh',
-            metadata={
-                "force_refresh": force_refresh,
-                "followers_count": profile.followers_count,
-                "data_quality_score": profile.data_quality_score
-            }
-        )
+        async with SessionLocal() as db:
+            profile, is_new = await _fetch_with_retry(db, username)
+            
+            # Grant access and record search
+            await comprehensive_service.grant_profile_access(
+                db, current_user.id, profile.id
+            )
+            
+            await comprehensive_service.record_user_search(
+                db, current_user.id, username, 'refresh',
+                metadata={
+                    "force_refresh": force_refresh,
+                    "followers_count": profile.followers_count,
+                    "data_quality_score": profile.data_quality_score
+                }
+            )
         
         return JSONResponse(content={
             "message": "Profile refreshed successfully",

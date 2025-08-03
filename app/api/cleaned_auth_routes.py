@@ -243,8 +243,7 @@ async def refresh_access_token(refresh_data: dict):
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_profile(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Get current user's profile information
@@ -254,37 +253,84 @@ async def get_current_user_profile(
     Requires valid JWT access token in Authorization header.
     """
     try:
-        # Get fresh user data from database
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        user = result.scalar_one_or_none()
+        logger.info(f"AUTH-ME: Getting profile for user: {current_user.email}")
         
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        from app.database.connection import async_engine
+        from sqlalchemy import text
         
-        return UserResponse(
-            id=current_user.id,
-            email=user.email,
-            full_name=user.full_name,
-            role=user.role,
-            status=user.status,
-            created_at=user.created_at,
-            last_login=user.last_login,
-            profile_picture_url=user.profile_picture_url,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            company=user.company,
-            job_title=user.job_title,
-            phone_number=user.phone_number,
-            bio=user.bio,
-            timezone=user.timezone or "UTC",
-            language=user.language or "en"
-        )
+        # Use connection pool for fast database access
+        async with async_engine.begin() as conn:
+            # Get fresh user data from database using Supabase user ID
+            result = await conn.execute(text("""
+                SELECT id, email, full_name, role, status, created_at, last_login, 
+                       profile_picture_url, first_name, last_name, company, 
+                       job_title, phone_number, bio, timezone, language, updated_at
+                FROM users 
+                WHERE supabase_user_id = :user_id
+            """), {"user_id": current_user.id})
+            
+            user_row = result.fetchone()
+            
+            if not user_row:
+                logger.warning(f"AUTH-ME: User not found in database: {current_user.id}")
+                # Use data from current_user (from Supabase) if not in database
+                return UserResponse(
+                    id=current_user.id,
+                    email=current_user.email,
+                    full_name=current_user.full_name,
+                    role=current_user.role,
+                    status=current_user.status,
+                    created_at=current_user.created_at,
+                    updated_at=current_user.updated_at,
+                    last_login=current_user.last_login
+                )
+            
+            logger.info(f"AUTH-ME: Successfully found user in database: {user_row.email}")
+            return UserResponse(
+                id=current_user.id,
+                email=user_row.email,
+                full_name=user_row.full_name,
+                role=user_row.role,
+                status=user_row.status,
+                created_at=user_row.created_at,
+                last_login=user_row.last_login,
+                profile_picture_url=user_row.profile_picture_url,
+                first_name=user_row.first_name,
+                last_name=user_row.last_name,
+                company=user_row.company,
+                job_title=user_row.job_title,
+                phone_number=user_row.phone_number,
+                bio=user_row.bio,
+                timezone=user_row.timezone or "UTC",
+                language=user_row.language or "en",
+                updated_at=user_row.updated_at
+            )
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to get profile for user {current_user.id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve profile")
+
+
+@router.get("/token-test")
+async def test_token_validation(
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """
+    Debug endpoint to test token validation
+    
+    This endpoint helps debug authentication issues by showing
+    what data we can extract from the token.
+    """
+    return {
+        "message": "Token validation successful",
+        "user_id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role,
+        "status": current_user.status,
+        "validation_timestamp": datetime.now().isoformat()
+    }
 
 
 @router.get("/dashboard", response_model=UserDashboardStats)

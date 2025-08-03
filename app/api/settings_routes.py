@@ -9,8 +9,7 @@ Complete implementation of user settings management including:
 """
 from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Form
 from fastapi.responses import JSONResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import text
 from typing import Optional
 from datetime import datetime
 import logging
@@ -27,12 +26,48 @@ from app.models.settings import (
 )
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
-from app.database.unified_models import User
+from app.database.connection import async_engine
 from app.services.supabase_auth_service import supabase_auth_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["User Settings"])
+
+
+# Helper function for fast database access using connection pool
+async def get_user_from_db(user_id: str):
+    """Get user data using connection pool and Supabase user ID"""
+    from app.database.connection import async_engine
+    from sqlalchemy import text
+    
+    async with async_engine.begin() as conn:
+        result = await conn.execute(text("""
+            SELECT id, email, first_name, last_name, full_name, company, job_title, 
+                   phone_number, bio, profile_picture_url, timezone, language, 
+                   updated_at, two_factor_enabled, email_verified, phone_verified,
+                   notification_preferences, profile_visibility, data_analytics_enabled, preferences
+            FROM users WHERE supabase_user_id = :user_id
+        """), {"user_id": user_id})
+        return result.fetchone()
+
+
+async def update_user_in_db(user_id: str, **update_data):
+    """Update user data using connection pool"""
+    from app.database.connection import async_engine
+    from sqlalchemy import text
+    
+    if not update_data:
+        return
+    
+    # Build SET clause dynamically
+    set_clauses = [f"{key} = :{key}" for key in update_data.keys()]
+    set_clause = ", ".join(set_clauses)
+    
+    async with async_engine.begin() as conn:
+        await conn.execute(text(f"""
+            UPDATE users 
+            SET {set_clause}, updated_at = NOW()
+            WHERE supabase_user_id = :user_id
+        """), {"user_id": user_id, **update_data})
 
 
 # =============================================================================
@@ -41,8 +76,7 @@ router = APIRouter(prefix="/settings", tags=["User Settings"])
 
 @router.get("/profile", response_model=ProfileUpdateResponse)
 async def get_user_profile(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Get current user's profile information
@@ -50,27 +84,26 @@ async def get_user_profile(
     Returns all profile fields that can be edited in the settings page.
     """
     try:
-        # Get fresh user data from database
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        user = result.scalar_one_or_none()
+        # Get fresh user data from database using connection pool
+        user_data = await get_user_from_db(current_user.id)
         
-        if not user:
+        if not user_data:
             raise HTTPException(status_code=404, detail="User not found")
         
         return ProfileUpdateResponse(
-            id=str(user.id),
-            email=user.email,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            full_name=user.full_name,
-            company=user.company,
-            job_title=user.job_title,
-            phone_number=user.phone_number,
-            bio=user.bio,
-            profile_picture_url=user.profile_picture_url,
-            timezone=user.timezone or "UTC",
-            language=user.language or "en",
-            updated_at=user.updated_at or datetime.now()
+            id=str(user_data.id),
+            email=user_data.email,
+            first_name=user_data.first_name,
+            last_name=user_data.last_name,
+            full_name=user_data.full_name,
+            company=user_data.company,
+            job_title=user_data.job_title,
+            phone_number=user_data.phone_number,
+            bio=user_data.bio,
+            profile_picture_url=user_data.profile_picture_url,
+            timezone=user_data.timezone or "UTC",
+            language=user_data.language or "en",
+            updated_at=user_data.updated_at or datetime.now()
         )
         
     except Exception as e:
@@ -81,8 +114,7 @@ async def get_user_profile(
 @router.put("/profile", response_model=ProfileUpdateResponse)
 async def update_user_profile(
     profile_data: ProfileUpdateRequest,
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Update user's profile information
@@ -114,8 +146,7 @@ async def update_user_profile(
         # Auto-generate full_name if first_name or last_name provided
         if 'first_name' in update_data or 'last_name' in update_data:
             # Get current values for fields not being updated
-            result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-            current_user_data = result.scalar_one()
+            current_user_data = await get_user_from_db(current_user.id)
             
             first_name = update_data.get('first_name', current_user_data.first_name) or ""
             last_name = update_data.get('last_name', current_user_data.last_name) or ""
@@ -124,18 +155,11 @@ async def update_user_profile(
         if not update_data:
             raise HTTPException(status_code=400, detail="No fields provided for update")
         
-        # Add timestamp
-        update_data['updated_at'] = datetime.now()
-        
-        # Update user in database
-        await db.execute(
-            update(User).where(User.id == uuid.UUID(current_user.id)).values(**update_data)
-        )
-        await db.commit()
+        # Update user in database using connection pool
+        await update_user_in_db(current_user.id, **update_data)
         
         # Get updated user data
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        updated_user = result.scalar_one()
+        updated_user = await get_user_from_db(current_user.id)
         
         logger.info(f"Profile updated for user {current_user.id}: {list(update_data.keys())}")
         
@@ -159,15 +183,13 @@ async def update_user_profile(
         raise
     except Exception as e:
         logger.error(f"Failed to update profile for user {current_user.id}: {e}")
-        await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update profile")
 
 
 @router.post("/profile/avatar", response_model=AvatarUploadResponse)
 async def upload_avatar(
     file: UploadFile = File(...),
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Upload user avatar image
@@ -224,13 +246,8 @@ async def upload_avatar(
         # Generate URL (assuming uploads are served statically)
         avatar_url = f"/uploads/avatars/{filename}"
         
-        # Update user's profile picture URL in database
-        await db.execute(
-            update(User)
-            .where(User.id == uuid.UUID(current_user.id))
-            .values(profile_picture_url=avatar_url, updated_at=datetime.now())
-        )
-        await db.commit()
+        # Update user's profile picture URL in database using connection pool
+        await update_user_in_db(current_user.id, profile_picture_url=avatar_url)
         
         logger.info(f"Avatar uploaded for user {current_user.id}: {filename}")
         
@@ -293,8 +310,7 @@ async def change_password(
 @router.post("/security/2fa", response_model=TwoFactorToggleResponse)
 async def toggle_two_factor_auth(
     tfa_data: TwoFactorToggleRequest,
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Enable or disable Two-Factor Authentication
@@ -312,13 +328,8 @@ async def toggle_two_factor_auth(
         if not password_valid:
             raise HTTPException(status_code=400, detail="Invalid password")
         
-        # Update 2FA status in database
-        await db.execute(
-            update(User)
-            .where(User.id == uuid.UUID(current_user.id))
-            .values(two_factor_enabled=tfa_data.enable, updated_at=datetime.now())
-        )
-        await db.commit()
+        # Update 2FA status in database using connection pool
+        await update_user_in_db(current_user.id, two_factor_enabled=tfa_data.enable)
         
         response_data = {
             "two_factor_enabled": tfa_data.enable,
@@ -342,15 +353,13 @@ async def toggle_two_factor_auth(
         raise
     except Exception as e:
         logger.error(f"2FA toggle failed for user {current_user.id}: {e}")
-        await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update 2FA settings")
 
 
 @router.put("/security/privacy", response_model=PrivacySettingsResponse)
 async def update_privacy_settings(
     privacy_data: PrivacySettingsRequest,
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Update privacy settings
@@ -368,17 +377,11 @@ async def update_privacy_settings(
         if not update_data:
             raise HTTPException(status_code=400, detail="No privacy settings provided")
         
-        update_data['updated_at'] = datetime.now()
-        
-        # Update database
-        await db.execute(
-            update(User).where(User.id == uuid.UUID(current_user.id)).values(**update_data)
-        )
-        await db.commit()
+        # Update database using connection pool
+        await update_user_in_db(current_user.id, **update_data)
         
         # Get updated values
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        updated_user = result.scalar_one()
+        updated_user = await get_user_from_db(current_user.id)
         
         logger.info(f"Privacy settings updated for user {current_user.id}")
         
@@ -391,7 +394,6 @@ async def update_privacy_settings(
         raise
     except Exception as e:
         logger.error(f"Privacy settings update failed for user {current_user.id}: {e}")
-        await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update privacy settings")
 
 
@@ -401,13 +403,11 @@ async def update_privacy_settings(
 
 @router.get("/notifications", response_model=NotificationPreferencesResponse)
 async def get_notification_preferences(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get current notification preferences"""
     try:
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        user = result.scalar_one_or_none()
+        user = await get_user_from_db(current_user.id)
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -430,8 +430,7 @@ async def get_notification_preferences(
 @router.put("/notifications", response_model=NotificationPreferencesResponse)
 async def update_notification_preferences(
     notification_data: NotificationPreferencesRequest,
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Update notification preferences
@@ -439,9 +438,8 @@ async def update_notification_preferences(
     Updates any provided notification settings. Existing settings are preserved.
     """
     try:
-        # Get current preferences
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        user = result.scalar_one()
+        # Get current preferences using connection pool
+        user = await get_user_from_db(current_user.id)
         
         current_prefs = user.notification_preferences or {}
         
@@ -457,13 +455,8 @@ async def update_notification_preferences(
         if notification_data.weekly_reports is not None:
             current_prefs['weekly_reports'] = notification_data.weekly_reports
         
-        # Update database
-        await db.execute(
-            update(User)
-            .where(User.id == uuid.UUID(current_user.id))
-            .values(notification_preferences=current_prefs, updated_at=datetime.now())
-        )
-        await db.commit()
+        # Update database using connection pool
+        await update_user_in_db(current_user.id, notification_preferences=current_prefs)
         
         logger.info(f"Notification preferences updated for user {current_user.id}")
         
@@ -477,7 +470,6 @@ async def update_notification_preferences(
         
     except Exception as e:
         logger.error(f"Notification preferences update failed for user {current_user.id}: {e}")
-        await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update notification preferences")
 
 
@@ -487,13 +479,11 @@ async def update_notification_preferences(
 
 @router.get("/preferences", response_model=UserPreferencesResponse)
 async def get_user_preferences(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get current user preferences and app settings"""
     try:
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        user = result.scalar_one_or_none()
+        user = await get_user_from_db(current_user.id)
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -512,8 +502,7 @@ async def get_user_preferences(
 @router.put("/preferences", response_model=UserPreferencesResponse)
 async def update_user_preferences(
     preferences_data: UserPreferencesRequest,
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Update user preferences and app settings
@@ -521,9 +510,8 @@ async def update_user_preferences(
     Updates timezone, language, and custom app preferences.
     """
     try:
-        # Get current user data
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        user = result.scalar_one()
+        # Get current user data using connection pool
+        user = await get_user_from_db(current_user.id)
         
         update_data = {}
         current_prefs = user.preferences or {}
@@ -545,17 +533,11 @@ async def update_user_preferences(
         if not update_data:
             raise HTTPException(status_code=400, detail="No preferences provided for update")
         
-        update_data['updated_at'] = datetime.now()
-        
-        # Update database
-        await db.execute(
-            update(User).where(User.id == uuid.UUID(current_user.id)).values(**update_data)
-        )
-        await db.commit()
+        # Update database using connection pool
+        await update_user_in_db(current_user.id, **update_data)
         
         # Get updated data
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        updated_user = result.scalar_one()
+        updated_user = await get_user_from_db(current_user.id)
         
         logger.info(f"User preferences updated for user {current_user.id}")
         
@@ -569,7 +551,6 @@ async def update_user_preferences(
         raise
     except Exception as e:
         logger.error(f"User preferences update failed for user {current_user.id}: {e}")
-        await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update preferences")
 
 
@@ -579,8 +560,7 @@ async def update_user_preferences(
 
 @router.get("/overview", response_model=UserSettingsOverview)
 async def get_complete_settings_overview(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
     Get complete user settings overview
@@ -588,62 +568,76 @@ async def get_complete_settings_overview(
     Returns all settings in a single response for settings page initialization.
     """
     try:
-        result = await db.execute(select(User).where(User.id == uuid.UUID(current_user.id)))
-        user = result.scalar_one_or_none()
+        from app.database.connection import async_engine
+        from sqlalchemy import text
         
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        # Use connection pool for fast database access
+        async with async_engine.begin() as conn:
+            # Get user data using Supabase user ID
+            result = await conn.execute(text("""
+                SELECT id, email, first_name, last_name, full_name, company, job_title, 
+                       phone_number, bio, profile_picture_url, timezone, language, 
+                       updated_at, two_factor_enabled, email_verified, phone_verified,
+                       notification_preferences, profile_visibility, data_analytics_enabled, preferences
+                FROM users 
+                WHERE supabase_user_id = :user_id
+            """), {"user_id": current_user.id})
+            
+            user_row = result.fetchone()
+            
+            if not user_row:
+                raise HTTPException(status_code=404, detail="User not found")
         
-        # Build comprehensive response
-        profile_data = ProfileUpdateResponse(
-            id=str(user.id),
-            email=user.email,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            full_name=user.full_name,
-            company=user.company,
-            job_title=user.job_title,
-            phone_number=user.phone_number,
-            bio=user.bio,
-            profile_picture_url=user.profile_picture_url,
-            timezone=user.timezone or "UTC",
-            language=user.language or "en",
-            updated_at=user.updated_at or datetime.now()
-        )
-        
-        security_data = {
-            "two_factor_enabled": user.two_factor_enabled,
-            "email_verified": user.email_verified,
-            "phone_verified": user.phone_verified
-        }
-        
-        notification_prefs = user.notification_preferences or {}
-        notifications = NotificationPreferencesResponse(
-            email_notifications=notification_prefs.get('email_notifications', True),
-            push_notifications=notification_prefs.get('push_notifications', True),
-            marketing_emails=notification_prefs.get('marketing_emails', False),
-            security_alerts=notification_prefs.get('security_alerts', True),
-            weekly_reports=notification_prefs.get('weekly_reports', True)
-        )
-        
-        privacy = PrivacySettingsResponse(
-            profile_visibility=user.profile_visibility if user.profile_visibility is not None else True,
-            data_analytics_enabled=user.data_analytics_enabled if user.data_analytics_enabled is not None else True
-        )
-        
-        preferences = UserPreferencesResponse(
-            timezone=user.timezone or "UTC",
-            language=user.language or "en",
-            preferences=user.preferences or {}
-        )
-        
-        return UserSettingsOverview(
-            profile=profile_data,
-            security=security_data,
-            notifications=notifications,
-            privacy=privacy,
-            preferences=preferences
-        )
+            # Build comprehensive response
+            profile_data = ProfileUpdateResponse(
+                id=str(user_row.id),
+                email=user_row.email,
+                first_name=user_row.first_name,
+                last_name=user_row.last_name,
+                full_name=user_row.full_name,
+                company=user_row.company,
+                job_title=user_row.job_title,
+                phone_number=user_row.phone_number,
+                bio=user_row.bio,
+                profile_picture_url=user_row.profile_picture_url,
+                timezone=user_row.timezone or "UTC",
+                language=user_row.language or "en",
+                updated_at=user_row.updated_at or datetime.now()
+            )
+            
+            security_data = {
+                "two_factor_enabled": user_row.two_factor_enabled,
+                "email_verified": user_row.email_verified,
+                "phone_verified": user_row.phone_verified
+            }
+            
+            notification_prefs = user_row.notification_preferences or {}
+            notifications = NotificationPreferencesResponse(
+                email_notifications=notification_prefs.get('email_notifications', True),
+                push_notifications=notification_prefs.get('push_notifications', True),
+                marketing_emails=notification_prefs.get('marketing_emails', False),
+                security_alerts=notification_prefs.get('security_alerts', True),
+                weekly_reports=notification_prefs.get('weekly_reports', True)
+            )
+            
+            privacy = PrivacySettingsResponse(
+                profile_visibility=user_row.profile_visibility if user_row.profile_visibility is not None else True,
+                data_analytics_enabled=user_row.data_analytics_enabled if user_row.data_analytics_enabled is not None else True
+            )
+            
+            preferences = UserPreferencesResponse(
+                timezone=user_row.timezone or "UTC",
+                language=user_row.language or "en",
+                preferences=user_row.preferences or {}
+            )
+            
+            return UserSettingsOverview(
+                profile=profile_data,
+                security=security_data,
+                notifications=notifications,
+                privacy=privacy,
+                preferences=preferences
+            )
         
     except Exception as e:
         logger.error(f"Failed to get settings overview for user {current_user.id}: {e}")

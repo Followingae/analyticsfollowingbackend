@@ -405,59 +405,127 @@ class ProductionSupabaseAuthService:
             )
     
     async def get_current_user(self, token: str) -> UserInDB:
-        """Get current user from Supabase session token"""
+        """Get current user from Supabase session token with enhanced validation"""
         await self.ensure_initialized()
         
         try:
-            # Verify token with Supabase
-            user_response = self.supabase.auth.get_user(token)
+            logger.info(f"TOKEN: Validating token for current user (length: {len(token)})")
             
-            if not user_response.user:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid or expired token"
-                )
-            
-            user = user_response.user
-            user_metadata = user.user_metadata or {}
-            
-            # Handle datetime parsing safely
+            # Method 1: Try direct token validation
             try:
-                if user.created_at:
-                    if isinstance(user.created_at, str):
-                        # Parse string datetime
-                        created_at = datetime.fromisoformat(user.created_at.replace('Z', '+00:00'))
-                    else:
-                        # Already datetime object
-                        created_at = user.created_at
-                else:
-                    created_at = datetime.now()
-            except (ValueError, TypeError, AttributeError) as e:
-                logger.warning(f"Failed to parse created_at in get_current_user: {e}, using current time")
-                created_at = datetime.now()
+                user_response = self.supabase.auth.get_user(token)
+                logger.info(f"TOKEN: Direct validation response received")
                 
-            user_in_db = UserInDB(
-                id=user.id,
-                supabase_user_id=user.id,
-                email=user.email,
-                full_name=user_metadata.get("full_name", ""),
-                role=UserRole(user_metadata.get("role", "free")),
-                status=UserStatus.ACTIVE,
-                created_at=created_at,
-                updated_at=datetime.now(),
-                last_login=datetime.now()
-            )
+                if user_response and user_response.user:
+                    logger.info(f"TOKEN: Direct validation successful for user: {user_response.user.email}")
+                    return self._create_user_in_db_from_supabase(user_response.user)
+                else:
+                    logger.warning(f"TOKEN: Direct validation returned no user")
+            except Exception as direct_error:
+                logger.warning(f"TOKEN: Direct validation failed: {direct_error}")
             
-            return user_in_db
+            # Method 2: Try setting session and then getting user
+            try:
+                logger.info(f"TOKEN: Attempting session-based validation")
+                
+                # Set the session with the token
+                session_response = self.supabase.auth.set_session(token, token)
+                logger.info(f"TOKEN: Session set, attempting to get user")
+                
+                # Now try to get the current user from the session
+                user_response = self.supabase.auth.get_user()
+                
+                if user_response and user_response.user:
+                    logger.info(f"TOKEN: Session validation successful for user: {user_response.user.email}")
+                    return self._create_user_in_db_from_supabase(user_response.user)
+                else:
+                    logger.warning(f"TOKEN: Session validation returned no user")
+            except Exception as session_error:
+                logger.warning(f"TOKEN: Session validation failed: {session_error}")
+            
+            # Method 3: Try using the token as a JWT and verify manually
+            try:
+                logger.info(f"TOKEN: Attempting JWT manual verification")
+                
+                # Create a new temporary client with this specific token
+                from supabase import create_client
+                temp_client = create_client(self.supabase_url, self.supabase_key)
+                
+                # Set auth header manually
+                temp_client.auth._client.headers.update({
+                    "Authorization": f"Bearer {token}"
+                })
+                
+                user_response = temp_client.auth.get_user(token)
+                
+                if user_response and user_response.user:
+                    logger.info(f"TOKEN: JWT verification successful for user: {user_response.user.email}")
+                    return self._create_user_in_db_from_supabase(user_response.user)
+                else:
+                    logger.warning(f"TOKEN: JWT verification returned no user")
+            except Exception as jwt_error:
+                logger.warning(f"TOKEN: JWT verification failed: {jwt_error}")
+            
+            # If all methods fail, raise authentication error
+            logger.error(f"TOKEN: All validation methods failed for token")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired token - all validation methods failed"
+            )
             
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"ERROR: Token validation failed: {e}")
+            logger.error(f"ERROR: Unexpected error in token validation: {e}")
+            logger.error(f"ERROR: Error type: {type(e).__name__}")
+            import traceback
+            logger.error(f"ERROR: Traceback: {traceback.format_exc()}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication failed"
+                detail="Authentication failed due to server error"
             )
+    
+    def _create_user_in_db_from_supabase(self, user) -> UserInDB:
+        """Helper method to create UserInDB from Supabase user object"""
+        user_metadata = user.user_metadata or {}
+        
+        # Handle datetime parsing safely
+        try:
+            if user.created_at:
+                if isinstance(user.created_at, str):
+                    # Parse string datetime
+                    created_at = datetime.fromisoformat(user.created_at.replace('Z', '+00:00'))
+                else:
+                    # Already datetime object
+                    created_at = user.created_at
+            else:
+                created_at = datetime.now()
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.warning(f"Failed to parse created_at in _create_user_in_db_from_supabase: {e}, using current time")
+            created_at = datetime.now()
+        
+        # Validate role
+        role_value = user_metadata.get("role", "free")
+        try:
+            user_role = UserRole(role_value)
+        except ValueError:
+            logger.warning(f"Invalid role '{role_value}' for user {user.id}, defaulting to 'free'")
+            user_role = UserRole.FREE
+            
+        user_in_db = UserInDB(
+            id=user.id,
+            supabase_user_id=user.id,
+            email=user.email,
+            full_name=user_metadata.get("full_name", ""),
+            role=user_role,
+            status=UserStatus.ACTIVE,
+            created_at=created_at,
+            updated_at=datetime.now(),
+            last_login=datetime.now()
+        )
+        
+        logger.info(f"TOKEN: Successfully created UserInDB for: {user.email}")
+        return user_in_db
     
     async def logout_user(self, token: str) -> bool:
         """Logout user by invalidating Supabase session"""
@@ -475,34 +543,22 @@ class ProductionSupabaseAuthService:
         await self.ensure_initialized()
         
         try:
-            import asyncpg
-            from app.core.config import settings
             from app.models.auth import UserDashboardStats, UserSearchHistory
+            from app.database.connection import async_engine
+            from sqlalchemy import text
             
-            if not settings.DATABASE_URL:
-                logger.warning("WARNING: DATABASE_URL not available for dashboard stats")
-                # Return empty stats if no database connection
-                return UserDashboardStats(
-                    total_searches=0,
-                    searches_this_month=0,
-                    favorite_profiles=[],
-                    recent_searches=[],
-                    account_created=datetime.now(),
-                    last_active=datetime.now()
-                )
-            
-            conn = await asyncpg.connect(settings.DATABASE_URL)
-            
-            try:
-                # CRITICAL FIX: Convert Supabase user ID to database user ID for searches
-                db_user_id = await conn.fetchval(
-                    "SELECT id FROM users WHERE supabase_user_id = $1",
-                    str(user_id)
-                )
+            # Use connection pool instead of creating new connections
+            async with async_engine.begin() as conn:
                 
-                if not db_user_id:
+                # Optimized query: Get user ID and basic info in one query
+                user_result = await conn.execute(text("""
+                    SELECT id, created_at FROM users WHERE supabase_user_id = :user_id
+                """), {"user_id": str(user_id)})
+                
+                user_row = user_result.fetchone()
+                
+                if not user_row:
                     logger.warning(f"No database user found for Supabase ID: {user_id}")
-                    # Return empty stats if user mapping fails
                     return UserDashboardStats(
                         total_searches=0,
                         searches_this_month=0,
@@ -512,65 +568,54 @@ class ProductionSupabaseAuthService:
                         last_active=datetime.now()
                     )
                 
-                # Get total searches for user (user_searches.user_id is VARCHAR)
-                total_searches = await conn.fetchval(
-                    "SELECT COUNT(*) FROM user_searches WHERE user_id = $1",
-                    str(db_user_id)
-                ) or 0
+                db_user_id = user_row.id
+                user_created = user_row.created_at
                 
-                # Get searches this month (user_searches.user_id is VARCHAR)  
-                searches_this_month = await conn.fetchval(
-                    """
-                    SELECT COUNT(*) FROM user_searches 
-                    WHERE user_id = $1 AND search_timestamp >= date_trunc('month', CURRENT_DATE)
-                    """,
-                    str(db_user_id)
-                ) or 0
+                # Optimized query: Get search statistics in one query
+                search_stats_result = await conn.execute(text("""
+                    SELECT 
+                        COUNT(*) as total_searches,
+                        COUNT(*) FILTER (WHERE search_timestamp >= date_trunc('month', CURRENT_DATE)) as searches_this_month
+                    FROM user_searches 
+                    WHERE user_id = :user_id
+                """), {"user_id": str(db_user_id)})
                 
-                # Get recent searches (user_searches.user_id is VARCHAR)
-                recent_search_rows = await conn.fetch(
-                    """
+                stats_row = search_stats_result.fetchone()
+                total_searches = stats_row.total_searches or 0
+                searches_this_month = stats_row.searches_this_month or 0
+                
+                # Get recent searches
+                recent_search_result = await conn.execute(text("""
                     SELECT id, user_id, instagram_username, search_timestamp, 
                            analysis_type, search_metadata
                     FROM user_searches 
-                    WHERE user_id = $1 
+                    WHERE user_id = :user_id
                     ORDER BY search_timestamp DESC 
                     LIMIT 10
-                    """,
-                    str(db_user_id)
-                )
+                """), {"user_id": str(db_user_id)})
                 
                 recent_searches = [
                     UserSearchHistory(
-                        id=str(row['id']),
-                        user_id=str(row['user_id']),
-                        instagram_username=row['instagram_username'],
-                        search_timestamp=row['search_timestamp'],
-                        analysis_type=row['analysis_type'],
-                        search_metadata=row['search_metadata'] or {}
+                        id=str(row.id),
+                        user_id=str(row.user_id),
+                        instagram_username=row.instagram_username,
+                        search_timestamp=row.search_timestamp,
+                        analysis_type=row.analysis_type,
+                        search_metadata=row.search_metadata or {}
                     )
-                    for row in recent_search_rows
+                    for row in recent_search_result.fetchall()
                 ]
                 
-                # Get user creation date (users.id is UUID)
-                user_created = await conn.fetchval(
-                    "SELECT created_at FROM users WHERE id = $1::uuid",
-                    str(db_user_id)
-                ) or datetime.now()
-                
                 # Get favorite profiles (unlocked profiles) - user_profile_access.user_id is UUID
-                favorite_profiles = await conn.fetch(
-                    """
+                favorite_profiles_result = await conn.execute(text("""
                     SELECT p.username FROM user_profile_access upa
                     JOIN profiles p ON p.id = upa.profile_id
-                    WHERE upa.user_id = $1::uuid
-                    ORDER BY upa.last_accessed DESC
+                    WHERE upa.user_id = :user_id
+                    ORDER BY upa.granted_at DESC
                     LIMIT 10
-                    """,
-                    str(db_user_id)
-                )
+                """), {"user_id": str(db_user_id)})
                 
-                favorite_profile_list = [row['username'] for row in favorite_profiles]
+                favorite_profile_list = [row.username for row in favorite_profiles_result.fetchall()]
                 
                 return UserDashboardStats(
                     total_searches=total_searches,
@@ -580,9 +625,6 @@ class ProductionSupabaseAuthService:
                     account_created=user_created,
                     last_active=datetime.now()
                 )
-                
-            finally:
-                await conn.close()
                 
         except Exception as e:
             logger.error(f"ERROR: Failed to get dashboard stats for user {user_id}: {e}")

@@ -7,7 +7,7 @@ from supabase import create_client, Client
 import logging
 
 from app.core.config import settings
-from .models import Base
+from .unified_models import Base
 
 logger = logging.getLogger(__name__)
 
@@ -136,15 +136,27 @@ async def close_database():
         logger.error(f"Error closing database connections: {e}")
 
 async def create_tables():
-    """Create all database tables"""
+    """Create all database tables (excluding auth schema tables managed by Supabase)"""
     if not async_engine:
         logger.warning("WARNING:  Database not initialized. Skipping table creation.")
         return
         
     try:
+        def create_filtered_tables(conn):
+            # Get all tables except those in auth schema
+            tables_to_create = [
+                table for table in Base.metadata.tables.values() 
+                if table.schema != 'auth'
+            ]
+            
+            # Create only the filtered tables
+            from sqlalchemy.schema import CreateTable
+            for table in tables_to_create:
+                conn.execute(CreateTable(table, if_not_exists=True))
+        
         async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("SUCCESS: Database tables created successfully")
+            await conn.run_sync(create_filtered_tables)
+        logger.info("SUCCESS: Database tables created successfully (excluding auth schema)")
     except Exception as e:
         logger.error(f"ERROR: Failed to create tables: {str(e)}")
         raise
