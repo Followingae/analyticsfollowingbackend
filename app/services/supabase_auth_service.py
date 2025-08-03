@@ -169,33 +169,8 @@ class ProductionSupabaseAuthService:
                 logger.warning(f"WARNING: Invalid role '{role_value}' for user {user.id}, defaulting to 'free'")
                 user_role = UserRole.FREE
             
-            # Create UserResponse
-            # Handle datetime parsing safely
-            try:
-                from datetime import timezone
-                if user.created_at:
-                    if isinstance(user.created_at, str):
-                        # Parse string datetime
-                        created_at = datetime.fromisoformat(user.created_at.replace('Z', '+00:00'))
-                    else:
-                        # Already datetime object
-                        created_at = user.created_at
-                else:
-                    created_at = datetime.now(timezone.utc)
-            except (ValueError, TypeError, AttributeError) as e:
-                logger.warning(f"Failed to parse created_at: {e}, using current time")
-                created_at = datetime.now(timezone.utc)
-            
-            user_response = UserResponse(
-                id=user.id,
-                email=user.email or login_data.email,
-                full_name=user_metadata.get("full_name", ""),
-                role=user_role,
-                status=UserStatus.ACTIVE,
-                created_at=created_at,
-                last_login=datetime.now(),
-                profile_picture_url=user_metadata.get("avatar_url")
-            )
+            # Get fresh user data from database after successful authentication
+            user_response = await self._get_fresh_user_data_from_database(user, user_metadata, user_role)
             
             # Use Supabase session tokens
             access_token = session.access_token if session else user.id
@@ -247,6 +222,88 @@ class ProductionSupabaseAuthService:
                     detail="Authentication failed due to server error"
                 )
     
+    async def _get_fresh_user_data_from_database(self, supabase_user, user_metadata: dict, user_role):
+        """Get fresh user data from database after successful authentication to prevent stale data"""
+        try:
+            logger.info(f"LOGIN-FRESH: Fetching fresh user data from database for {supabase_user.email}")
+            
+            from app.database.connection import async_engine
+            from sqlalchemy import text
+            
+            # Use connection pool for fast database access
+            async with async_engine.begin() as conn:
+                # Get fresh user data from database using Supabase user ID
+                result = await conn.execute(text("""
+                    SELECT id, email, full_name, role, status, created_at, last_login, 
+                           profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name, 
+                           company, job_title, phone_number, bio, timezone, language, updated_at
+                    FROM users 
+                    WHERE supabase_user_id = :user_id
+                """), {"user_id": supabase_user.id})
+                
+                user_row = result.fetchone()
+                
+                if user_row:
+                    logger.info(f"LOGIN-FRESH: Found fresh user data in database for {supabase_user.email}")
+                    # Return fresh data from database
+                    return UserResponse(
+                        id=supabase_user.id,  # Use Supabase ID for consistency
+                        email=user_row.email,
+                        full_name=user_row.full_name,
+                        role=UserRole(user_row.role) if user_row.role else user_role,
+                        status=UserStatus(user_row.status) if user_row.status else UserStatus.ACTIVE,
+                        created_at=user_row.created_at or datetime.now(timezone.utc),
+                        last_login=datetime.now(),
+                        profile_picture_url=user_row.profile_picture_url,
+                        first_name=user_row.first_name,
+                        last_name=user_row.last_name,
+                        company=user_row.company,
+                        job_title=user_row.job_title,
+                        phone_number=user_row.phone_number,
+                        bio=user_row.bio,
+                        timezone=user_row.timezone or "UTC",
+                        language=user_row.language or "en",
+                        updated_at=user_row.updated_at
+                    )
+                else:
+                    logger.warning(f"LOGIN-FRESH: User not found in database, using Supabase data for {supabase_user.email}")
+                    # Fallback to Supabase data if not in database
+                    created_at = datetime.now(timezone.utc)
+                    try:
+                        if supabase_user.created_at:
+                            if isinstance(supabase_user.created_at, str):
+                                created_at = datetime.fromisoformat(supabase_user.created_at.replace('Z', '+00:00'))
+                            else:
+                                created_at = supabase_user.created_at
+                    except (ValueError, TypeError, AttributeError) as e:
+                        logger.warning(f"Failed to parse created_at: {e}, using current time")
+                        created_at = datetime.now(timezone.utc)
+                    
+                    return UserResponse(
+                        id=supabase_user.id,
+                        email=supabase_user.email,
+                        full_name=user_metadata.get("full_name", ""),
+                        role=user_role,
+                        status=UserStatus.ACTIVE,
+                        created_at=created_at,
+                        last_login=datetime.now(),
+                        profile_picture_url=user_metadata.get("avatar_url")
+                    )
+                    
+        except Exception as e:
+            logger.error(f"LOGIN-FRESH: Failed to fetch fresh user data for {supabase_user.email}: {e}")
+            # Fallback to basic Supabase data if database fetch fails
+            return UserResponse(
+                id=supabase_user.id,
+                email=supabase_user.email,
+                full_name=user_metadata.get("full_name", ""),
+                role=user_role,
+                status=UserStatus.ACTIVE,
+                created_at=datetime.now(timezone.utc),
+                last_login=datetime.now(),
+                profile_picture_url=user_metadata.get("avatar_url")
+            )
+
     async def _ensure_user_in_database(self, supabase_user, user_metadata: dict):
         """Ensure user exists in our database with proper fields - CRITICAL FOR USER DATA"""
         try:

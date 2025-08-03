@@ -114,8 +114,8 @@ class User(Base):
     
     # User profile
     full_name = Column(Text)
-    first_name = Column(Text)  # NEW: For settings form
-    last_name = Column(Text)   # NEW: For settings form
+    first_name = Column("user.first_name", Text)  # NEW: For settings form
+    last_name = Column("user.last_name", Text)   # NEW: For settings form
     company = Column(Text)     # NEW: For settings form
     job_title = Column(Text)   # NEW: For settings form
     phone_number = Column(Text)  # NEW: For settings form
@@ -143,13 +143,13 @@ class User(Base):
     login_count = Column(Integer, default=0)
     
     # Security
-    email_verified = Column(Boolean, default=False)
-    phone_verified = Column(Boolean, default=False)
-    two_factor_enabled = Column(Boolean, default=False)
+    email_verified = Column("user.email_verified", Boolean, default=False)
+    phone_verified = Column("user.phone_verified", Boolean, default=False)
+    two_factor_enabled = Column("user.two_factor_enabled", Boolean, default=False)
     
     # Privacy Settings (from Security tab)
-    profile_visibility = Column(Boolean, default=True)  # NEW: Make profile visible to others
-    data_analytics_enabled = Column(Boolean, default=True)  # NEW: Allow usage analytics
+    profile_visibility = Column("user.profile_visibility", Boolean, default=True)  # NEW: Make profile visible to others
+    data_analytics_enabled = Column("user.data_analytics_enabled", Boolean, default=True)  # NEW: Allow usage analytics
     
     # Notification Settings
     notification_preferences = Column(JSONB, nullable=False, default=lambda: {

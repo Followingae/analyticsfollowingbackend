@@ -57,14 +57,36 @@ class ComprehensiveDataService:
     # ==========================================================================
     
     async def store_complete_profile(self, db: AsyncSession, username: str, raw_data: Dict[str, Any]) -> Tuple[Profile, bool]:
-        """Store COMPLETE profile using the provided database session"""
+        """Store COMPLETE profile with ALL related data (posts, related profiles, etc.)"""
         from app.database.robust_storage import store_profile_robust
         
-        logger.info(f"Starting profile storage for {username}")
+        logger.info(f"Starting comprehensive profile storage for {username}")
         
         try:
+            # Store main profile first
             profile, is_new = await store_profile_robust(db, username, raw_data)
             logger.info(f"SUCCESS: Profile {username} stored successfully: {'new' if is_new else 'updated'}")
+            
+            # Extract user data for post processing
+            user_data = self._extract_user_data_comprehensive(raw_data)
+            
+            if user_data:
+                # Store all posts from profile
+                logger.info(f"Processing posts for profile {profile.id}")
+                await self._store_profile_posts(db, profile.id, user_data)
+                
+                # Store related profiles
+                logger.info(f"Processing related profiles for profile {profile.id}")
+                await self._store_related_profiles(db, profile.id, user_data)
+                
+                # Store profile images metadata
+                logger.info(f"Processing profile images for profile {profile.id}")
+                await self._store_profile_images(db, profile.id, user_data)
+                
+                logger.info(f"SUCCESS: Complete profile data stored for {username}")
+            else:
+                logger.warning(f"No user data found for {username}, skipping post/related data processing")
+            
             return profile, is_new
             
         except Exception as storage_error:
@@ -126,8 +148,17 @@ class ComprehensiveDataService:
         profile_data['biography'] = safe_get(user_data, 'biography', '')
         profile_data['external_url'] = safe_get(user_data, 'external_url', '')
         profile_data['external_url_shimmed'] = safe_get(user_data, 'external_url_linkshimmed', '')
-        profile_data['profile_pic_url'] = safe_get(user_data, 'profile_pic_url', '')
-        profile_data['profile_pic_url_hd'] = safe_get(user_data, 'profile_pic_url_hd', '')
+        # Profile images with automatic proxying to eliminate CORS issues
+        def proxy_instagram_url(url: str) -> str:
+            """Convert Instagram CDN URL to proxied URL to eliminate CORS issues"""
+            if not url:
+                return ''
+            if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
+                return f"/api/proxy-image?url={url}"
+            return url
+        
+        profile_data['profile_pic_url'] = proxy_instagram_url(safe_get(user_data, 'profile_pic_url', ''))
+        profile_data['profile_pic_url_hd'] = proxy_instagram_url(safe_get(user_data, 'profile_pic_url_hd', ''))
         
         # =======================================================================
         # ACCOUNT STATISTICS (with edge handling)
@@ -289,13 +320,15 @@ class ComprehensiveDataService:
         profile_images = []
         if profile_data.get('profile_pic_url'):
             profile_images.append({
-                'url': profile_data['profile_pic_url'],
+                'url': profile_data['profile_pic_url'],  # Already proxied above
+                'original_url': safe_get(user_data, 'profile_pic_url', ''),  # Store original for reference
                 'type': 'standard',
                 'size': 'medium'
             })
         if profile_data.get('profile_pic_url_hd'):
             profile_images.append({
-                'url': profile_data['profile_pic_url_hd'],
+                'url': profile_data['profile_pic_url_hd'],  # Already proxied above
+                'original_url': safe_get(user_data, 'profile_pic_url_hd', ''),  # Store original for reference
                 'type': 'hd',
                 'size': 'large'
             })
@@ -372,7 +405,7 @@ class ComprehensiveDataService:
             logger.error(f"Error storing profile posts: {str(e)}")
 
     def _map_post_data_comprehensive(self, post_node: Dict[str, Any], profile_id: UUID) -> Dict[str, Any]:
-        """Map ALL post datapoints from Decodo response"""
+        """Map ALL post datapoints from Decodo response with automatic image proxying"""
         
         def safe_get(data: Dict[str, Any], path: str, default=None):
             try:
@@ -383,21 +416,34 @@ class ComprehensiveDataService:
             except (KeyError, TypeError):
                 return default
         
+        def proxy_instagram_url(url: str) -> str:
+            """Convert Instagram CDN URL to proxied URL to eliminate CORS issues"""
+            if not url:
+                return ''
+            
+            # Only proxy Instagram CDN URLs
+            if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
+                # Return proxied URL that frontend can use directly
+                return f"/api/proxy-image?url={url}"
+            return url
+        
         post_data = {
             'profile_id': profile_id,
             'instagram_post_id': safe_get(post_node, 'id', ''),
             'shortcode': safe_get(post_node, 'shortcode', ''),
             
-            # Media information
+            # Media information (with automatic proxying)
             'media_type': safe_get(post_node, '__typename', ''),
             'is_video': safe_get(post_node, 'is_video', False),
-            'display_url': safe_get(post_node, 'display_url', ''),
-            'thumbnail_src': safe_get(post_node, 'thumbnail_src', ''),
+            'display_url': proxy_instagram_url(safe_get(post_node, 'display_url', '')),
+            'thumbnail_src': proxy_instagram_url(safe_get(post_node, 'thumbnail_src', '')),
+            'thumbnail_tall_src': proxy_instagram_url(safe_get(post_node, 'thumbnail_tall_src', '')),
             
-            # Video fields
-            'video_url': safe_get(post_node, 'video_url', ''),
+            # Video fields (with automatic proxying)
+            'video_url': proxy_instagram_url(safe_get(post_node, 'video_url', '')),
             'video_view_count': safe_get(post_node, 'video_view_count', 0),
             'has_audio': safe_get(post_node, 'has_audio'),
+            'video_duration': safe_get(post_node, 'video_duration'),
             
             # Dimensions
             'width': safe_get(post_node, 'dimensions.width', 0),
@@ -413,30 +459,37 @@ class ComprehensiveDataService:
             
             # Settings
             'viewer_can_reshare': safe_get(post_node, 'viewer_can_reshare', True),
+            'like_and_view_counts_disabled': safe_get(post_node, 'like_and_view_counts_disabled', False),
+            'has_upcoming_event': safe_get(post_node, 'has_upcoming_event', False),
             
             # Location
             'location_name': safe_get(post_node, 'location.name', ''),
             'location_id': safe_get(post_node, 'location.id', ''),
             
-            # Carousel
+            # Carousel handling
             'is_carousel': safe_get(post_node, '__typename') == 'GraphSidecar',
+            'carousel_media_count': len(safe_get(post_node, 'edge_sidecar_to_children.edges', [])) if safe_get(post_node, '__typename') == 'GraphSidecar' else 1,
             
             # Timestamps
             'taken_at_timestamp': safe_get(post_node, 'taken_at_timestamp', 0),
-            'posted_at': datetime.fromtimestamp(safe_get(post_node, 'taken_at_timestamp', 0)) if safe_get(post_node, 'taken_at_timestamp') else None,
+            'posted_at': datetime.fromtimestamp(safe_get(post_node, 'taken_at_timestamp', 0), tz=timezone.utc) if safe_get(post_node, 'taken_at_timestamp') else None,
             
             # Structured data
             'thumbnail_resources': safe_get(post_node, 'thumbnail_resources', []),
             'tagged_users': safe_get(post_node, 'edge_media_to_tagged_user.edges', []),
+            'coauthor_producers': safe_get(post_node, 'coauthor_producers', []),
             
-            # Caption extraction
+            # Handle sidecar children (carousel posts)
+            'sidecar_children': safe_get(post_node, 'edge_sidecar_to_children.edges', []) if safe_get(post_node, '__typename') == 'GraphSidecar' else [],
+            
+            # Raw data backup
             'raw_data': post_node
         }
         
         # Extract caption
         caption_edges = safe_get(post_node, 'edge_media_to_caption.edges', [])
-        if caption_edges:
-            post_data['caption'] = caption_edges[0]['node']['text']
+        if caption_edges and len(caption_edges) > 0:
+            post_data['caption'] = caption_edges[0].get('node', {}).get('text', '')
         
         # Extract hashtags and mentions from caption
         caption = post_data.get('caption', '')
@@ -447,27 +500,70 @@ class ComprehensiveDataService:
             post_data['hashtags'] = hashtags
             post_data['mentions'] = mentions
         
-        # Store post images/thumbnails
+        # Store post images/thumbnails with automatic proxying (eliminates CORS issues)
         post_images = []
         if post_data.get('display_url'):
+            # Note: display_url is already proxied above
             post_images.append({
-                'url': post_data['display_url'],
+                'url': post_data['display_url'],  # Already proxied
+                'original_url': safe_get(post_node, 'display_url', ''),  # Store original for reference
                 'type': 'main',
                 'width': post_data.get('width', 0),
-                'height': post_data.get('height', 0)
+                'height': post_data.get('height', 0),
+                'is_video': post_data.get('is_video', False)
             })
         
+        # Add video URL if available
+        if post_data.get('video_url'):
+            post_images.append({
+                'url': post_data['video_url'],  # Already proxied
+                'original_url': safe_get(post_node, 'video_url', ''),  # Store original for reference
+                'type': 'video',
+                'width': post_data.get('width', 0),
+                'height': post_data.get('height', 0),
+                'is_video': True
+            })
+        
+        # Process thumbnail resources with automatic proxying
         thumbnail_resources = post_data.get('thumbnail_resources', [])
         post_thumbnails = []
         for thumb in thumbnail_resources:
+            original_url = thumb.get('src', '')
             post_thumbnails.append({
-                'url': thumb.get('src', ''),
+                'url': proxy_instagram_url(original_url),  # Proxied URL
+                'original_url': original_url,  # Store original for reference
                 'width': thumb.get('config_width', 0),
-                'height': thumb.get('config_height', 0)
+                'height': thumb.get('config_height', 0),
+                'type': 'thumbnail'
             })
+        
+        # Add carousel children images with automatic proxying
+        if post_data.get('sidecar_children'):
+            for child_edge in post_data['sidecar_children']:
+                child_node = child_edge.get('node', {})
+                original_url = child_node.get('display_url', '')
+                if original_url:
+                    post_images.append({
+                        'url': proxy_instagram_url(original_url),  # Proxied URL
+                        'original_url': original_url,  # Store original for reference
+                        'type': 'carousel_item',
+                        'width': safe_get(child_node, 'dimensions.width', 0),
+                        'height': safe_get(child_node, 'dimensions.height', 0),
+                        'is_video': child_node.get('is_video', False)
+                    })
         
         post_data['post_images'] = post_images
         post_data['post_thumbnails'] = post_thumbnails
+        
+        # Calculate engagement rate for this post
+        likes = post_data.get('likes_count', 0)
+        comments = post_data.get('comments_count', 0)
+        total_engagement = likes + comments
+        
+        # We'll need the profile's follower count for accurate engagement rate
+        # For now, store the engagement metrics
+        post_data['engagement_rate'] = None  # Will be calculated with profile context
+        post_data['performance_score'] = None  # Will be calculated with profile context
         
         return post_data
 
@@ -1048,22 +1144,22 @@ class ComprehensiveDataService:
                     "profile_pic_url": profile.profile_pic_url or "",
                     "profile_pic_url_hd": profile.profile_pic_url_hd or "",
                     "external_url": profile.external_url or "",
-                    "engagement_rate": float(profile.engagement_rate or 0),
-                    "avg_likes": profile.avg_likes or 0,
-                    "avg_comments": profile.avg_comments or 0,
-                    "influence_score": float(profile.influence_score or 0),
-                    "content_quality_score": float(profile.content_quality_score or 0),
+                    "engagement_rate": float(getattr(profile, 'engagement_rate', 0) or 0),
+                    "avg_likes": getattr(profile, 'avg_likes', 0) or 0,
+                    "avg_comments": getattr(profile, 'avg_comments', 0) or 0,
+                    "influence_score": float(getattr(profile, 'influence_score', 0) or 0),
+                    "content_quality_score": float(getattr(profile, 'content_quality_score', 0) or 0),
                 },
                 "analytics": {
-                    "engagement_rate": float(profile.engagement_rate or 0),
-                    "influence_score": float(profile.influence_score or 0),
-                    "content_quality_score": float(profile.content_quality_score or 0),
+                    "engagement_rate": float(getattr(profile, 'engagement_rate', 0) or 0),
+                    "influence_score": float(getattr(profile, 'influence_score', 0) or 0),
+                    "content_quality_score": float(getattr(profile, 'content_quality_score', 0) or 0),
                     "data_quality_score": 1.0
                 },
                 "meta": {
-                    "analysis_timestamp": profile.last_analyzed.isoformat() if profile.last_analyzed else datetime.now(timezone.utc).isoformat(),
+                    "analysis_timestamp": getattr(profile, 'last_analyzed', datetime.now(timezone.utc)).isoformat() if getattr(profile, 'last_analyzed', None) else datetime.now(timezone.utc).isoformat(),
                     "data_source": "database_cache",
-                    "last_refreshed": profile.last_analyzed.isoformat() if profile.last_analyzed else None,
+                    "last_refreshed": getattr(profile, 'last_analyzed', None).isoformat() if getattr(profile, 'last_analyzed', None) else None,
                     "user_has_access": True,
                     "access_expires_in_days": (user_access.expires_at - datetime.now(timezone.utc)).days,
                     "cached": True

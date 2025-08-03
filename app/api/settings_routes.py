@@ -35,39 +35,97 @@ router = APIRouter(prefix="/settings", tags=["User Settings"])
 
 # Helper function for fast database access using connection pool
 async def get_user_from_db(user_id: str):
-    """Get user data using connection pool and Supabase user ID"""
+    """Get user data using connection pool and Supabase user ID with timeout and debugging"""
+    import asyncio
     from app.database.connection import async_engine
     from sqlalchemy import text
+    from fastapi import HTTPException
     
-    async with async_engine.begin() as conn:
-        result = await conn.execute(text("""
-            SELECT id, email, first_name, last_name, full_name, company, job_title, 
-                   phone_number, bio, profile_picture_url, timezone, language, 
-                   updated_at, two_factor_enabled, email_verified, phone_verified,
-                   notification_preferences, profile_visibility, data_analytics_enabled, preferences
-            FROM users WHERE supabase_user_id = :user_id
-        """), {"user_id": user_id})
-        return result.fetchone()
+    try:
+        logger.info(f"Starting database query for user {user_id}")
+        
+        # Add 5-second timeout for faster failure
+        async with asyncio.timeout(5):
+            # Test basic connection first
+            async with async_engine.begin() as conn:
+                logger.info(f"Connection established, executing query for user {user_id}")
+                
+                # Simplified query first - just basic fields
+                result = await conn.execute(text("""
+                    SELECT id, email, full_name, timezone, language, updated_at
+                    FROM users WHERE supabase_user_id = :user_id
+                """), {"user_id": user_id})
+                
+                basic_row = result.fetchone()
+                logger.info(f"Basic query completed for user {user_id}, found: {basic_row is not None}")
+                
+                if not basic_row:
+                    return None
+                
+                # If basic query works, try the full query
+                logger.info(f"Attempting full query for user {user_id}")
+                result = await conn.execute(text("""
+                    SELECT id, email, "user.first_name" as first_name, "user.last_name" as last_name, full_name, company, job_title, 
+                           phone_number, bio, profile_picture_url, timezone, language, 
+                           updated_at, "user.two_factor_enabled" as two_factor_enabled, "user.email_verified" as email_verified, "user.phone_verified" as phone_verified,
+                           notification_preferences, "user.profile_visibility" as profile_visibility, "user.data_analytics_enabled" as data_analytics_enabled, preferences
+                    FROM users WHERE supabase_user_id = :user_id
+                """), {"user_id": user_id})
+                
+                full_row = result.fetchone()
+                logger.info(f"Full query completed for user {user_id}")
+                return full_row
+                
+    except asyncio.TimeoutError:
+        logger.error(f"Database query timeout for user {user_id}")
+        raise HTTPException(status_code=503, detail="Database query timeout")
+    except Exception as e:
+        logger.error(f"Database error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
 
 
 async def update_user_in_db(user_id: str, **update_data):
-    """Update user data using connection pool"""
+    """Update user data using connection pool with timeout"""
+    import asyncio
     from app.database.connection import async_engine
     from sqlalchemy import text
+    from fastapi import HTTPException
     
     if not update_data:
         return
     
-    # Build SET clause dynamically
-    set_clauses = [f"{key} = :{key}" for key in update_data.keys()]
-    set_clause = ", ".join(set_clauses)
-    
-    async with async_engine.begin() as conn:
-        await conn.execute(text(f"""
-            UPDATE users 
-            SET {set_clause}, updated_at = NOW()
-            WHERE supabase_user_id = :user_id
-        """), {"user_id": user_id, **update_data})
+    try:
+        # Add 10-second timeout to prevent hanging
+        async with asyncio.timeout(10):
+            # Build SET clause dynamically, mapping to correct column names
+            column_mapping = {
+                'first_name': '"user.first_name"',
+                'last_name': '"user.last_name"',
+                'two_factor_enabled': '"user.two_factor_enabled"',
+                'email_verified': '"user.email_verified"',
+                'phone_verified': '"user.phone_verified"',
+                'profile_visibility': '"user.profile_visibility"',
+                'data_analytics_enabled': '"user.data_analytics_enabled"'
+            }
+            
+            set_clauses = []
+            for key in update_data.keys():
+                column_name = column_mapping.get(key, key)
+                set_clauses.append(f"{column_name} = :{key}")
+            set_clause = ", ".join(set_clauses)
+            
+            async with async_engine.begin() as conn:
+                await conn.execute(text(f"""
+                    UPDATE users 
+                    SET {set_clause}, updated_at = NOW()
+                    WHERE supabase_user_id = :user_id
+                """), {"user_id": user_id, **update_data})
+    except asyncio.TimeoutError:
+        logger.error(f"Database update timeout for user {user_id}")
+        raise HTTPException(status_code=503, detail="Database update timeout")
+    except Exception as e:
+        logger.error(f"Database update error for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Database update error")
 
 
 # =============================================================================
@@ -568,76 +626,69 @@ async def get_complete_settings_overview(
     Returns all settings in a single response for settings page initialization.
     """
     try:
-        from app.database.connection import async_engine
-        from sqlalchemy import text
+        logger.info(f"Getting settings overview for user {current_user.id}")
         
-        # Use connection pool for fast database access
-        async with async_engine.begin() as conn:
-            # Get user data using Supabase user ID
-            result = await conn.execute(text("""
-                SELECT id, email, first_name, last_name, full_name, company, job_title, 
-                       phone_number, bio, profile_picture_url, timezone, language, 
-                       updated_at, two_factor_enabled, email_verified, phone_verified,
-                       notification_preferences, profile_visibility, data_analytics_enabled, preferences
-                FROM users 
-                WHERE supabase_user_id = :user_id
-            """), {"user_id": current_user.id})
-            
-            user_row = result.fetchone()
-            
-            if not user_row:
-                raise HTTPException(status_code=404, detail="User not found")
+        # Use the optimized helper function with debugging
+        user_row = await get_user_from_db(current_user.id)
         
-            # Build comprehensive response
-            profile_data = ProfileUpdateResponse(
-                id=str(user_row.id),
-                email=user_row.email,
-                first_name=user_row.first_name,
-                last_name=user_row.last_name,
-                full_name=user_row.full_name,
-                company=user_row.company,
-                job_title=user_row.job_title,
-                phone_number=user_row.phone_number,
-                bio=user_row.bio,
-                profile_picture_url=user_row.profile_picture_url,
-                timezone=user_row.timezone or "UTC",
-                language=user_row.language or "en",
-                updated_at=user_row.updated_at or datetime.now()
-            )
-            
-            security_data = {
-                "two_factor_enabled": user_row.two_factor_enabled,
-                "email_verified": user_row.email_verified,
-                "phone_verified": user_row.phone_verified
-            }
-            
-            notification_prefs = user_row.notification_preferences or {}
-            notifications = NotificationPreferencesResponse(
-                email_notifications=notification_prefs.get('email_notifications', True),
-                push_notifications=notification_prefs.get('push_notifications', True),
-                marketing_emails=notification_prefs.get('marketing_emails', False),
-                security_alerts=notification_prefs.get('security_alerts', True),
-                weekly_reports=notification_prefs.get('weekly_reports', True)
-            )
-            
-            privacy = PrivacySettingsResponse(
-                profile_visibility=user_row.profile_visibility if user_row.profile_visibility is not None else True,
-                data_analytics_enabled=user_row.data_analytics_enabled if user_row.data_analytics_enabled is not None else True
-            )
-            
-            preferences = UserPreferencesResponse(
-                timezone=user_row.timezone or "UTC",
-                language=user_row.language or "en",
-                preferences=user_row.preferences or {}
-            )
-            
-            return UserSettingsOverview(
-                profile=profile_data,
-                security=security_data,
-                notifications=notifications,
-                privacy=privacy,
-                preferences=preferences
-            )
+        if not user_row:
+            logger.warning(f"User not found in database: {current_user.id}")
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        logger.info(f"Building profile data for user {current_user.id}")
+        
+        # Build comprehensive response with safe field access
+        profile_data = ProfileUpdateResponse(
+            id=str(user_row.id),
+            email=user_row.email,
+            first_name=getattr(user_row, 'first_name', None),
+            last_name=getattr(user_row, 'last_name', None),
+            full_name=user_row.full_name,
+            company=getattr(user_row, 'company', None),
+            job_title=getattr(user_row, 'job_title', None),
+            phone_number=getattr(user_row, 'phone_number', None),
+            bio=getattr(user_row, 'bio', None),
+            profile_picture_url=getattr(user_row, 'profile_picture_url', None),
+            timezone=user_row.timezone or "UTC",
+            language=user_row.language or "en",
+            updated_at=user_row.updated_at or datetime.now()
+        )
+        
+        logger.info(f"Building security and preferences data for user {current_user.id}")
+        
+        security_data = {
+            "two_factor_enabled": getattr(user_row, 'two_factor_enabled', False),
+            "email_verified": getattr(user_row, 'email_verified', False),
+            "phone_verified": getattr(user_row, 'phone_verified', False)
+        }
+        
+        notification_prefs = getattr(user_row, 'notification_preferences', {}) or {}
+        notifications = NotificationPreferencesResponse(
+            email_notifications=notification_prefs.get('email_notifications', True),
+            push_notifications=notification_prefs.get('push_notifications', True),
+            marketing_emails=notification_prefs.get('marketing_emails', False),
+            security_alerts=notification_prefs.get('security_alerts', True),
+            weekly_reports=notification_prefs.get('weekly_reports', True)
+        )
+        
+        privacy = PrivacySettingsResponse(
+            profile_visibility=getattr(user_row, 'profile_visibility', True),
+            data_analytics_enabled=getattr(user_row, 'data_analytics_enabled', True)
+        )
+        
+        preferences = UserPreferencesResponse(
+            timezone=user_row.timezone or "UTC",
+            language=user_row.language or "en",
+            preferences=getattr(user_row, 'preferences', {}) or {}
+        )
+        
+        return UserSettingsOverview(
+            profile=profile_data,
+            security=security_data,
+            notifications=notifications,
+            privacy=privacy,
+            preferences=preferences
+        )
         
     except Exception as e:
         logger.error(f"Failed to get settings overview for user {current_user.id}: {e}")

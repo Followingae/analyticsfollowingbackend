@@ -3,7 +3,7 @@ CLEANED AUTHENTICATION API ROUTES
 This replaces auth_routes.py with only implemented, production-ready endpoints
 All unimplemented placeholder endpoints have been removed
 """
-from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, status, Depends, BackgroundTasks, Query, Header
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -263,7 +263,7 @@ async def get_current_user_profile(
             # Get fresh user data from database using Supabase user ID
             result = await conn.execute(text("""
                 SELECT id, email, full_name, role, status, created_at, last_login, 
-                       profile_picture_url, first_name, last_name, company, 
+                       profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name, company, 
                        job_title, phone_number, bio, timezone, language, updated_at
                 FROM users 
                 WHERE supabase_user_id = :user_id
@@ -330,6 +330,52 @@ async def test_token_validation(
         "role": current_user.role,
         "status": current_user.status,
         "validation_timestamp": datetime.now().isoformat()
+    }
+
+
+@router.get("/debug/session")
+async def debug_session_info(
+    authorization: str = Header(None),
+    current_user: UserInDB = Depends(get_current_user)
+):
+    """
+    Comprehensive session debugging endpoint
+    
+    This endpoint provides detailed information about the current session
+    to help diagnose authentication and session persistence issues.
+    """
+    return {
+        "session_status": "authenticated",
+        "user_info": {
+            "id": current_user.id,
+            "email": current_user.email,
+            "role": current_user.role.value,
+            "status": current_user.status.value
+        },
+        "token_info": {
+            "has_authorization_header": authorization is not None,
+            "header_format": "Bearer token" if authorization and authorization.startswith("Bearer ") else "invalid format" if authorization else "missing",
+            "token_length": len(authorization.split(" ")[1]) if authorization and " " in authorization else 0
+        },
+        "session_metadata": {
+            "validation_timestamp": datetime.now().isoformat(),
+            "server_time": datetime.now().isoformat(),
+            "timezone": "UTC"
+        },
+        "troubleshooting": {
+            "frontend_checklist": [
+                "Verify token is stored in localStorage after login",
+                "Ensure Authorization header is sent with all API calls",
+                "Check browser developer tools for CORS errors",
+                "Verify fetch requests include credentials: 'include'"
+            ],
+            "common_issues": {
+                "token_not_stored": "localStorage.setItem('access_token', response.access_token) missing",
+                "header_not_sent": "Authorization header missing from fetch requests",
+                "cors_blocking": "CORS policy blocking credentials - check allow_credentials",
+                "token_expired": "Token expired - implement refresh token logic"
+            }
+        }
     }
 
 
