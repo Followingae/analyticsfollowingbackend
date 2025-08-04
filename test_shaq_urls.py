@@ -27,14 +27,14 @@ def test_url_proxying():
         # Only proxy Instagram CDN URLs
         if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
             # Return proxied URL that frontend can use directly
-            return f"/api/proxy-image?url={url}"
+            return f"/api/v1/proxy-image?url={url}"
         return url
     
     print("\nTesting URL Transformation:")
     for field_name, original_url in sample_urls.items():
         proxied_url = proxy_instagram_url(original_url)
         is_instagram_cdn = original_url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com'))
-        is_proxied = proxied_url.startswith('/api/proxy-image?url=')
+        is_proxied = proxied_url.startswith('/api/v1/proxy-image?url=')
         
         status = "PROXIED" if is_proxied else "UNCHANGED"
         expected = "SHOULD BE PROXIED" if is_instagram_cdn else "SHOULD NOT BE PROXIED"

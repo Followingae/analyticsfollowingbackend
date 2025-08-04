@@ -1,5 +1,8 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import httpx
+import io
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -211,6 +214,13 @@ async def database_health_check():
         logger.error(f"Database health check failed: {e}")
         return {"db": "error", "message": str(e)}, 500
 
+
+
+
+@app.get("/api/test")
+async def test_endpoint():
+    """Test endpoint"""
+    return {"message": "Test endpoint working"}
 
 
 

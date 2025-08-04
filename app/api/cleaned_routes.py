@@ -11,6 +11,8 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 import logging
 import httpx
 import io
+import asyncio
+import random
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -644,21 +646,22 @@ async def minimal_profile_test(
 
 
 # =============================================================================
-# IMAGE PROXY ENDPOINT - SOLVE INSTAGRAM CORS ISSUES
+# IMPROVED IMAGE PROXY ENDPOINT - ENHANCED RELIABILITY
 # =============================================================================
 
 @router.get("/proxy-image")
-async def proxy_instagram_image(
+async def proxy_instagram_image_enhanced(
     url: str = Query(..., description="Instagram image URL to proxy"),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
-    Proxy Instagram images to bypass CORS restrictions
+    Enhanced Instagram image proxy with improved anti-detection
     
-    Instagram's CDN blocks direct image loading from browsers due to CORS.
-    This endpoint fetches the image server-side and returns it with proper headers.
-    
-    Usage: /api/proxy-image?url=https://scontent-xxx.cdninstagram.com/...
+    Handles Instagram's strict anti-bot measures with:
+    - Randomized user agents and headers
+    - Retry logic with exponential backoff
+    - Multiple header strategies
+    - Request timing randomization
     """
     try:
         # Validate URL is from Instagram CDN
@@ -668,53 +671,121 @@ async def proxy_instagram_image(
                 detail="Only Instagram CDN URLs are allowed for security"
             )
         
-        # Set proper headers to mimic browser request
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.instagram.com/',
-            'Sec-Fetch-Dest': 'image',
-            'Sec-Fetch-Mode': 'no-cors',
-            'Sec-Fetch-Site': 'cross-site'
-        }
+        # Multiple realistic user agent options
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15'
+        ]
         
-        # Fetch image from Instagram with timeout
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=headers, follow_redirects=True)
-            
-            if response.status_code == 200:
-                # Determine content type
-                content_type = response.headers.get('content-type', 'image/jpeg')
+        # Randomize request timing to avoid detection
+        await asyncio.sleep(random.uniform(0.1, 0.5))
+        
+        # Try multiple header strategies
+        strategies = [
+            # Strategy 1: Full browser simulation
+            {
+                'User-Agent': random.choice(user_agents),
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://www.instagram.com/',
+                'Origin': 'https://www.instagram.com',
+                'Sec-Fetch-Dest': 'image',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'cross-site',
+                'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+            },
+            # Strategy 2: Minimal headers
+            {
+                'User-Agent': random.choice(user_agents),
+                'Accept': 'image/*,*/*;q=0.8',
+                'Referer': 'https://www.instagram.com/',
+            },
+            # Strategy 3: Mobile simulation
+            {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+                'Accept': 'image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.instagram.com/',
+            }
+        ]
+        
+        last_error = None
+        
+        for attempt, headers in enumerate(strategies, 1):
+            try:
+                logger.info(f"Proxy attempt {attempt}/3 for image with strategy {attempt}")
                 
-                # Return image with proper CORS headers
-                return StreamingResponse(
-                    io.BytesIO(response.content),
-                    media_type=content_type,
-                    headers={
-                        'Access-Control-Allow-Origin': '*',
-                        'Access-Control-Allow-Methods': 'GET',
-                        'Access-Control-Allow-Headers': '*',
-                        'Cache-Control': 'public, max-age=3600',  # Cache for 1 hour
-                        'Content-Length': str(len(response.content))
-                    }
-                )
-            else:
-                logger.warning(f"Failed to fetch image from Instagram: {response.status_code}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to fetch image: HTTP {response.status_code}"
-                )
+                # Random delay between strategies
+                if attempt > 1:
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
                 
-    except httpx.TimeoutException:
-        logger.error(f"Timeout fetching image: {url}")
-        raise HTTPException(status_code=504, detail="Image fetch timeout")
-    except httpx.RequestError as e:
-        logger.error(f"Request error fetching image: {e}")
-        raise HTTPException(status_code=502, detail="Failed to fetch image")
+                async with httpx.AsyncClient(
+                    timeout=30.0,
+                    follow_redirects=True,
+                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                ) as client:
+                    response = await client.get(url, headers=headers)
+                    
+                    if response.status_code == 200:
+                        # Determine content type
+                        content_type = response.headers.get('content-type', 'image/jpeg')
+                        
+                        # Validate that we actually got an image
+                        if not content_type.startswith('image/'):
+                            logger.warning(f"Strategy {attempt}: Got non-image content: {content_type}")
+                            continue
+                        
+                        logger.info(f"SUCCESS: Image proxy successful with strategy {attempt}")
+                        
+                        # Return image with proper CORS headers
+                        return StreamingResponse(
+                            io.BytesIO(response.content),
+                            media_type=content_type,
+                            headers={
+                                'Access-Control-Allow-Origin': '*',
+                                'Access-Control-Allow-Methods': 'GET',
+                                'Access-Control-Allow-Headers': '*',
+                                'Cache-Control': 'public, max-age=3600',  # Cache for 1 hour
+                                'Content-Length': str(len(response.content))
+                            }
+                        )
+                    else:
+                        logger.warning(f"Strategy {attempt}: HTTP {response.status_code}")
+                        last_error = f"HTTP {response.status_code}"
+                        continue
+                        
+            except httpx.TimeoutException as e:
+                logger.warning(f"Strategy {attempt}: Timeout error")
+                last_error = "Request timeout"
+                continue
+            except httpx.RequestError as e:
+                logger.warning(f"Strategy {attempt}: Request error: {e}")
+                last_error = f"Request error: {e}"
+                continue
+            except Exception as e:
+                logger.warning(f"Strategy {attempt}: Unexpected error: {e}")
+                last_error = f"Unexpected error: {e}"
+                continue
+        
+        # All strategies failed
+        logger.error(f"All proxy strategies failed for URL: {url}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch image after trying multiple strategies. Last error: {last_error}"
+        )
+                
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error proxying image: {e}")
+        logger.error(f"Unexpected error in enhanced image proxy: {e}")
         raise HTTPException(status_code=500, detail="Image proxy error")
 
 
@@ -783,20 +854,19 @@ async def api_status():
             "detailed_analytics": "/api/v1/instagram/profile/{username}/analytics",
             "profile_refresh": "/api/v1/instagram/profile/{username}/refresh",
             "profile_force_refresh": "/api/v1/instagram/profile/{username}/force-refresh",
-            "image_proxy": "/api/v1/proxy-image",
+            "enhanced_image_proxy": "/api/v1/proxy-image",
             "search_suggestions": "/api/v1/search/suggestions/{partial_username}",
             "health_check": "/api/v1/health"
         },
         "features": {
             "comprehensive_profile_data": True,
             "comprehensive_post_analytics": True,
-            "instagram_image_proxy": True,
+            "enhanced_image_proxy_with_anti_detection": True,
             "30_day_access_system": True,
             "search_history_tracking": True,
             "carousel_post_support": True,
             "video_analytics": True,
             "hashtag_mention_extraction": True,
-            "cors_bypass_images": True,
             "advanced_analytics": True
         },
         "data_sources": {
@@ -844,7 +914,7 @@ async def api_configuration():
             "video_analytics": True,
             "carousel_support": True,
             "hashtag_mention_extraction": True,
-            "image_proxy_cors_bypass": True,
+            "enhanced_image_proxy_anti_detection": True,
             "audience_insights": True,
             "creator_analysis": True,
             "search_suggestions": True,
@@ -863,6 +933,7 @@ async def api_configuration():
 # This provides all the data with proper caching and access control.
 
 
+
 # =============================================================================
 # REMOVED ENDPOINTS (No longer available)
 # =============================================================================
@@ -877,8 +948,15 @@ async def api_configuration():
 # - /analytics/summary/{username} (replaced by enhanced routes)
 # - /profile/{username}/posts (moved to enhanced routes with better functionality)
 #
+# IMAGE PROXY ENHANCED:
+# The /proxy-image endpoint has been RESTORED with enhanced anti-detection features:
+# - Multiple header strategies (desktop, mobile, minimal)
+# - Randomized user agents and timing
+# - Retry logic with different approaches
+# - Better Instagram CDN compatibility
+#
 # All debug and test endpoints have been removed from production API.
 # Frontend should use:
 # - /api/v1/instagram/profile/{username} for main profile analysis
-# - Main profile endpoint provides all Decodo data
+# - /api/v1/proxy-image for Instagram image CORS bypass
 # - /api/v1/auth/* endpoints for authentication

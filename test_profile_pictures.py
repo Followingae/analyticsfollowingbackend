@@ -34,7 +34,7 @@ async def test_profile_picture_proxying():
         if not url:
             return ''
         if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
-            return f"/api/proxy-image?url={url}"
+            return f"/api/v1/proxy-image?url={url}"
         return url
     
     # Simulate what happens in the storage
@@ -73,7 +73,7 @@ async def test_profile_picture_proxying():
     print("\nExpected Behavior:")
     print("  ✓ Profile pictures load without CORS errors")
     print("  ✓ Video thumbnails load without CORS errors") 
-    print("  ✓ All URLs start with '/api/proxy-image?url='")
+    print("  ✓ All URLs start with '/api/v1/proxy-image?url='")
     print("  ✓ Frontend can use URLs directly in <img> tags")
 
 if __name__ == "__main__":

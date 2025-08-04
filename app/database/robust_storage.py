@@ -13,14 +13,14 @@ from app.database.unified_models import Profile
 logger = logging.getLogger(__name__)
 
 def proxy_instagram_url(url: str) -> str:
-    """Convert Instagram CDN URL to proxied URL to eliminate CORS issues"""
+    """Convert Instagram CDN URL to backend proxied URL to eliminate CORS issues"""
     if not url:
         return ''
     
     # Only proxy Instagram CDN URLs
     if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
-        # Return proxied URL that frontend can use directly
-        return f"/api/proxy-image?url={url}"
+        # Use our improved backend proxy with better headers and caching
+        return f"/api/v1/proxy-image?url={url}"
     return url
 
 # Set up detailed logging with immediate console output

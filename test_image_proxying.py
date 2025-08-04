@@ -31,7 +31,7 @@ async def test_image_proxying():
         # Only proxy Instagram CDN URLs
         if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
             # Return proxied URL that frontend can use directly
-            return f"/api/proxy-image?url={url}"
+            return f"/api/v1/proxy-image?url={url}"
         return url
     
     print("Testing Image Proxying Logic")
@@ -40,7 +40,7 @@ async def test_image_proxying():
     print("\nInstagram URLs (should be proxied):")
     for url in test_urls:
         proxied = proxy_instagram_url(url)
-        is_proxied = proxied.startswith('/api/proxy-image?url=')
+        is_proxied = proxied.startswith('/api/v1/proxy-image?url=')
         status = "PROXIED" if is_proxied else "NOT PROXIED"
         print(f"  {status}: {url}")
         print(f"    -> {proxied}")
@@ -118,7 +118,7 @@ async def test_image_proxying():
         print(f"    Item {i+1}: {proxied_url}")
     
     print("\nExpected Frontend Behavior:")
-    print("  - Frontend receives URLs like: /api/proxy-image?url=https://scontent-...")
+    print("  - Frontend receives URLs like: /api/v1/proxy-image?url=https://scontent-...")
     print("  - No CORS issues when loading these URLs")
     print("  - Backend handles Instagram authentication transparently")
     print("  - Original URLs preserved in 'original_url' field for reference")

@@ -22,6 +22,7 @@ from .unified_models import (
     AudienceDemographics, CreatorMetadata, CommentSentiment,
     RelatedProfile, Mention, Campaign, CampaignPost, CampaignProfile
 )
+from app.services.engagement_rate_service import EngagementRateService
 
 logger = logging.getLogger(__name__)
 
@@ -254,11 +255,11 @@ class ComprehensiveDataService:
         profile_data['external_url_shimmed'] = safe_get(user_data, 'external_url_linkshimmed', '')
         # Profile images with automatic proxying to eliminate CORS issues
         def proxy_instagram_url(url: str) -> str:
-            """Convert Instagram CDN URL to proxied URL to eliminate CORS issues"""
+            """Convert Instagram CDN URL to backend proxied URL to eliminate CORS issues"""
             if not url:
                 return ''
             if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
-                return f"/api/proxy-image?url={url}"
+                return f"/api/v1/proxy-image?url={url}"
             return url
         
         profile_data['profile_pic_url'] = proxy_instagram_url(safe_get(user_data, 'profile_pic_url', ''))
@@ -463,12 +464,18 @@ class ComprehensiveDataService:
         return profile_data
 
     async def _store_profile_posts(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]):
-        """Store ALL posts from profile with comprehensive data mapping"""
+        """Store ALL posts from profile with comprehensive data mapping and engagement rate calculation"""
         try:
             posts_edges = user_data.get('edge_owner_to_timeline_media', {}).get('edges', [])
             if not posts_edges:
                 logger.info(f"No posts found for profile {profile_id}")
                 return
+            
+            # Get profile's followers count for engagement rate calculation
+            profile_result = await db.execute(
+                select(Profile.followers_count).where(Profile.id == profile_id)
+            )
+            followers_count = profile_result.scalar() or 0
             
             posts_created = 0
             for post_edge in posts_edges:
@@ -490,6 +497,11 @@ class ComprehensiveDataService:
                 if not existing_post:
                     post_data = self._map_post_data_comprehensive(post_node, profile_id)
                     
+                    # Calculate and add engagement rate
+                    post_data = EngagementRateService.enhance_post_data_with_engagement(
+                        post_data, followers_count
+                    )
+                    
                     # Filter out any fields that don't exist in the Post model
                     valid_post_fields = {}
                     for key, value in post_data.items():
@@ -504,6 +516,11 @@ class ComprehensiveDataService:
             
             await db.commit()
             logger.info(f"Created {posts_created} new posts for profile {profile_id}")
+            
+            # Update profile's overall engagement rate after adding posts
+            if posts_created > 0:
+                await EngagementRateService.update_profile_engagement_rate(db, str(profile_id))
+                logger.info(f"Updated overall engagement rate for profile {profile_id}")
             
         except Exception as e:
             logger.error(f"Error storing profile posts: {str(e)}")
@@ -521,14 +538,14 @@ class ComprehensiveDataService:
                 return default
         
         def proxy_instagram_url(url: str) -> str:
-            """Convert Instagram CDN URL to proxied URL to eliminate CORS issues"""
+            """Convert Instagram CDN URL to backend proxied URL to eliminate CORS issues"""
             if not url:
                 return ''
             
             # Only proxy Instagram CDN URLs
             if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
-                # Return proxied URL that frontend can use directly
-                return f"/api/proxy-image?url={url}"
+                # Use our improved backend proxy with better reliability
+                return f"/api/v1/proxy-image?url={url}"
             return url
         
         post_data = {

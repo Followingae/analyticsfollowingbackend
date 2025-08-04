@@ -47,22 +47,19 @@ async def init_database():
         sync_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
         async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
         
-        # ROBUST CONNECTION POOL - Professional implementation with Transaction Pooler support
+        # OPTIMIZED CONNECTION POOL - For Supabase pooler compatibility
         async_engine = create_async_engine(
             async_url,
-            pool_pre_ping=True,          # Test connections before use
+            pool_pre_ping=False,         # Disable pre-ping for faster startup
             pool_recycle=300,            # Recycle connections every 5 minutes
-            pool_size=5,                 # Reduced pool size for stability
-            max_overflow=2,              # Reduced overflow for stability
-            pool_timeout=10,             # Reduced timeout for faster failure detection
+            pool_size=3,                 # Smaller pool size for Supabase
+            max_overflow=1,              # Minimal overflow
+            pool_timeout=20,             # Increased timeout
             echo=False,
             connect_args={
-                "command_timeout": 30,
+                "command_timeout": 60,   # Increased timeout
                 "server_settings": {
-                    "application_name": "analytics_backend",
-                    "tcp_keepalives_idle": "600",
-                    "tcp_keepalives_interval": "30",
-                    "tcp_keepalives_count": "3"
+                    "application_name": "analytics_backend"
                 }
             }
         )
@@ -78,10 +75,10 @@ async def init_database():
         try:
             logger.info("Testing database connection...")
             test_task = asyncio.create_task(_test_connection(async_engine))
-            await asyncio.wait_for(test_task, timeout=30)
+            await asyncio.wait_for(test_task, timeout=60)  # Increased timeout to 60 seconds
             logger.info("Database connection test successful")
         except asyncio.TimeoutError:
-            logger.error("Database connection test timed out after 30 seconds")
+            logger.error("Database connection test timed out after 60 seconds")
             raise Exception("Database connection timeout - cannot start application")
         except Exception as e:
             logger.error(f"Database connection test failed: {e}")

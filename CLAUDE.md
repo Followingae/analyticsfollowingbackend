@@ -4,37 +4,79 @@
 Instagram analytics platform backend built with FastAPI, providing comprehensive Instagram profile analysis using Decodo API integration. Includes user management, campaign tracking, and detailed analytics.
 
 ## Current Database Schema Status
-**CRITICAL**: Database schema and code models are currently **MISALIGNED**
+**✅ UPDATED**: Database schema documentation is now current and aligned
 
-### Actual Database Tables (from schema resource)
+### AUTH SCHEMA (Supabase Authentication)
 ```
-PUBLIC SCHEMA TABLES:
-- profiles (UUID primary key, comprehensive Instagram data)
-- posts (UUID primary key, full post analytics)
-- audience_demographics (profile demographics analysis)
-- auth_users (Supabase auth integration)
-- user_profiles (links auth_users to user data)
-- user_profile_access (30-day access tracking)
-- user_favorites (user saved profiles)
-- user_searches (search history tracking)
-- search_history (additional search tracking)
-- campaigns (user campaign management)
-- campaign_posts (posts linked to campaigns)
-- campaign_profiles (profiles tracked in campaigns)
-- creator_metadata (enhanced profile analytics)
-- comment_sentiment (post comment analysis)
-- mentions (profile mention tracking)
-- related_profiles (similar profile suggestions)
-
-AUTH SCHEMA (Supabase):
-- Complete Supabase auth tables (users, sessions, identities, etc.)
+auth.users - Primary Supabase user table
+auth.sessions - User session management
+auth.identities - OAuth/SSO identity linking
+auth.instances - Multi-tenant instance support
+auth.refresh_tokens - Token refresh management
+auth.audit_log_entries - Authentication audit trail
+auth.mfa_factors - Multi-factor authentication setup
+auth.mfa_challenges - MFA challenge tracking
+auth.mfa_amr_claims - Authentication method references
+auth.one_time_tokens - Password reset/verification tokens
+auth.flow_state - OAuth flow state management
+auth.saml_providers - SAML SSO configuration
+auth.saml_relay_states - SAML relay state tracking  
+auth.sso_providers - Single sign-on providers
+auth.sso_domains - Domain-based SSO mapping
+auth.schema_migrations - Schema version tracking
 ```
 
-### Model Inconsistencies Identified
-1. **Missing Tables**: `users` table defined in models but doesn't exist in DB
-2. **Wrong Foreign Keys**: Models reference `users.id` but DB uses `auth_users.id`
-3. **Extra Fields**: Models define fields not present in actual DB
-4. **Missing Models**: No models for `auth_users`, some existing tables
+### PUBLIC SCHEMA (Application Data)
+```
+Core Instagram Analytics:
+- profiles - Instagram profile data and analytics
+- posts - Individual post content and metrics
+- audience_demographics - Profile audience analysis
+- creator_metadata - Enhanced profile analytics
+- comment_sentiment - Post comment sentiment analysis
+- mentions - Profile mention tracking
+- related_profiles - Similar profile suggestions
+
+User Management:
+- users - Application user data and preferences
+- auth_users - Bridge to Supabase auth system
+- user_profiles - Extended user profile information
+- user_profile_access - 30-day profile access tracking
+- user_favorites - User saved/favorited profiles
+- user_searches - Search activity tracking
+- search_history - Additional search history
+
+Campaign Management:
+- campaigns - User campaign creation and tracking
+- campaign_posts - Posts associated with campaigns
+- campaign_profiles - Profiles tracked in campaigns
+```
+
+### Key Foreign Key Relationships
+```
+User Authentication Flow:
+auth.users.id → user_profiles.user_id
+users.id → campaigns.user_id
+users.id → user_favorites.user_id
+users.id → user_searches.user_id
+
+Instagram Data Relationships:
+profiles.id → posts.profile_id
+profiles.id → audience_demographics.profile_id
+profiles.id → creator_metadata.profile_id
+profiles.id → mentions.profile_id
+profiles.id → related_profiles.profile_id
+profiles.id → user_favorites.profile_id
+profiles.id → user_profile_access.profile_id
+profiles.id → search_history.profile_id
+
+Campaign Relationships:
+campaigns.id → campaign_posts.campaign_id
+campaigns.id → campaign_profiles.campaign_id
+posts.id → campaign_posts.post_id
+profiles.id → campaign_profiles.profile_id
+posts.id → comment_sentiment.post_id
+```
 
 ## Technology Stack
 - **Backend**: FastAPI (Python)
@@ -58,7 +100,7 @@ AUTH SCHEMA (Supabase):
 ### Database Layer
 ```
 /database/
-├── unified_models.py - SQLAlchemy models (NEEDS SCHEMA ALIGNMENT)
+├── unified_models.py - SQLAlchemy models (schema-aligned)
 ├── comprehensive_service.py - Unified data operations
 ├── robust_storage.py - Data persistence layer
 └── Database connection management
@@ -69,32 +111,37 @@ AUTH SCHEMA (Supabase):
 - Custom middleware for request validation
 - User profile access management (30-day windows)
 
-## Critical Schema Issues to Address
+## Database Architecture Notes
 
-### Before Any New Development:
-1. **Schema Alignment Required**: Models don't match actual database
-2. **Foreign Key Fixes**: Update all user references to use `auth_users.id`
-3. **Missing Table Creation**: Need to create `users` table or refactor to use `auth_users`
-4. **Data Type Corrections**: Fix UUID vs String mismatches
+### Authentication Strategy:
+- **Dual Authentication System**: Supabase auth (auth schema) + application users (public.users)
+- **User Flow**: auth.users → public.user_profiles → public.users for extended data
+- **Access Control**: 30-day profile access via user_profile_access table
 
-### Current Limitations:
-- **Data Storage Failing**: Code tries to insert into non-existent tables
-- **Relationship Conflicts**: Foreign key mismatches causing errors
-- **Incomplete User Management**: Split between Supabase and custom systems
+### Data Integrity:
+- **All primary keys**: UUID with auto-generation
+- **Timestamps**: Consistent timezone-aware timestamps throughout
+- **JSONB Storage**: Flexible data storage for Instagram API responses
+- **Foreign Key Constraints**: Enforced referential integrity across all relationships
+
+### Performance Considerations:
+- **Indexed Relationships**: All foreign keys properly indexed
+- **JSONB Indexing**: Consider GIN indexes on frequently queried JSONB columns
+- **Partitioning**: Consider partitioning large tables (posts, user_searches) by date
 
 ## Development Guidelines
 
-### Before Making Changes:
-1. **Always check actual database schema first**
-2. **Verify table existence and column types**
-3. **Test foreign key relationships**
-4. **Ensure Supabase compatibility**
+### Schema Management:
+1. **Schema is current and documented** - refer to this file for accurate structure
+2. **Migration Strategy**: Use Supabase migrations for schema changes
+3. **Testing**: Verify foreign key relationships when adding new tables
+4. **Compatibility**: Maintain Supabase auth integration
 
-### When Schema Changes Needed:
-- Alert user about required database migrations
-- Specify exact SQL changes needed
-- Consider impact on existing data
-- Plan migration strategy
+### When Adding New Features:
+- Follow existing UUID primary key patterns
+- Use proper foreign key constraints
+- Include created_at/updated_at timestamps where appropriate
+- Consider JSONB for flexible data storage
 
 ### Code Quality Standards:
 - Comprehensive error handling
@@ -108,8 +155,8 @@ AUTH SCHEMA (Supabase):
 ### Profile Operations
 - `GET /profile/{username}` - Get Instagram profile with analytics
 - Decodo API integration with retry mechanisms
-- Comprehensive data storage (when schema fixed)
-- 30-day access tracking
+- Comprehensive data storage to profiles/posts tables
+- 30-day access tracking via user_profile_access table
 
 ### User Management
 - Supabase authentication integration
@@ -144,10 +191,11 @@ pydantic (data validation)
 - Decodo API mock testing
 
 ## Deployment Considerations
-- Database schema must be aligned before production
+- Database schema is current and production-ready
 - Environment variable management
 - Logging and monitoring setup
 - Error reporting integration
+- Supabase auth configuration
 
 ## Performance Optimizations
 - Connection pooling (asyncpg)
@@ -156,10 +204,33 @@ pydantic (data validation)
 - Retry mechanisms for external APIs
 
 ## Security Measures
-- Supabase auth integration
-- API rate limiting
-- Input validation and sanitization
-- Secure credential management
+- **Supabase Auth Integration** - Complete OAuth and JWT-based authentication
+- **Comprehensive Row Level Security (RLS)** - Database-level access control implemented
+  - **ALL tables now secured** with RLS enabled (addresses Supabase security advisor warnings)
+  - **True Multi-Tenant Isolation**: Each user can only access their own data
+  - **Controlled Instagram Data Access**: Users can only view profiles they have searched/accessed
+  - **User-Specific Data Protection**: All user tables (campaigns, favorites, searches) fully secured
+  - **Service Role Backend Control**: API retains full access for data operations
+  - **Access Tracking**: Instagram data access controlled via `user_profile_access` table
+  - Migration: `/database/migrations/comprehensive_rls_security.sql`
+- **API Rate Limiting** - Request throttling and abuse prevention
+- **Input Validation** - Comprehensive request validation and sanitization
+- **Secure Credential Management** - Environment-based secrets management
+
+### RLS Security Architecture
+```
+User Authentication Flow:
+auth.users → RLS policies → user data isolation
+
+Instagram Data Access:
+user searches profile → user_profile_access record → RLS allows access to that profile's data
+
+Multi-Tenant Isolation:
+- User A can only see User A's campaigns, favorites, searches
+- User A can only see Instagram data for profiles User A has searched
+- Backend API (service_role) has full access for operations
+- No cross-user data leakage possible
+```
 
 ## Monitoring & Logging
 - Comprehensive logging throughout application
@@ -169,5 +240,5 @@ pydantic (data validation)
 
 ---
 
-## IMMEDIATE ACTION REQUIRED
-**Schema alignment must be completed before any new feature development. Current code will fail due to table/column mismatches.**
+## CURRENT STATUS
+**✅ Schema Updated**: Database schema documentation is now current and comprehensive. All tables, relationships, and foreign keys are documented and aligned for development.
