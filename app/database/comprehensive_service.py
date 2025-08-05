@@ -253,17 +253,9 @@ class ComprehensiveDataService:
         profile_data['biography'] = safe_get(user_data, 'biography', '')
         profile_data['external_url'] = safe_get(user_data, 'external_url', '')
         profile_data['external_url_shimmed'] = safe_get(user_data, 'external_url_linkshimmed', '')
-        # Profile images with automatic proxying to eliminate CORS issues
-        def proxy_instagram_url(url: str) -> str:
-            """Convert Instagram CDN URL to backend proxied URL to eliminate CORS issues"""
-            if not url:
-                return ''
-            if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
-                return f"/api/v1/proxy-image?url={url}"
-            return url
-        
-        profile_data['profile_pic_url'] = proxy_instagram_url(safe_get(user_data, 'profile_pic_url', ''))
-        profile_data['profile_pic_url_hd'] = proxy_instagram_url(safe_get(user_data, 'profile_pic_url_hd', ''))
+        # Profile images - direct URLs (external proxy will be handled elsewhere)
+        profile_data['profile_pic_url'] = safe_get(user_data, 'profile_pic_url', '')
+        profile_data['profile_pic_url_hd'] = safe_get(user_data, 'profile_pic_url_hd', '')
         
         # =======================================================================
         # ACCOUNT STATISTICS (with edge handling)
@@ -537,31 +529,21 @@ class ComprehensiveDataService:
             except (KeyError, TypeError):
                 return default
         
-        def proxy_instagram_url(url: str) -> str:
-            """Convert Instagram CDN URL to backend proxied URL to eliminate CORS issues"""
-            if not url:
-                return ''
-            
-            # Only proxy Instagram CDN URLs
-            if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
-                # Use our improved backend proxy with better reliability
-                return f"/api/v1/proxy-image?url={url}"
-            return url
-        
+        # Direct URLs - external proxy will be handled elsewhere
         post_data = {
             'profile_id': profile_id,
             'instagram_post_id': safe_get(post_node, 'id', ''),
             'shortcode': safe_get(post_node, 'shortcode', ''),
             
-            # Media information (with automatic proxying)
+            # Media information (direct URLs)
             'media_type': safe_get(post_node, '__typename', ''),
             'is_video': safe_get(post_node, 'is_video', False),
-            'display_url': proxy_instagram_url(safe_get(post_node, 'display_url', '')),
-            'thumbnail_src': proxy_instagram_url(safe_get(post_node, 'thumbnail_src', '')),
-            'thumbnail_tall_src': proxy_instagram_url(safe_get(post_node, 'thumbnail_tall_src', '')),
+            'display_url': safe_get(post_node, 'display_url', ''),
+            'thumbnail_src': safe_get(post_node, 'thumbnail_src', ''),
+            'thumbnail_tall_src': safe_get(post_node, 'thumbnail_tall_src', ''),
             
-            # Video fields (with automatic proxying)
-            'video_url': proxy_instagram_url(safe_get(post_node, 'video_url', '')),
+            # Video fields (direct URLs)
+            'video_url': safe_get(post_node, 'video_url', ''),
             'video_view_count': safe_get(post_node, 'video_view_count', 0),
             'has_audio': safe_get(post_node, 'has_audio'),
             'video_duration': safe_get(post_node, 'video_duration'),
@@ -645,27 +627,27 @@ class ComprehensiveDataService:
                 'is_video': True
             })
         
-        # Process thumbnail resources with automatic proxying
+        # Process thumbnail resources with direct URLs
         thumbnail_resources = post_data.get('thumbnail_resources', [])
         post_thumbnails = []
         for thumb in thumbnail_resources:
             original_url = thumb.get('src', '')
             post_thumbnails.append({
-                'url': proxy_instagram_url(original_url),  # Proxied URL
+                'url': original_url,  # Direct URL
                 'original_url': original_url,  # Store original for reference
                 'width': thumb.get('config_width', 0),
                 'height': thumb.get('config_height', 0),
                 'type': 'thumbnail'
             })
         
-        # Add carousel children images with automatic proxying
+        # Add carousel children images with direct URLs
         if post_data.get('sidecar_children'):
             for child_edge in post_data['sidecar_children']:
                 child_node = child_edge.get('node', {})
                 original_url = child_node.get('display_url', '')
                 if original_url:
                     post_images.append({
-                        'url': proxy_instagram_url(original_url),  # Proxied URL
+                        'url': original_url,  # Direct URL
                         'original_url': original_url,  # Store original for reference
                         'type': 'carousel_item',
                         'width': safe_get(child_node, 'dimensions.width', 0),
@@ -767,9 +749,8 @@ class ComprehensiveDataService:
             logger.error(f"Error recording user search: {str(e)}")
             raise
 
-    async def grant_profile_access(self, db: AsyncSession, user_id: UUID, profile_id: UUID, 
-                                  access_method: str = 'search', credits_spent: int = 0) -> UserProfileAccess:
-        """Grant comprehensive profile access with 30-day tracking"""
+    async def grant_profile_access_with_tracking(self, db: AsyncSession, user_id: UUID, profile_id: UUID) -> UserProfileAccess:
+        """Grant comprehensive profile access with 30-day tracking - UPDATED FOR ACTUAL SCHEMA"""
         try:
             # Check if access already exists
             result = await db.execute(
@@ -786,24 +767,15 @@ class ComprehensiveDataService:
             expires_at = current_time + timedelta(days=30)
             
             if access:
-                # Update existing access
-                access.last_accessed = current_time
-                access.access_count += 1
+                # Update existing access - only use columns that exist
                 access.expires_at = expires_at
-                if access_method:
-                    access.access_method = access_method
-                if credits_spent > 0:
-                    access.credits_spent += credits_spent
+                # Note: last_accessed, access_count, etc. don't exist in actual schema
             else:
-                # Create new access record
+                # Create new access record - only use columns that exist
                 access_data = {
                     'user_id': user_id,
                     'profile_id': profile_id,
-                    'first_accessed': current_time,
-                    'last_accessed': current_time,
-                    'access_count': 1,
-                    'access_method': access_method,
-                    'credits_spent': credits_spent,
+                    'granted_at': current_time,
                     'expires_at': expires_at
                 }
                 access = UserProfileAccess(**access_data)
@@ -856,7 +828,7 @@ class ComprehensiveDataService:
                         UserProfileAccess.expires_at > current_time
                     )
                 )
-                .order_by(UserProfileAccess.last_accessed.desc())
+                .order_by(UserProfileAccess.granted_at.desc())
                 .limit(limit)
                 .options(selectinload(Profile.audience_demographics))
             )
@@ -1032,7 +1004,7 @@ class ComprehensiveDataService:
     # ==========================================================================
     
     async def grant_profile_access(self, db: AsyncSession, user_id: str, profile_id: UUID) -> bool:
-        """Grant user 30-day access to a profile - FIXED with robust error handling"""
+        """Grant user 30-day access to a profile - FIXED for actual schema"""
         try:
             # CRITICAL FIX: Convert Supabase user ID to database user ID
             db_user_id = await self._get_database_user_id(db, user_id)
@@ -1072,7 +1044,7 @@ class ComprehensiveDataService:
                 existing_access = None
             
             if existing_access:
-                # Update existing access with error handling
+                # Update existing access - only use columns that exist
                 try:
                     await db.execute(
                         update(UserProfileAccess)
@@ -1082,27 +1054,21 @@ class ComprehensiveDataService:
                                 UserProfileAccess.profile_id == profile_id
                             )
                         )
-                        .values(
-                            expires_at=expires_at,
-                            last_accessed=datetime.now(timezone.utc),
-                            access_count=UserProfileAccess.access_count + 1
-                        )
+                        .values(expires_at=expires_at)
                     )
                     logger.info(f"Updated profile access for user {db_user_id} to profile {profile_id}")
                 except Exception as update_error:
                     logger.error(f"Error updating profile access: {update_error}")
                     raise update_error
             else:
-                # Create new access record with comprehensive error handling
+                # Create new access record - only use columns that exist
                 try:
                     access_record = UserProfileAccess(
                         id=uuid.uuid4(),
                         user_id=db_user_id,
                         profile_id=profile_id,
                         granted_at=datetime.now(timezone.utc),
-                        expires_at=expires_at,
-                        # Removed columns that don't exist in actual DB:
-                        # - last_accessed, access_type, access_count
+                        expires_at=expires_at
                     )
                     db.add(access_record)
                     logger.info(f"Granted new profile access for user {db_user_id} to profile {profile_id}")
@@ -1130,19 +1096,21 @@ class ComprehensiveDataService:
                 logger.error(f"Error during rollback: {rollback_error}")
             return False
     
-    async def record_user_search(self, db: AsyncSession, user_id: str, username: str, 
+    async def record_user_search_fixed(self, db: AsyncSession, user_id: str, username: str, 
                                 analysis_type: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Record user search in database - FIXED with robust error handling"""
+        """Record user search in database - FIXED for actual schema"""
         try:
             # CRITICAL FIX: Convert Supabase user ID to database user ID
             db_user_id = await self._get_database_user_id(db, user_id)
             if not db_user_id:
                 logger.error(f"Failed to find database user ID for Supabase ID: {user_id}")
                 # Use Supabase ID as fallback for search recording
-                db_user_id_str = str(user_id)
-                logger.warning(f"Using Supabase ID as fallback for search: {db_user_id_str}")
-            else:
-                db_user_id_str = str(db_user_id)
+                try:
+                    db_user_id = UUID(user_id) if isinstance(user_id, str) else user_id
+                    logger.warning(f"Using Supabase ID as fallback for search: {db_user_id}")
+                except (ValueError, TypeError) as uuid_error:
+                    logger.error(f"Cannot convert user_id to UUID: {uuid_error}")
+                    return False
             
             # Validate required parameters
             if not username or not analysis_type:
@@ -1161,11 +1129,11 @@ class ComprehensiveDataService:
                     logger.warning(f"Metadata not JSON serializable, using empty dict: {json_error}")
                     safe_metadata = {}
             
-            # Create search record with comprehensive validation
+            # Create search record - use actual columns that exist
             try:
                 search_record = UserSearch(
                     id=uuid.uuid4(),
-                    user_id=db_user_id_str,  # user_searches.user_id is VARCHAR
+                    user_id=db_user_id,  # user_searches.user_id is UUID
                     instagram_username=username.strip().lower(),  # Normalize username
                     search_timestamp=datetime.now(timezone.utc),
                     analysis_type=analysis_type.strip(),  # Clean analysis_type
@@ -1173,17 +1141,17 @@ class ComprehensiveDataService:
                 )
                 
                 db.add(search_record)
-                logger.debug(f"Created search record for user {db_user_id_str}: {username}")
+                logger.debug(f"Created search record for user {db_user_id}: {username}")
                 
             except Exception as create_error:
                 logger.error(f"Error creating search record: {create_error}")
-                logger.error(f"Parameters: user_id={db_user_id_str}, username={username}, analysis_type={analysis_type}")
+                logger.error(f"Parameters: user_id={db_user_id}, username={username}, analysis_type={analysis_type}")
                 return False
             
             # Commit with error handling
             try:
                 await db.commit()
-                logger.info(f"Successfully recorded search for user {db_user_id_str}: {username}")
+                logger.info(f"Successfully recorded search for user {db_user_id}: {username}")
                 return True
                 
             except Exception as commit_error:

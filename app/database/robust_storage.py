@@ -12,16 +12,7 @@ from app.database.unified_models import Profile
 
 logger = logging.getLogger(__name__)
 
-def proxy_instagram_url(url: str) -> str:
-    """Convert Instagram CDN URL to backend proxied URL to eliminate CORS issues"""
-    if not url:
-        return ''
-    
-    # Only proxy Instagram CDN URLs
-    if url.startswith(('https://scontent-', 'https://instagram.', 'https://scontent.cdninstagram.com')):
-        # Use our improved backend proxy with better headers and caching
-        return f"/api/v1/proxy-image?url={url}"
-    return url
+# proxy_instagram_url function removed - using external proxy service instead
 
 # Set up detailed logging with immediate console output
 handler = logging.StreamHandler()
@@ -250,8 +241,8 @@ def extract_profile_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             'full_name': user_data.get('full_name', ''),
             'biography': user_data.get('biography', ''),
             'external_url': user_data.get('external_url'),  # Don't proxy external URLs as they're not Instagram CDN
-            'profile_pic_url': proxy_instagram_url(user_data.get('profile_pic_url', '')),
-            'profile_pic_url_hd': proxy_instagram_url(user_data.get('profile_pic_url_hd', '')),
+            'profile_pic_url': user_data.get('profile_pic_url', ''),
+            'profile_pic_url_hd': user_data.get('profile_pic_url_hd', ''),
             'followers_count': followers_count,
             'following_count': following_count,
             'posts_count': posts_count,

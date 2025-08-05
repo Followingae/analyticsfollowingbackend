@@ -219,4 +219,4 @@ test_credentials.py
 docker-compose.override.yml
 
 # Claude Code specific (optional)
-.claude/settings.local.json
+.claude/settings.local.jsonnul

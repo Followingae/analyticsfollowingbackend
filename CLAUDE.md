@@ -79,12 +79,48 @@ posts.id → comment_sentiment.post_id
 ```
 
 ## Technology Stack
+
+### Backend
 - **Backend**: FastAPI (Python)
 - **Database**: PostgreSQL with Supabase integration
 - **ORM**: SQLAlchemy (async)
 - **Authentication**: Supabase Auth + custom middleware
 - **External API**: Decodo Instagram API
 - **Caching**: Redis-compatible caching layer
+
+### Frontend
+- **Core Framework**:
+  - Next.js 15.4.4 (React framework with Turbopack)
+  - React 19.1.0 (Latest React version)
+  - TypeScript 5 (Type safety)
+
+- **UI Components**:
+  - shadcn/ui (Custom installation - "new-york" style)
+  - Radix UI (Underlying headless components)
+  - Lucide React (Icon library)
+  - class-variance-authority (Component variants)
+
+- **Styling**:
+  - Tailwind CSS v4 (Utility-first CSS)
+  - CSS Variables (For theming)
+  - next-themes (Dark/light mode)
+
+- **State & Data**:
+  - TanStack Query v5 (Server state management)
+  - Zod (Schema validation)
+
+- **Charts & Visualization**:
+  - Recharts (Primary charting)
+  - Chart.js + react-chartjs-2
+  - ApexCharts + react-apexcharts
+
+- **Interactive Features**:
+  - DND Kit (Drag & drop)
+  - TanStack Table v8 (Data tables)
+  - React Day Picker (Date selection)
+  - Sonner (Toast notifications)
+  - CMDK (Command palette)
+  - Vaul (Drawer component)
 
 ## Key Components
 
