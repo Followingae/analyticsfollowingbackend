@@ -130,7 +130,7 @@ class User(Base):
     subscription_expires_at = Column(DateTime(timezone=True))
     
     # Profile customization
-    profile_picture_url = Column(Text)
+    avatar_config = Column(JSONB)  # BoringAvatars configuration (variant, colorScheme, colors, seed)
     preferences = Column(JSONB, nullable=False, default=lambda: {})  # UI preferences, notifications, etc.
     timezone = Column(Text, default='UTC')
     language = Column(Text, default='en')

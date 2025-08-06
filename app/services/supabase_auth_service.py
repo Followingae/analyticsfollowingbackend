@@ -19,6 +19,10 @@ from app.models.auth import (
 logger = logging.getLogger(__name__)
 security = HTTPBearer()
 
+# Token validation cache to avoid repeated Supabase API calls
+_token_cache = {}
+_token_cache_ttl = timedelta(minutes=10)  # Cache tokens for 10 minutes
+
 # JWT settings for token creation
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
@@ -466,16 +470,25 @@ class ProductionSupabaseAuthService:
         await self.ensure_initialized()
         
         try:
-            logger.info(f"TOKEN: Validating token for current user (length: {len(token)})")
+            # Check token cache first to avoid repeated Supabase API calls
+            token_hash = str(hash(token))
+            if token_hash in _token_cache:
+                cached_user, cached_time = _token_cache[token_hash]
+                if datetime.now() - cached_time < _token_cache_ttl:
+                    # Cache hit - no logging needed for performance
+                    return cached_user
             
             # Method 1: Try direct token validation
             try:
                 user_response = self.supabase.auth.get_user(token)
-                logger.info(f"TOKEN: Direct validation response received")
                 
                 if user_response and user_response.user:
-                    logger.info(f"TOKEN: Direct validation successful for user: {user_response.user.email}")
-                    return self._create_user_in_db_from_supabase(user_response.user)
+                    user_in_db = self._create_user_in_db_from_supabase(user_response.user)
+                    
+                    # Cache the successful validation
+                    _token_cache[token_hash] = (user_in_db, datetime.now())
+                    
+                    return user_in_db
                 else:
                     logger.warning(f"TOKEN: Direct validation returned no user")
             except Exception as direct_error:
@@ -483,26 +496,19 @@ class ProductionSupabaseAuthService:
             
             # Method 2: Try setting session and then getting user
             try:
-                logger.info(f"TOKEN: Attempting session-based validation")
-                
                 # Set the session with the token
                 session_response = self.supabase.auth.set_session(token, token)
-                logger.info(f"TOKEN: Session set, attempting to get user")
                 
                 # Now try to get the current user from the session
                 user_response = self.supabase.auth.get_user()
                 
                 if user_response and user_response.user:
-                    logger.info(f"TOKEN: Session validation successful for user: {user_response.user.email}")
                     return self._create_user_in_db_from_supabase(user_response.user)
-                else:
-                    logger.warning(f"TOKEN: Session validation returned no user")
             except Exception as session_error:
                 logger.warning(f"TOKEN: Session validation failed: {session_error}")
             
             # Method 3: Try using the token as a JWT and verify manually
             try:
-                logger.info(f"TOKEN: Attempting JWT manual verification")
                 
                 # Create a new temporary client with this specific token
                 from supabase import create_client
@@ -516,10 +522,7 @@ class ProductionSupabaseAuthService:
                 user_response = temp_client.auth.get_user(token)
                 
                 if user_response and user_response.user:
-                    logger.info(f"TOKEN: JWT verification successful for user: {user_response.user.email}")
                     return self._create_user_in_db_from_supabase(user_response.user)
-                else:
-                    logger.warning(f"TOKEN: JWT verification returned no user")
             except Exception as jwt_error:
                 logger.warning(f"TOKEN: JWT verification failed: {jwt_error}")
             
@@ -581,7 +584,7 @@ class ProductionSupabaseAuthService:
             last_login=datetime.now()
         )
         
-        logger.info(f"TOKEN: Successfully created UserInDB for: {user.email}")
+# Removed verbose logging for performance
         return user_in_db
     
     async def logout_user(self, token: str) -> bool:

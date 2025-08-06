@@ -14,6 +14,7 @@ class ProfileUpdateRequest(BaseModel):
     job_title: Optional[str] = Field(None, max_length=100, description="User's job title")
     phone_number: Optional[str] = Field(None, max_length=20, description="User's phone number")
     bio: Optional[str] = Field(None, max_length=500, description="User's biography/description")
+    avatar_config: Optional[Dict[str, Any]] = Field(None, description="BoringAvatars configuration")
     timezone: Optional[str] = Field(None, description="User's timezone")
     language: Optional[str] = Field(None, description="User's preferred language")
     
@@ -35,7 +36,7 @@ class ProfileUpdateResponse(BaseModel):
     job_title: Optional[str]
     phone_number: Optional[str]
     bio: Optional[str]
-    profile_picture_url: Optional[str]
+    avatar_config: Optional[Dict[str, Any]]
     timezone: str
     language: str
     updated_at: datetime
@@ -137,10 +138,6 @@ class UserPreferencesResponse(BaseModel):
     message: str = "Preferences updated successfully"
 
 
-class AvatarUploadResponse(BaseModel):
-    """Response model for avatar upload"""
-    profile_picture_url: str
-    message: str = "Avatar updated successfully"
 
 
 class UserSettingsOverview(BaseModel):

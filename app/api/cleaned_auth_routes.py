@@ -264,7 +264,7 @@ async def get_current_user_profile(
             # Get fresh user data from database using Supabase user ID
             result = await conn.execute(text("""
                 SELECT id, email, full_name, role, status, created_at, last_login, 
-                       profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name, company, 
+                       avatar_config, "user.first_name" as first_name, "user.last_name" as last_name, company, 
                        job_title, phone_number, bio, timezone, language, updated_at
                 FROM users 
                 WHERE supabase_user_id = :user_id
@@ -295,7 +295,7 @@ async def get_current_user_profile(
                 status=user_row.status,
                 created_at=user_row.created_at,
                 last_login=user_row.last_login,
-                profile_picture_url=user_row.profile_picture_url,
+                avatar_config=user_row.avatar_config,
                 first_name=user_row.first_name,
                 last_name=user_row.last_name,
                 company=user_row.company,

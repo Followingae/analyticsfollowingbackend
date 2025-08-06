@@ -3,7 +3,7 @@ CLEANED PRODUCTION API ROUTES
 This replaces the existing routes.py with only production-ready, non-duplicate endpoints
 All obsolete, duplicate, and debug endpoints have been removed
 """
-from fastapi import APIRouter, HTTPException, Query, Depends, Path, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, Depends, Path, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import Optional
 from datetime import datetime, timedelta, timezone
@@ -23,7 +23,6 @@ from app.database.comprehensive_service import comprehensive_service
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient, DecodoAPIError, DecodoInstabilityError
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
 from app.cache import profile_cache
-from app.services.avatar_service import get_avatar_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -654,144 +653,10 @@ async def minimal_profile_test(
 
 
 # =============================================================================
-# USER AVATAR MANAGEMENT ENDPOINTS
+# USER AVATAR ENDPOINTS REMOVED
 # =============================================================================
-
-@router.post("/user/avatar/upload")
-async def upload_avatar(
-    file: UploadFile = File(...),
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Upload user avatar to Supabase storage
-    
-    - Accepts JPEG, PNG, WebP images up to 5MB
-    - Automatically resizes to 400x400 pixels
-    - Replaces any existing avatar
-    - Returns public URL for immediate use
-    """
-    try:
-        logger.info(f"Avatar upload request from user {current_user.id}")
-        
-        avatar_service = get_avatar_service()
-        file_path, public_url = await avatar_service.upload_avatar(
-            user_id=str(current_user.id), 
-            file=file,
-            db=db
-        )
-        
-        # Clean up old avatars (keep only current one)
-        await avatar_service.cleanup_old_avatars(str(current_user.id), keep_count=0)
-        
-        return JSONResponse(content={
-            "success": True,
-            "avatar_url": public_url,
-            "file_path": file_path,
-            "message": "Avatar uploaded successfully",
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Avatar upload failed for user {current_user.id}: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail={
-                "error": "upload_failed",
-                "message": "Failed to upload avatar. Please try again.",
-                "details": str(e)[:200]
-            }
-        )
-
-
-@router.get("/user/avatar")
-async def get_user_avatar(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Get user's current avatar with Instagram fallback
-    
-    Returns the user's custom uploaded avatar if available,
-    otherwise returns their Instagram profile picture as fallback
-    """
-    try:
-        avatar_service = get_avatar_service()
-        
-        # Get Instagram profile picture as fallback
-        instagram_avatar = getattr(current_user, 'profile_pic_url', None)
-        
-        # Get avatar data with metadata
-        avatar_data = await avatar_service.get_avatar_url(
-            user_id=str(current_user.id),
-            fallback_instagram_url=instagram_avatar,
-            db=db
-        )
-        
-        return JSONResponse(content={
-            **avatar_data,
-            "user_id": str(current_user.id),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-    except Exception as e:
-        logger.error(f"Failed to get avatar for user {current_user.id}: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail={
-                "error": "avatar_retrieval_failed",
-                "message": "Failed to retrieve avatar information"
-            }
-        )
-
-
-@router.delete("/user/avatar")
-async def delete_avatar(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Delete user's custom avatar
-    
-    Removes the uploaded avatar and reverts to Instagram profile picture.
-    This action cannot be undone.
-    """
-    try:
-        logger.info(f"Avatar deletion request from user {current_user.id}")
-        
-        avatar_service = get_avatar_service()
-        success = await avatar_service.delete_avatar(
-            user_id=str(current_user.id),
-            db=db
-        )
-        
-        if success:
-            return JSONResponse(content={
-                "success": True,
-                "message": "Avatar deleted successfully",
-                "reverted_to": "instagram_profile_picture",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-        else:
-            return JSONResponse(content={
-                "success": False,
-                "message": "No custom avatar found to delete",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Avatar deletion failed for user {current_user.id}: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "deletion_failed", 
-                "message": "Failed to delete avatar. Please try again."
-            }
-        )
+# Avatar system now uses BoringAvatars configuration stored in avatar_config
+# Old avatar upload/management endpoints removed in favor of frontend-generated avatars
 
 
 @router.get("/user/profile/complete")
@@ -806,19 +671,6 @@ async def get_complete_user_profile(
     Includes metadata about avatar source and upload information.
     """
     try:
-        avatar_service = get_avatar_service()
-        
-        # Get Instagram profile picture
-        instagram_avatar = getattr(current_user, 'profile_pic_url', None)
-        instagram_avatar_hd = getattr(current_user, 'profile_pic_url_hd', None)
-        
-        # Get avatar with priority system
-        avatar_data = await avatar_service.get_avatar_url(
-            user_id=str(current_user.id),
-            fallback_instagram_url=instagram_avatar,
-            db=db
-        )
-        
         return JSONResponse(content={
             "user": {
                 "id": str(current_user.id),
@@ -826,22 +678,11 @@ async def get_complete_user_profile(
                 "username": getattr(current_user, 'username', None),
                 "full_name": getattr(current_user, 'full_name', None),
                 "created_at": current_user.created_at.isoformat() if hasattr(current_user, 'created_at') else None,
-                "updated_at": current_user.updated_at.isoformat() if hasattr(current_user, 'updated_at') else None
-            },
-            "avatar": {
-                "current_url": avatar_data["avatar_url"],
-                "has_custom_avatar": avatar_data["has_custom_avatar"],
-                "uploaded_at": avatar_data.get("uploaded_at"),
-                "file_size": avatar_data.get("file_size"),
-                "processed_size": avatar_data.get("processed_size")
-            },
-            "instagram": {
-                "profile_pic_url": instagram_avatar,
-                "profile_pic_url_hd": instagram_avatar_hd
+                "updated_at": current_user.updated_at.isoformat() if hasattr(current_user, 'updated_at') else None,
+                "avatar_config": getattr(current_user, 'avatar_config', None)
             },
             "meta": {
-                "avatar_priority": "custom" if avatar_data["has_custom_avatar"] else "instagram",
-                "fallback_available": instagram_avatar is not None,
+                "avatar_system": "boring_avatars",
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
         })

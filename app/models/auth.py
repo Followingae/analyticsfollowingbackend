@@ -62,7 +62,7 @@ class UserResponse(UserBase):
     id: str
     created_at: datetime
     last_login: Optional[datetime] = None
-    profile_picture_url: Optional[str] = None
+    avatar_config: Optional[Dict[str, Any]] = None
     
     # Profile information fields
     first_name: Optional[str] = None
