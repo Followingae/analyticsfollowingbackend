@@ -34,88 +34,76 @@ _user_cache = {}
 _cache_ttl = timedelta(minutes=5)
 
 
-# Fast cached user lookup using connection pool
-async def get_user_from_db_fast(user_id: str, db_session=None):
-    """Fast user lookup with connection pool reuse and minimal queries + caching"""
+# Simple user lookup - no caching, no complexity
+async def get_user_from_db_simple(user_id: str, db_session):
+    """Simple user lookup for settings"""
     from sqlalchemy import text
-    from fastapi import HTTPException
+    import json
     
-    # Check cache first
-    cache_key = f"user_{user_id}"
-    if cache_key in _user_cache:
-        cached_data, cached_time = _user_cache[cache_key]
-        if datetime.now() - cached_time < _cache_ttl:
-            return cached_data
+    result = await db_session.execute(text("""
+        SELECT id, email, full_name, timezone, language, updated_at, avatar_config,
+               "user.first_name" as first_name, "user.last_name" as last_name, 
+               company, job_title, phone_number, bio, notification_preferences,
+               "user.profile_visibility" as profile_visibility, 
+               "user.data_analytics_enabled" as data_analytics_enabled, preferences
+        FROM users WHERE supabase_user_id = :user_id
+    """), {"user_id": user_id})
     
-    try:
-        # Use existing connection pool instead of creating new connections
-        if db_session:
-            # Use provided session (fastest)
-            result = await db_session.execute(text("""
-                SELECT id, email, full_name, timezone, language, updated_at, 
-                       avatar_config
-                FROM users WHERE supabase_user_id = :user_id LIMIT 1
-            """), {"user_id": user_id})
-        else:
-            # Fallback to connection pool (still fast)
-            async with async_engine.begin() as conn:
-                result = await conn.execute(text("""
-                    SELECT id, email, full_name, timezone, language, updated_at,
-                           avatar_config
-                    FROM users WHERE supabase_user_id = :user_id LIMIT 1
-                """), {"user_id": user_id})
-        
-        row = result.fetchone()
-        if not row:
-            return None
-        
-        # Return simple object with defaults - no complex queries
-        class FastUserRow:
-            def __init__(self, row):
-                self.id = row.id
-                self.email = row.email
-                self.full_name = row.full_name or row.email.split('@')[0]
-                self.timezone = row.timezone or "UTC"
-                self.language = row.language or "en"
-                self.updated_at = row.updated_at
-                self.avatar_config = row.avatar_config
-                # Fast defaults - no DB queries needed
-                self.first_name = None
-                self.last_name = None
-                self.company = None
-                self.job_title = None  
-                self.phone_number = None
-                self.bio = None
-                self.profile_picture_url = None  # Keep for backward compatibility, always None
-                self.two_factor_enabled = False
-                self.email_verified = True
-                self.phone_verified = False
-                self.notification_preferences = {}
-                self.profile_visibility = True
-                self.data_analytics_enabled = True
-                self.preferences = {}
-        
-        user_data = FastUserRow(row)
-        
-        # Cache the result
-        _user_cache[cache_key] = (user_data, datetime.now())
-        
-        return user_data
-        
-    except Exception as e:
-        logger.error(f"Fast user lookup failed for {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="User lookup failed")
+    row = result.fetchone()
+    if not row:
+        return None
+    
+    # Parse JSON fields
+    avatar_config = None
+    if row.avatar_config:
+        try:
+            avatar_config = json.loads(row.avatar_config) if isinstance(row.avatar_config, str) else row.avatar_config
+        except:
+            avatar_config = None
+    
+    # Create simple object
+    class UserRow:
+        pass
+    
+    user = UserRow()
+    user.id = row.id
+    user.email = row.email
+    user.full_name = row.full_name
+    user.first_name = row.first_name
+    user.last_name = row.last_name
+    user.company = row.company
+    user.job_title = row.job_title
+    user.phone_number = row.phone_number
+    user.bio = row.bio
+    user.timezone = row.timezone or "UTC"
+    user.language = row.language or "en"
+    user.updated_at = row.updated_at
+    user.avatar_config = avatar_config
+    user.notification_preferences = row.notification_preferences or {}
+    user.profile_visibility = getattr(row, 'profile_visibility', True)
+    user.data_analytics_enabled = getattr(row, 'data_analytics_enabled', True)
+    user.preferences = row.preferences or {}
+    user.two_factor_enabled = False
+    user.email_verified = True
+    user.phone_verified = False
+    
+    return user
 
 
 async def update_user_in_db(user_id: str, **update_data):
     """Update user data using connection pool with timeout"""
     import asyncio
+    import json
     from app.database.connection import async_engine
     from sqlalchemy import text
     from fastapi import HTTPException
     
     if not update_data:
         return
+    
+    # Convert avatar_config dict to JSON string for PostgreSQL JSONB
+    if 'avatar_config' in update_data and update_data['avatar_config'] is not None:
+        update_data['avatar_config'] = json.dumps(update_data['avatar_config'])
     
     try:
         # Add 30-second timeout to prevent hanging
@@ -157,7 +145,8 @@ async def update_user_in_db(user_id: str, **update_data):
 
 @router.get("/profile", response_model=ProfileUpdateResponse)
 async def get_user_profile(
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """
     Get current user's profile information
@@ -166,7 +155,7 @@ async def get_user_profile(
     """
     try:
         # Get fresh user data from database using connection pool
-        user_data = await get_user_from_db_fast(current_user.id)
+        user_data = await get_user_from_db_simple(current_user.id, db_session)
         
         if not user_data:
             raise HTTPException(status_code=404, detail="User not found")
@@ -195,7 +184,8 @@ async def get_user_profile(
 @router.put("/profile", response_model=ProfileUpdateResponse)
 async def update_user_profile(
     profile_data: ProfileUpdateRequest,
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """
     Update user's profile information
@@ -229,7 +219,7 @@ async def update_user_profile(
         # Auto-generate full_name if first_name or last_name provided
         if 'first_name' in update_data or 'last_name' in update_data:
             # Get current values for fields not being updated
-            current_user_data = await get_user_from_db_fast(current_user.id)
+            current_user_data = await get_user_from_db_simple(current_user.id, db_session)
             
             first_name = update_data.get('first_name', current_user_data.first_name) or ""
             last_name = update_data.get('last_name', current_user_data.last_name) or ""
@@ -242,7 +232,7 @@ async def update_user_profile(
         await update_user_in_db(current_user.id, **update_data)
         
         # Get updated user data
-        updated_user = await get_user_from_db_fast(current_user.id)
+        updated_user = await get_user_from_db_simple(current_user.id, db_session)
         
         logger.info(f"Profile updated for user {current_user.id}: {list(update_data.keys())}")
         
@@ -318,7 +308,8 @@ async def change_password(
 @router.post("/security/2fa", response_model=TwoFactorToggleResponse)
 async def toggle_two_factor_auth(
     tfa_data: TwoFactorToggleRequest,
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """
     Enable or disable Two-Factor Authentication
@@ -367,7 +358,8 @@ async def toggle_two_factor_auth(
 @router.put("/security/privacy", response_model=PrivacySettingsResponse)
 async def update_privacy_settings(
     privacy_data: PrivacySettingsRequest,
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """
     Update privacy settings
@@ -389,7 +381,7 @@ async def update_privacy_settings(
         await update_user_in_db(current_user.id, **update_data)
         
         # Get updated values
-        updated_user = await get_user_from_db_fast(current_user.id)
+        updated_user = await get_user_from_db_simple(current_user.id, db_session)
         
         logger.info(f"Privacy settings updated for user {current_user.id}")
         
@@ -411,11 +403,12 @@ async def update_privacy_settings(
 
 @router.get("/notifications", response_model=NotificationPreferencesResponse)
 async def get_notification_preferences(
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """Get current notification preferences"""
     try:
-        user = await get_user_from_db_fast(current_user.id)
+        user = await get_user_from_db_simple(current_user.id, db_session)
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -447,7 +440,7 @@ async def update_notification_preferences(
     """
     try:
         # Get current preferences using connection pool
-        user = await get_user_from_db_fast(current_user.id)
+        user = await get_user_from_db_simple(current_user.id, db_session)
         
         current_prefs = user.notification_preferences or {}
         
@@ -491,7 +484,7 @@ async def get_user_preferences(
 ):
     """Get current user preferences and app settings"""
     try:
-        user = await get_user_from_db_fast(current_user.id)
+        user = await get_user_from_db_simple(current_user.id, db_session)
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -519,7 +512,7 @@ async def update_user_preferences(
     """
     try:
         # Get current user data using connection pool
-        user = await get_user_from_db_fast(current_user.id)
+        user = await get_user_from_db_simple(current_user.id, db_session)
         
         update_data = {}
         current_prefs = user.preferences or {}
@@ -545,7 +538,7 @@ async def update_user_preferences(
         await update_user_in_db(current_user.id, **update_data)
         
         # Get updated data
-        updated_user = await get_user_from_db_fast(current_user.id)
+        updated_user = await get_user_from_db_simple(current_user.id, db_session)
         
         logger.info(f"User preferences updated for user {current_user.id}")
         
@@ -580,7 +573,7 @@ async def get_complete_settings_overview(
         logger.info(f"Getting settings overview for user {current_user.id}")
         
         # Use fast lookup with existing connection pool
-        user_row = await get_user_from_db_fast(current_user.id, db_session)
+        user_row = await get_user_from_db_simple(current_user.id, db_session)
         
         if not user_row:
             logger.warning(f"User not found in database: {current_user.id}")

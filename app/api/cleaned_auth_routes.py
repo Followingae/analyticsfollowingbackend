@@ -258,6 +258,7 @@ async def get_current_user_profile(
         
         from app.database.connection import async_engine
         from sqlalchemy import text
+        import json
         
         # Use connection pool for fast database access
         async with async_engine.begin() as conn:
@@ -287,6 +288,13 @@ async def get_current_user_profile(
                 )
             
             logger.info(f"AUTH-ME: Successfully found user in database: {user_row.email}")
+            # Parse avatar_config from JSON string to dict
+            avatar_config = None
+            try:
+                avatar_config = json.loads(user_row.avatar_config) if user_row.avatar_config else None
+            except (json.JSONDecodeError, TypeError):
+                avatar_config = None
+            
             return UserResponse(
                 id=current_user.id,
                 email=user_row.email,
@@ -295,7 +303,7 @@ async def get_current_user_profile(
                 status=user_row.status,
                 created_at=user_row.created_at,
                 last_login=user_row.last_login,
-                avatar_config=user_row.avatar_config,
+                avatar_config=avatar_config,
                 first_name=user_row.first_name,
                 last_name=user_row.last_name,
                 company=user_row.company,
