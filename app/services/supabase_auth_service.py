@@ -483,6 +483,14 @@ class ProductionSupabaseAuthService:
                 user_response = self.supabase.auth.get_user(token)
                 
                 if user_response and user_response.user:
+                    # CRITICAL: Ensure user exists in database before creating UserInDB object
+                    try:
+                        user_metadata = user_response.user.user_metadata or {}
+                        await self._ensure_user_in_database(user_response.user, user_metadata)
+                    except Exception as db_error:
+                        logger.warning(f"Database sync failed during token validation: {db_error}")
+                        # Continue authentication even if database sync fails
+                    
                     user_in_db = self._create_user_in_db_from_supabase(user_response.user)
                     
                     # Cache the successful validation
@@ -503,6 +511,14 @@ class ProductionSupabaseAuthService:
                 user_response = self.supabase.auth.get_user()
                 
                 if user_response and user_response.user:
+                    # CRITICAL: Ensure user exists in database before creating UserInDB object
+                    try:
+                        user_metadata = user_response.user.user_metadata or {}
+                        await self._ensure_user_in_database(user_response.user, user_metadata)
+                    except Exception as db_error:
+                        logger.warning(f"Database sync failed during session validation: {db_error}")
+                        # Continue authentication even if database sync fails
+                    
                     return self._create_user_in_db_from_supabase(user_response.user)
             except Exception as session_error:
                 logger.warning(f"TOKEN: Session validation failed: {session_error}")
@@ -522,6 +538,14 @@ class ProductionSupabaseAuthService:
                 user_response = temp_client.auth.get_user(token)
                 
                 if user_response and user_response.user:
+                    # CRITICAL: Ensure user exists in database before creating UserInDB object
+                    try:
+                        user_metadata = user_response.user.user_metadata or {}
+                        await self._ensure_user_in_database(user_response.user, user_metadata)
+                    except Exception as db_error:
+                        logger.warning(f"Database sync failed during JWT validation: {db_error}")
+                        # Continue authentication even if database sync fails
+                    
                     return self._create_user_in_db_from_supabase(user_response.user)
             except Exception as jwt_error:
                 logger.warning(f"TOKEN: JWT verification failed: {jwt_error}")

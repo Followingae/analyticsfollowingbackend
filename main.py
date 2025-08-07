@@ -149,6 +149,10 @@ app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 
+# Include My Lists routes
+from app.api.lists_routes import router as lists_router
+app.include_router(lists_router, prefix="/api/v1")
+
 
 @app.get("/")
 async def root():

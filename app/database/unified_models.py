@@ -165,6 +165,8 @@ class User(Base):
     user_profile_access = relationship("UserProfileAccess", back_populates="user", cascade="all, delete-orphan")
     user_searches = relationship("UserSearch", back_populates="user", cascade="all, delete-orphan")
     favorites = relationship("UserFavorite", back_populates="user", cascade="all, delete-orphan")
+    user_lists = relationship("UserList", back_populates="user", cascade="all, delete-orphan")
+    user_list_items = relationship("UserListItem", back_populates="user", cascade="all, delete-orphan")
     
     # Constraints
     __table_args__ = (
@@ -656,6 +658,92 @@ class CampaignProfile(Base):
         Index('ix_campaign_profiles_unique', 'campaign_id', 'profile_id', unique=True),
         Index('idx_campaign_profiles_role', 'role'),
         Index('idx_campaign_profiles_priority', 'priority'),
+    )
+
+
+# =============================================================================
+# MY LISTS MODULE - User List Management
+# =============================================================================
+
+class UserList(Base):
+    """User-created lists for organizing Instagram profiles"""
+    __tablename__ = "user_lists"
+    
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # List metadata
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    color = Column(String(7), default='#3B82F6')  # Hex color for UI customization
+    icon = Column(String(50), default='list')  # Icon identifier for UI
+    
+    # List settings
+    is_public = Column(Boolean, nullable=False, default=False)  # Future: allow public list sharing
+    is_favorite = Column(Boolean, nullable=False, default=False)  # Mark important lists
+    sort_order = Column(Integer, default=0)  # User-defined list ordering
+    
+    # List statistics (computed)
+    items_count = Column(Integer, nullable=False, default=0)
+    last_updated = Column(DateTime(timezone=True))
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    user = relationship("User", back_populates="user_lists")
+    list_items = relationship("UserListItem", back_populates="user_list", cascade="all, delete-orphan", order_by="UserListItem.position")
+    
+    # Constraints
+    __table_args__ = (
+        CheckConstraint("LENGTH(TRIM(name)) > 0", name='user_lists_name_not_empty'),
+        CheckConstraint("color ~ '^#[0-9A-Fa-f]{6}$'", name='user_lists_color_valid'),
+        Index('idx_user_lists_user_id', 'user_id'),
+        Index('idx_user_lists_created_at', 'created_at'),
+        Index('idx_user_lists_updated', 'last_updated'),
+        Index('idx_user_lists_public', 'is_public'),
+    )
+
+
+class UserListItem(Base):
+    """Junction table linking lists to Instagram profiles with customization"""
+    __tablename__ = "user_list_items"
+    
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    list_id = Column(UUID(as_uuid=True), ForeignKey('user_lists.id', ondelete='CASCADE'), nullable=False, index=True)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)  # Denormalized for RLS
+    
+    # Item metadata
+    position = Column(Integer, nullable=False, default=0)  # Order within the list
+    notes = Column(Text)  # User notes for this profile in this list
+    tags = Column(ARRAY(Text))  # User-defined tags for this item
+    
+    # Item settings
+    is_pinned = Column(Boolean, nullable=False, default=False)  # Pin to top of list
+    color_label = Column(String(7))  # Optional color label for this item
+    
+    # Timestamps
+    added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    user_list = relationship("UserList", back_populates="list_items")
+    profile = relationship("Profile")
+    user = relationship("User", back_populates="user_list_items")
+    
+    # Constraints
+    __table_args__ = (
+        Index('idx_user_list_items_list_profile', 'list_id', 'profile_id', unique=True),  # Prevent duplicates
+        CheckConstraint("position >= 0", name='user_list_items_position_non_negative'),
+        Index('idx_user_list_items_list_id', 'list_id'),
+        Index('idx_user_list_items_profile_id', 'profile_id'),
+        Index('idx_user_list_items_user_id', 'user_id'),
+        Index('idx_user_list_items_position', 'list_id', 'position'),
+        Index('idx_user_list_items_added_at', 'added_at'),
     )
 
 

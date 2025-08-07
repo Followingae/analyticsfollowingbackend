@@ -20,7 +20,8 @@ from app.core.config import settings
 from .unified_models import (
     User, Profile, Post, UserProfileAccess, UserSearch, UserFavorite,
     AudienceDemographics, CreatorMetadata, CommentSentiment,
-    RelatedProfile, Mention, Campaign, CampaignPost, CampaignProfile
+    RelatedProfile, Mention, Campaign, CampaignPost, CampaignProfile,
+    UserList, UserListItem
 )
 from app.services.engagement_rate_service import EngagementRateService
 
@@ -40,19 +41,43 @@ class ComprehensiveDataService:
                 logger.info("Comprehensive service pool already initialized - reusing existing pool")
                 return
                 
-            if settings.DATABASE_URL and "[YOUR-PASSWORD]" not in settings.DATABASE_URL:
-                self.pool = await asyncpg.create_pool(
-                    settings.DATABASE_URL,
-                    min_size=2,
-                    max_size=10,
-                    command_timeout=30,  # 30 second command timeout
-                    server_settings={"statement_cache_size": "100"}
+            # Check if database URL is properly configured
+            if not settings.DATABASE_URL or "[YOUR-PASSWORD]" in settings.DATABASE_URL or not settings.DATABASE_URL.strip():
+                logger.warning("Database URL not configured properly for comprehensive service - skipping pool initialization")
+                return
+                
+            # Try to create connection pool with error handling and timeout
+            try:
+                self.pool = await asyncio.wait_for(
+                    asyncpg.create_pool(
+                        settings.DATABASE_URL,
+                        min_size=1,  # Reduced minimum connections
+                        max_size=5,  # Reduced maximum connections
+                        command_timeout=30,
+                        server_settings={
+                            "statement_cache_size": "50",
+                            "application_name": "comprehensive_service"
+                        }
+                    ),
+                    timeout=10.0  # 10 second timeout for pool creation
                 )
                 logger.info("Comprehensive service connection pool initialized successfully")
-            else:
-                logger.warning("Database URL not configured for comprehensive service")
+            except asyncio.TimeoutError:
+                logger.warning("Comprehensive service pool initialization timed out - service will operate without pool")
+                self.pool = None
+            except asyncpg.InvalidAuthorizationSpecificationError:
+                logger.warning("Database authentication failed for comprehensive service - service will operate without pool")
+                self.pool = None
+            except asyncpg.CannotConnectNowError:
+                logger.warning("Database connection limit reached for comprehensive service - service will operate without pool")
+                self.pool = None
+            except Exception as pool_error:
+                logger.warning(f"Comprehensive service pool creation failed: {pool_error} - service will operate without pool")
+                self.pool = None
+                
         except Exception as e:
-            logger.error(f"Failed to initialize connection pool: {e}")
+            logger.error(f"Failed to initialize comprehensive service connection pool: {e}")
+            self.pool = None
     
     async def check_db_health(self, db: AsyncSession) -> bool:
         """Check if database connection is healthy"""
@@ -1453,8 +1478,11 @@ class ComprehensiveDataService:
                 await self.pool.close()
                 self.pool = None
                 logger.info("Comprehensive service connection pool closed")
+            else:
+                logger.debug("Comprehensive service connection pool was not initialized - nothing to close")
         except Exception as e:
             logger.error(f"Error closing comprehensive service pool: {e}")
+            self.pool = None  # Ensure pool is reset even if close fails
 
 # Global service instance
 comprehensive_service = ComprehensiveDataService()
