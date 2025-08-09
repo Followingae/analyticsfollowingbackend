@@ -54,12 +54,12 @@ class ContentIntelligenceService:
             await self.category_classifier.initialize()
             
             self.initialized = True
-            logger.info("✅ Content Intelligence Service initialized successfully")
+            logger.info("Content Intelligence Service initialized successfully")
             return True
             
         except Exception as e:
             self.initialization_error = str(e)
-            logger.error(f"❌ Failed to initialize Content Intelligence Service: {e}")
+            logger.error(f"Failed to initialize Content Intelligence Service: {e}")
             return False
     
     async def analyze_post_content(self, post: Post, profile_followers: int = 0) -> Dict[str, Any]:
@@ -223,9 +223,9 @@ class ContentIntelligenceService:
                     ai_content_category=analysis_results.get("ai_content_category"),
                     ai_sentiment=analysis_results.get("ai_sentiment"),
                     ai_sentiment_score=analysis_results.get("ai_sentiment_score"),
-                    ai_language=analysis_results.get("ai_language_code"),
+                    ai_language_code=analysis_results.get("ai_language_code"),
                     ai_language_confidence=analysis_results.get("ai_language_confidence"),
-                    ai_post_analyzed_at=datetime.now(timezone.utc)
+                    ai_analyzed_at=datetime.now(timezone.utc)
                 )
             )
             await db.commit()
@@ -233,6 +233,10 @@ class ContentIntelligenceService:
             
         except Exception as e:
             logger.error(f"Failed to update post AI analysis: {e}")
+            try:
+                await db.rollback()
+            except:
+                pass
             return False
     
     async def analyze_profile_content(self, db: AsyncSession, profile_id: str) -> Dict[str, Any]:
@@ -285,11 +289,11 @@ class ContentIntelligenceService:
             language_counts = {}
             total_tasks = len(analysis_tasks)
             
-            logger.info(f"🔄 Starting analysis of {total_tasks} posts for profile {profile.username}")
+            logger.info(f"Starting analysis of {total_tasks} posts for profile {profile.username}")
             
             for i, (post_id, analysis_task) in enumerate(analysis_tasks, 1):
                 try:
-                    logger.info(f"📊 Analyzing post {i}/{total_tasks} (ID: {str(post_id)[:8]}...)")
+                    logger.info(f"Analyzing post {i}/{total_tasks} (ID: {str(post_id)[:8]}...)")
                     analysis_result = await analysis_task
                     
                     if "error" not in analysis_result:
@@ -301,7 +305,7 @@ class ContentIntelligenceService:
                         category = analysis_result.get("ai_content_category")
                         sentiment = analysis_result.get("ai_sentiment")
                         language = analysis_result.get("ai_language_code")
-                        logger.info(f"✅ Post {i}/{total_tasks} analyzed - Category: {category}, Sentiment: {sentiment}, Language: {language}")
+                        logger.info(f"Post {i}/{total_tasks} analyzed - Category: {category}, Sentiment: {sentiment}, Language: {language}")
                         
                         # Aggregate data for profile insights
                         if category:
@@ -314,14 +318,14 @@ class ContentIntelligenceService:
                         if language:
                             language_counts[language] = language_counts.get(language, 0) + 1
                     else:
-                        logger.warning(f"❌ Post {i}/{total_tasks} analysis failed: {analysis_result.get('error')}")
+                        logger.warning(f"Post {i}/{total_tasks} analysis failed: {analysis_result.get('error')}")
                     
                     # Progress indicator
                     progress_pct = int((i / total_tasks) * 100)
-                    logger.info(f"📈 Progress: {progress_pct}% ({i}/{total_tasks} posts processed)")
+                    logger.info(f"Progress: {progress_pct}% ({i}/{total_tasks} posts processed)")
                     
                 except Exception as e:
-                    logger.error(f"❌ Failed to analyze post {i}/{total_tasks} (ID: {post_id}): {e}")
+                    logger.error(f"Failed to analyze post {i}/{total_tasks} (ID: {post_id}): {e}")
                     continue
             
             # Calculate profile-level insights
@@ -330,16 +334,16 @@ class ContentIntelligenceService:
             )
             
             # Update profile with aggregated insights
-            logger.info(f"💾 Updating profile {profile.username} with aggregated AI insights...")
+            logger.info(f"Updating profile {profile.username} with aggregated AI insights...")
             await self.update_profile_ai_insights(db, profile_id, profile_insights)
             
             # Log completion summary
-            logger.info(f"🎉 AI Analysis COMPLETE for {profile.username}!")
-            logger.info(f"📊 Summary: {successful_analyses}/{len(posts)} posts analyzed")
-            logger.info(f"🏷️ Top categories: {dict(list(category_distribution.items())[:3])}")
-            logger.info(f"💭 Avg sentiment: {profile_insights.get('ai_avg_sentiment_score', 0)}")
-            logger.info(f"🌍 Languages: {list(language_counts.keys())}")
-            logger.info(f"⭐ Content quality score: {profile_insights.get('ai_content_quality_score', 0)}")
+            logger.info(f"AI Analysis COMPLETE for {profile.username}!")
+            logger.info(f"Summary: {successful_analyses}/{len(posts)} posts analyzed")
+            logger.info(f"Top categories: {dict(list(category_distribution.items())[:3])}")
+            logger.info(f"Avg sentiment: {profile_insights.get('ai_avg_sentiment_score', 0)}")
+            logger.info(f"Languages: {list(language_counts.keys())}")
+            logger.info(f"Content quality score: {profile_insights.get('ai_content_quality_score', 0)}")
             
             return {
                 "profile_id": profile_id,
@@ -447,6 +451,10 @@ class ContentIntelligenceService:
             
         except Exception as e:
             logger.error(f"Failed to update profile AI insights: {e}")
+            try:
+                await db.rollback()
+            except:
+                pass
             return False
     
     async def get_ai_analytics_stats(self, db: AsyncSession) -> Dict[str, Any]:

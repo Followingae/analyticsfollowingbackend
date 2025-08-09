@@ -82,6 +82,11 @@ class ComprehensiveDataService:
     async def check_db_health(self, db: AsyncSession) -> bool:
         """Check if database connection is healthy"""
         try:
+            # If there's an invalid transaction, roll it back first
+            if hasattr(db, '_connection') and db._connection and hasattr(db._connection, '_invalidated') and db._connection._invalidated:
+                logger.warning("Connection invalidated, attempting rollback")
+                await db.rollback()
+            
             # Simple health check query with timeout
             result = await asyncio.wait_for(
                 db.execute(text("SELECT 1")), 
@@ -90,6 +95,12 @@ class ComprehensiveDataService:
             return True
         except Exception as e:
             logger.warning(f"Database health check failed: {e}")
+            # Try rollback if transaction is in invalid state
+            try:
+                await db.rollback()
+                logger.debug("Performed rollback after health check failure")
+            except:
+                pass
             return False
     
     async def retry_db_operation(self, operation, db: AsyncSession, max_retries: int = 2):
@@ -100,10 +111,14 @@ class ComprehensiveDataService:
                     # Check health before retry
                     if not await self.check_db_health(db):
                         logger.warning(f"Database unhealthy on retry attempt {attempt}")
-                        # Try to recover
+                        # Try to recover by rolling back any invalid transaction
                         try:
-                            await db.rollback()
-                        except:
+                            if db.in_transaction():
+                                await db.rollback()
+                                logger.debug("Rolled back invalid transaction")
+                            await asyncio.sleep(0.1)  # Brief pause for recovery
+                        except Exception as rollback_error:
+                            logger.warning(f"Error during rollback recovery: {rollback_error}")
                             pass
                 
                 return await operation()
