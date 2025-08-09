@@ -41,6 +41,14 @@ class Settings(BaseSettings):
     SMARTPROXY_BASE_URL: str = "https://scraper-api.decodo.com/v2"
     SMARTPROXY_INSTAGRAM_ENDPOINT: str = f"{SMARTPROXY_BASE_URL}/scrape"
     
+    # AI/ML Configuration
+    AI_MODELS_CACHE_DIR: str = os.getenv("AI_MODELS_CACHE_DIR", "./ai_models")
+    AI_BATCH_SIZE: int = int(os.getenv("AI_BATCH_SIZE", "16"))
+    AI_MAX_WORKERS: int = int(os.getenv("AI_MAX_WORKERS", "2"))
+    AI_MODEL_DEVICE: str = os.getenv("AI_MODEL_DEVICE", "cpu")  # cpu or cuda
+    ENABLE_AI_ANALYSIS: bool = os.getenv("ENABLE_AI_ANALYSIS", "true").lower() == "true"
+    AI_ANALYSIS_QUEUE_SIZE: int = int(os.getenv("AI_ANALYSIS_QUEUE_SIZE", "100"))
+    
     class Config:
         case_sensitive = True
 

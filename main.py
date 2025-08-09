@@ -15,6 +15,7 @@ from app.api.cleaned_routes import router
 from app.api.cleaned_auth_routes import router as auth_router
 from app.api.settings_routes import router as settings_router
 from app.api.engagement_routes import router as engagement_router
+from app.api.ai_routes import router as ai_router
 from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
 from app.database.comprehensive_service import comprehensive_service
@@ -48,10 +49,13 @@ async def lifespan(app: FastAPI):
     
     # Initialize comprehensive service (may depend on database) 
     try:
-        await asyncio.wait_for(comprehensive_service.init_pool(), timeout=5.0)
+        await asyncio.wait_for(comprehensive_service.init_pool(), timeout=15.0)  # Increased timeout
         print("Comprehensive service initialized")
+    except asyncio.TimeoutError:
+        print("Comprehensive service initialization timed out - will operate without connection pool")
     except Exception as e:
         print(f"Comprehensive service failed: {e}")
+        # Don't fail startup - the service can operate without the pool
     
     # Start cache cleanup task
     try:
@@ -150,6 +154,7 @@ app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(engagement_router, prefix="/api/v1")
+app.include_router(ai_router, prefix="/api/v1")
 
 # Include My Lists routes
 from app.api.lists_routes import router as lists_router

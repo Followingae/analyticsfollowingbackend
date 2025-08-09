@@ -129,6 +129,27 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
                     "content_quality_score": 0
                 }
             
+            # Collect AI insights if available
+            ai_insights = {}
+            if profile:
+                try:
+                    ai_insights = {
+                        "ai_primary_content_type": profile.ai_primary_content_type,
+                        "ai_content_distribution": profile.ai_content_distribution,
+                        "ai_avg_sentiment_score": profile.ai_avg_sentiment_score,
+                        "ai_language_distribution": profile.ai_language_distribution,
+                        "ai_content_quality_score": profile.ai_content_quality_score,
+                        "ai_profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                        "has_ai_analysis": profile.ai_profile_analyzed_at is not None,
+                        "ai_processing_status": "completed" if profile.ai_profile_analyzed_at else "pending"
+                    }
+                except AttributeError:
+                    # AI columns might not exist in older database versions
+                    ai_insights = {
+                        "has_ai_analysis": False,
+                        "ai_processing_status": "not_available"
+                    }
+
             return {
                 "success": True,
                 "profile": {
@@ -153,13 +174,15 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
                     "content_quality_score": analytics_data["content_quality_score"]
                 },
                 "analytics": analytics_data,
+                "ai_insights": ai_insights,
                 "meta": {
                     "analysis_timestamp": current_time.isoformat(),
                     "data_source": "decodo_with_calculated_analytics",
                     "stored_in_database": profile is not None,
                     "posts_stored": 12 if profile else 0,  # Add posts count
                     "user_has_access": True,
-                    "access_expires_in_days": 30
+                    "access_expires_in_days": 30,
+                    "includes_ai_insights": bool(ai_insights.get("has_ai_analysis", False))
                 }
             }
     except Exception as e:
@@ -207,10 +230,35 @@ async def analyze_instagram_profile(
                     db, current_user.id, username
                 )
                 
-                # Return the existing profile data
+                # Return the existing profile data with AI insights
                 cached_data = await comprehensive_service.get_user_profile_access(
                     db, current_user.id, username
                 )
+                
+                # Enhance with AI insights if available
+                if cached_data and existing_profile:
+                    try:
+                        ai_insights = {
+                            "ai_primary_content_type": existing_profile.ai_primary_content_type,
+                            "ai_content_distribution": existing_profile.ai_content_distribution,
+                            "ai_avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
+                            "ai_language_distribution": existing_profile.ai_language_distribution,
+                            "ai_content_quality_score": existing_profile.ai_content_quality_score,
+                            "ai_profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None,
+                            "has_ai_analysis": existing_profile.ai_profile_analyzed_at is not None,
+                            "ai_processing_status": "completed" if existing_profile.ai_profile_analyzed_at else "pending"
+                        }
+                        cached_data["ai_insights"] = ai_insights
+                        cached_data["meta"]["includes_ai_insights"] = bool(ai_insights.get("has_ai_analysis", False))
+                    except AttributeError:
+                        # AI columns might not exist in older database versions
+                        ai_insights = {
+                            "has_ai_analysis": False,
+                            "ai_processing_status": "not_available"
+                        }
+                        cached_data["ai_insights"] = ai_insights
+                        cached_data["meta"]["includes_ai_insights"] = False
+                
                 return JSONResponse(content=cached_data)
                 
         except Exception as cache_error:
@@ -298,6 +346,31 @@ async def get_detailed_analytics(
         
         logger.info(f"SUCCESS: Returning detailed analytics for {username} from database cache")
         
+        # Enhance cached data with AI insights from database
+        profile = await comprehensive_service.get_profile_by_username(db, username)
+        if profile and cached_profile:
+            try:
+                ai_insights = {
+                    "ai_primary_content_type": profile.ai_primary_content_type,
+                    "ai_content_distribution": profile.ai_content_distribution,
+                    "ai_avg_sentiment_score": profile.ai_avg_sentiment_score,
+                    "ai_language_distribution": profile.ai_language_distribution,
+                    "ai_content_quality_score": profile.ai_content_quality_score,
+                    "ai_profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                    "has_ai_analysis": profile.ai_profile_analyzed_at is not None,
+                    "ai_processing_status": "completed" if profile.ai_profile_analyzed_at else "pending"
+                }
+                cached_profile["ai_insights"] = ai_insights
+                cached_profile["meta"]["includes_ai_insights"] = bool(ai_insights.get("has_ai_analysis", False))
+            except AttributeError:
+                # AI columns might not exist in older database versions
+                ai_insights = {
+                    "has_ai_analysis": False,
+                    "ai_processing_status": "not_available"
+                }
+                cached_profile["ai_insights"] = ai_insights
+                cached_profile["meta"]["includes_ai_insights"] = False
+
         # Return the cached data with additional metadata for detailed view
         cached_profile["meta"]["view_type"] = "detailed_analytics"
         cached_profile["meta"]["source_note"] = "Retrieved from database cache - no API calls made"
@@ -503,6 +576,26 @@ async def get_profile_posts(
         formatted_posts = []
         for post in posts:
             
+            # Collect AI analysis for this post if available
+            ai_analysis = {}
+            try:
+                ai_analysis = {
+                    "ai_content_category": post.ai_content_category,
+                    "ai_sentiment": post.ai_sentiment,
+                    "ai_sentiment_score": post.ai_sentiment_score,
+                    "ai_language": post.ai_language,
+                    "ai_language_confidence": post.ai_language_confidence,
+                    "ai_post_analyzed_at": post.ai_post_analyzed_at.isoformat() if post.ai_post_analyzed_at else None,
+                    "has_ai_analysis": post.ai_post_analyzed_at is not None,
+                    "ai_processing_status": "completed" if post.ai_post_analyzed_at else "pending"
+                }
+            except AttributeError:
+                # AI columns might not exist in older database versions
+                ai_analysis = {
+                    "has_ai_analysis": False,
+                    "ai_processing_status": "not_available"
+                }
+
             formatted_post = {
                 'id': str(post.id),
                 'instagram_post_id': post.instagram_post_id,
@@ -534,6 +627,9 @@ async def get_profile_posts(
                 'display_url': post.display_url if post.display_url else None,
                 'video_url': post.video_url if post.video_url else None,
                 
+                # AI Analysis
+                'ai_analysis': ai_analysis,
+                
                 # Metadata
                 'dimensions': {
                     'width': post.width,
@@ -563,6 +659,9 @@ async def get_profile_posts(
         )
         total_posts = total_result.scalar()
         
+        # Calculate AI analysis statistics
+        posts_with_ai = sum(1 for post in formatted_posts if post['ai_analysis'].get('has_ai_analysis', False))
+        
         return JSONResponse(content={
             'profile': {
                 'username': profile.username,
@@ -570,6 +669,12 @@ async def get_profile_posts(
                 'total_posts': total_posts
             },
             'posts': formatted_posts,
+            'ai_analytics': {
+                'posts_with_ai_analysis': posts_with_ai,
+                'total_posts_returned': len(formatted_posts),
+                'ai_analysis_coverage': round((posts_with_ai / len(formatted_posts) * 100), 2) if formatted_posts else 0,
+                'ai_features_available': ['content_category', 'sentiment_analysis', 'language_detection']
+            },
             'pagination': {
                 'limit': limit,
                 'offset': offset,
@@ -580,6 +685,7 @@ async def get_profile_posts(
             'meta': {
                 'posts_returned': len(formatted_posts),
                 'data_source': 'database',
+                'includes_ai_analysis': True,
                 'note': 'All image URLs are pre-proxied during storage - no CORS issues'
             }
         })

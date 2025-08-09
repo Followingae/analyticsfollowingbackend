@@ -303,8 +303,17 @@ class Profile(Base):
     influence_score = Column(Float, nullable=True)
     data_quality_score = Column(Float, nullable=True, default=0.0)
     
-    # Category
+    # Category (Instagram business category)
     category = Column(String(255), nullable=True)
+    instagram_business_category = Column(String(100), nullable=True)  # Renamed for clarity
+    
+    # AI-Enhanced Content Intelligence (added by AI migration)
+    ai_primary_content_type = Column(String(50), nullable=True)  # AI-determined main category
+    ai_content_distribution = Column(JSONB, nullable=True)  # {"Fashion": 0.4, "Travel": 0.3, etc}
+    ai_avg_sentiment_score = Column(Float, nullable=True, default=0.0)  # Average sentiment across posts
+    ai_language_distribution = Column(JSONB, nullable=True)  # {"en": 0.8, "ar": 0.2, etc}
+    ai_content_quality_score = Column(Float, nullable=True, default=0.0)  # Overall content quality
+    ai_profile_analyzed_at = Column(DateTime(timezone=True), nullable=True)  # When AI analysis was done
     
     # Data management
     refresh_count = Column(Integer, nullable=True, default=0)
@@ -406,6 +415,18 @@ class Post(Base):
     # Performance metrics (computed)
     engagement_rate = Column(Float)  # (likes + comments) / profile_followers * 100
     performance_score = Column(Float)  # Relative to account average
+    
+    # AI Content Intelligence (added by AI migration)
+    ai_content_category = Column(String(50), nullable=True, index=True)  # Fashion, Tech, Travel, etc.
+    ai_category_confidence = Column(Float, nullable=True, default=0.0)  # 0.0-1.0 confidence
+    ai_sentiment = Column(String(20), nullable=True, index=True)  # positive, negative, neutral
+    ai_sentiment_score = Column(Float, nullable=True, default=0.0)  # -1.0 to +1.0
+    ai_sentiment_confidence = Column(Float, nullable=True, default=0.0)  # 0.0-1.0
+    ai_language_code = Column(String(10), nullable=True, index=True)  # ISO language code
+    ai_language_confidence = Column(Float, nullable=True, default=0.0)  # 0.0-1.0
+    ai_analysis_raw = Column(JSONB, nullable=True)  # Full AI analysis results
+    ai_analyzed_at = Column(DateTime(timezone=True), nullable=True, index=True)  # When analyzed
+    ai_analysis_version = Column(String(20), nullable=True, default='1.0.0')  # Track model versions
     
     # Media storage
     post_images = Column(JSONB)  # Array of image versions/sizes stored

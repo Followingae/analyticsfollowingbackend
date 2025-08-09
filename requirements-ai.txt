@@ -1,0 +1,22 @@
+# AI/ML Content Classification Dependencies
+# Core ML/AI Libraries
+torch>=1.13.0
+transformers>=4.25.0
+sentencepiece>=0.1.97
+
+# For category classification (optional - loaded on demand)
+scipy>=1.9.0
+scikit-learn>=1.1.0
+
+# Text processing
+regex>=2022.10.31
+tokenizers>=0.13.0
+
+# Progress tracking
+tqdm>=4.64.0
+
+# Memory optimization
+psutil>=5.9.0
+
+# Configuration management for AI models
+pyyaml>=6.0
