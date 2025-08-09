@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS public.user_lists (
     user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
     
     -- List metadata
-    name VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL, 
     description TEXT,
     color VARCHAR(7) DEFAULT '#3B82F6', -- Hex color for UI customization
     icon VARCHAR(50) DEFAULT 'list', -- Icon identifier for UI
@@ -72,22 +72,6 @@ CREATE INDEX IF NOT EXISTS idx_user_list_items_added_at ON public.user_list_item
 ALTER TABLE public.user_lists ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_list_items ENABLE ROW LEVEL SECURITY;
 
--- Drop existing policies if they exist, then recreate them
-DO $$ 
-BEGIN
-    -- Drop existing policies for user_lists
-    DROP POLICY IF EXISTS "Users can view their own lists" ON public.user_lists;
-    DROP POLICY IF EXISTS "Users can insert their own lists" ON public.user_lists;
-    DROP POLICY IF EXISTS "Users can update their own lists" ON public.user_lists;
-    DROP POLICY IF EXISTS "Users can delete their own lists" ON public.user_lists;
-    
-    -- Drop existing policies for user_list_items
-    DROP POLICY IF EXISTS "Users can view their own list items" ON public.user_list_items;
-    DROP POLICY IF EXISTS "Users can insert their own list items" ON public.user_list_items;
-    DROP POLICY IF EXISTS "Users can update their own list items" ON public.user_list_items;
-    DROP POLICY IF EXISTS "Users can delete their own list items" ON public.user_list_items;
-END $$;
-
 -- RLS Policies for user_lists
 CREATE POLICY "Users can view their own lists" ON public.user_lists
     FOR SELECT USING (auth.uid()::text = (SELECT supabase_user_id FROM public.users WHERE id = user_id));
@@ -146,7 +130,7 @@ CREATE TRIGGER trigger_update_list_count_on_delete
     AFTER DELETE ON public.user_list_items
     FOR EACH ROW EXECUTE FUNCTION update_user_list_items_count();
 
--- Create function to auto-update updated_at timestamps (if not exists)
+-- Create function to auto-update updated_at timestamps
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN

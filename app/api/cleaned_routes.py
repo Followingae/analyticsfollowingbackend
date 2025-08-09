@@ -23,6 +23,7 @@ from app.database.comprehensive_service import comprehensive_service
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient, DecodoAPIError, DecodoInstabilityError
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
 from app.cache import profile_cache
+from app.services.engagement_calculator import engagement_calculator
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -70,17 +71,53 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
             # Always return working data with REAL analytics from stored profile
             current_time = datetime.now(timezone.utc)
             
-            # Get calculated analytics from stored profile
+            # Calculate comprehensive engagement metrics using new service
             analytics_data = {}
             if profile:
-                analytics_data = {
-                    "engagement_rate": float(profile.engagement_rate or 0),
-                    "influence_score": float(profile.influence_score or 0),
-                    "data_quality_score": float(profile.data_quality_score or 1.0),
-                    "avg_likes": getattr(profile, 'avg_likes', 0) or 0,
-                    "avg_comments": getattr(profile, 'avg_comments', 0) or 0,
-                    "content_quality_score": float(getattr(profile, 'content_quality_score', 0) or 0)
-                }
+                try:
+                    # Calculate and update engagement rates
+                    engagement_metrics = await engagement_calculator.calculate_and_update_profile_engagement(
+                        db, str(profile.id)
+                    )
+                    
+                    # Calculate influence score
+                    influence_score = engagement_calculator.calculate_influence_score(
+                        followers_count=profile.followers_count or 0,
+                        following_count=profile.following_count or 0,
+                        engagement_rate=engagement_metrics.get('overall_engagement_rate', 0),
+                        is_verified=profile.is_verified or False,
+                        is_business=profile.is_business_account or False,
+                        posts_count=profile.posts_count or 0
+                    )
+                    
+                    analytics_data = {
+                        "engagement_rate": engagement_metrics.get('overall_engagement_rate', 0),
+                        "engagement_rate_last_12_posts": engagement_metrics.get('engagement_rate_last_12_posts', 0),
+                        "engagement_rate_last_30_days": engagement_metrics.get('engagement_rate_last_30_days', 0),
+                        "influence_score": influence_score,
+                        "data_quality_score": float(profile.data_quality_score or 1.0),
+                        "avg_likes": engagement_metrics.get('avg_likes', 0),
+                        "avg_comments": engagement_metrics.get('avg_comments', 0),
+                        "avg_total_engagement": engagement_metrics.get('avg_total_engagement', 0),
+                        "posts_analyzed": engagement_metrics.get('posts_analyzed', 0),
+                        "content_quality_score": float(getattr(profile, 'content_quality_score', 0) or 0)
+                    }
+                    
+                    # Update profile with calculated influence score
+                    profile.influence_score = influence_score
+                    await db.commit()
+                    
+                except Exception as calc_error:
+                    logger.error(f"Engagement calculation failed: {calc_error}")
+                    # Fallback to basic analytics
+                    analytics_data = {
+                        "engagement_rate": float(profile.engagement_rate or 0),
+                        "influence_score": float(profile.influence_score or 0),
+                        "data_quality_score": float(profile.data_quality_score or 1.0),
+                        "avg_likes": 0,
+                        "avg_comments": 0,
+                        "content_quality_score": float(getattr(profile, 'content_quality_score', 0) or 0)
+                    }
             else:
                 # Fallback if profile storage failed
                 analytics_data = {

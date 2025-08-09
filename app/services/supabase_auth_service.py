@@ -34,6 +34,8 @@ class ProductionSupabaseAuthService:
     
     def __init__(self):
         self.supabase = None
+        self.supabase_url = None
+        self.supabase_key = None
         self.initialized = False
         self.initialization_error = None
     
@@ -67,9 +69,11 @@ class ProductionSupabaseAuthService:
             
             # Create Supabase client
             try:
+                self.supabase_url = settings.SUPABASE_URL
+                self.supabase_key = settings.SUPABASE_KEY
                 self.supabase: Client = create_client(
-                    settings.SUPABASE_URL,
-                    settings.SUPABASE_KEY
+                    self.supabase_url,
+                    self.supabase_key
                 )
                 logger.info("SUCCESS: Supabase client created successfully")
             except Exception as e:
