@@ -544,38 +544,18 @@ class ProductionSupabaseAuthService:
             except Exception as session_error:
                 logger.warning(f"TOKEN: Session validation failed: {session_error}")
             
-            # Method 3: Try using the token as a JWT and verify manually
-            try:
-                
-                # Create a new temporary client with this specific token
-                from supabase import create_client
-                temp_client = create_client(self.supabase_url, self.supabase_key)
-                
-                # Set auth header manually
-                temp_client.auth._client.headers.update({
-                    "Authorization": f"Bearer {token}"
-                })
-                
-                user_response = temp_client.auth.get_user(token)
-                
-                if user_response and user_response.user:
-                    # CRITICAL: Ensure user exists in database before creating UserInDB object
-                    try:
-                        user_metadata = user_response.user.user_metadata or {}
-                        await self._ensure_user_in_database(user_response.user, user_metadata)
-                    except Exception as db_error:
-                        logger.warning(f"Database sync failed during JWT validation: {db_error}")
-                        # Continue authentication even if database sync fails
-                    
-                    return self._create_user_in_db_from_supabase(user_response.user)
-            except Exception as jwt_error:
-                logger.warning(f"TOKEN: JWT verification failed: {jwt_error}")
+            # Method 3: Try refresh token if available (removed problematic JWT method)
+            # Skip manual JWT verification as it uses unsupported internal APIs
             
-            # If all methods fail, raise authentication error
+            # If all methods fail, raise authentication error with refresh guidance
             logger.error(f"TOKEN: All validation methods failed for token")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or expired token - all validation methods failed"
+                detail={
+                    "error": "token_expired",
+                    "message": "Access token has expired. Please refresh your token using the refresh endpoint.",
+                    "requires_refresh": True
+                }
             )
             
         except HTTPException:
