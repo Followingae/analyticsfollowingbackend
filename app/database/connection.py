@@ -1,5 +1,5 @@
 import asyncio
-from databases import Database
+# Using SQLAlchemy async only, databases library removed
 from sqlalchemy import create_engine, MetaData, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
@@ -16,8 +16,8 @@ async def _test_connection(engine):
     async with engine.begin() as conn:
         await conn.execute(text("SELECT 1"))
 
-# Database instances
-database: Database = None
+# Database instances  
+database = None
 engine = None
 async_engine = None
 SessionLocal = None
@@ -50,16 +50,17 @@ async def init_database():
         # OPTIMIZED CONNECTION POOL - For Supabase pooler compatibility
         async_engine = create_async_engine(
             async_url,
-            pool_pre_ping=False,         # Disable pre-ping for faster startup
-            pool_recycle=300,            # Recycle connections every 5 minutes
-            pool_size=3,                 # Smaller pool size for Supabase
-            max_overflow=1,              # Minimal overflow
-            pool_timeout=20,             # Increased timeout
+            pool_pre_ping=True,          # Enable pre-ping to detect dead connections
+            pool_recycle=600,            # Recycle connections every 10 minutes
+            pool_size=5,                 # Increased pool size for better concurrency
+            max_overflow=3,              # Increased overflow for peak loads
+            pool_timeout=30,             # Longer timeout for connections
             echo=False,
             connect_args={
-                "command_timeout": 60,   # Increased timeout
+                "command_timeout": 60,   # 60 second timeout for commands
                 "server_settings": {
-                    "application_name": "analytics_backend"
+                    "application_name": "analytics_backend",
+                    "statement_timeout": "60s"  # 60 second statement timeout
                 }
             }
         )
@@ -86,14 +87,8 @@ async def init_database():
         
         logger.info("SUCCESS: Database connection established")
         
-        # Initialize databases connection for async operations (optional)
-        try:
-            database = Database(settings.DATABASE_URL)
-            await database.connect()
-            logger.info("SUCCESS: Database async interface initialized")
-        except Exception as db_error:
-            logger.warning(f"WARNING: Database async interface failed (using SQLAlchemy only): {str(db_error)}")
-            database = None
+        # Using SQLAlchemy async only - databases library not needed
+        database = None
         
         # Initialize Supabase client if key is provided
         if settings.SUPABASE_KEY:
@@ -112,9 +107,8 @@ async def close_database():
     global database, engine, async_engine, SessionLocal, supabase
     
     try:
-        if database:
-            await database.disconnect()
-            logger.info("Database async interface closed")
+        # No databases library to disconnect - using SQLAlchemy async only
+        pass
         
         if async_engine:
             await async_engine.dispose()

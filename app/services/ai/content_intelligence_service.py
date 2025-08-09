@@ -137,6 +137,82 @@ class ContentIntelligenceService:
             logger.error(f"Post content analysis failed for post {post.id}: {e}")
             return {"error": f"Analysis failed: {str(e)}"}
     
+    async def analyze_post_content_from_data(self, post_data: Dict[str, Any], profile_followers: int = 0) -> Dict[str, Any]:
+        """
+        Analyze a single post's content using pre-extracted data (avoids SQLAlchemy lazy loading issues)
+        """
+        if not self.initialized:
+            await self.initialize()
+            if not self.initialized:
+                return {"error": f"AI service not initialized: {self.initialization_error}"}
+        
+        try:
+            # Extract text content for analysis
+            caption_text = post_data.get('caption') or ""
+            hashtags_list = post_data.get('hashtags', [])
+            hashtags_text = " ".join(hashtags_list) if hashtags_list else ""
+            combined_text = f"{caption_text} {hashtags_text}".strip()
+            
+            if not combined_text:
+                return {
+                    "ai_content_category": None,
+                    "ai_category_confidence": 0.0,
+                    "ai_sentiment": "neutral",
+                    "ai_sentiment_score": 0.0,
+                    "ai_sentiment_confidence": 0.0,
+                    "ai_language_code": "en",
+                    "ai_language_confidence": 0.5,
+                    "analysis_metadata": {
+                        "text_analyzed": False,
+                        "reason": "No caption or hashtags found"
+                    }
+                }
+            
+            # Run all analyses in parallel for better performance
+            sentiment_result, language_result, category_result = await asyncio.gather(
+                self.sentiment_analyzer.analyze_sentiment(combined_text),
+                self.language_detector.detect_language(combined_text),
+                self.category_classifier.classify_content(
+                    text=combined_text, 
+                    hashtags=hashtags_list,
+                    media_type=post_data.get('media_type')
+                ),
+                return_exceptions=True
+            )
+            
+            # Handle potential errors
+            if isinstance(sentiment_result, Exception):
+                logger.error(f"Sentiment analysis failed: {sentiment_result}")
+                sentiment_result = {"label": "neutral", "score": 0.0, "confidence": 0.0}
+            
+            if isinstance(language_result, Exception):
+                logger.error(f"Language detection failed: {language_result}")
+                language_result = {"language": "en", "confidence": 0.5}
+            
+            if isinstance(category_result, Exception):
+                logger.error(f"Category classification failed: {category_result}")
+                category_result = {"category": "General", "confidence": 0.0}
+            
+            return {
+                "ai_content_category": category_result.get("category"),
+                "ai_category_confidence": float(category_result.get("confidence", 0.0)),
+                "ai_sentiment": sentiment_result.get("label"),
+                "ai_sentiment_score": float(sentiment_result.get("score", 0.0)),
+                "ai_sentiment_confidence": float(sentiment_result.get("confidence", 0.0)),
+                "ai_language_code": language_result.get("language"),
+                "ai_language_confidence": float(language_result.get("confidence", 0.0)),
+                "analysis_metadata": {
+                    "text_length": len(combined_text),
+                    "has_hashtags": bool(hashtags_list),
+                    "media_type": post_data.get('media_type'),
+                    "analyzed_at": datetime.now(timezone.utc).isoformat()
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Post content analysis failed for post {post_data.get('id')}: {e}")
+            return {"error": f"Analysis failed: {str(e)}"}
+    
     async def update_post_ai_analysis(self, db: AsyncSession, post_id: str, analysis_results: Dict[str, Any]) -> bool:
         """Update post with AI analysis results"""
         try:
@@ -145,15 +221,11 @@ class ContentIntelligenceService:
                 .where(Post.id == post_id)
                 .values(
                     ai_content_category=analysis_results.get("ai_content_category"),
-                    ai_category_confidence=analysis_results.get("ai_category_confidence"),
                     ai_sentiment=analysis_results.get("ai_sentiment"),
                     ai_sentiment_score=analysis_results.get("ai_sentiment_score"),
-                    ai_sentiment_confidence=analysis_results.get("ai_sentiment_confidence"),
-                    ai_language_code=analysis_results.get("ai_language_code"),
+                    ai_language=analysis_results.get("ai_language_code"),
                     ai_language_confidence=analysis_results.get("ai_language_confidence"),
-                    ai_analysis_raw=analysis_results,
-                    ai_analyzed_at=datetime.now(timezone.utc),
-                    ai_analysis_version="1.0.0"
+                    ai_post_analyzed_at=datetime.now(timezone.utc)
                 )
             )
             await db.commit()
@@ -168,7 +240,7 @@ class ContentIntelligenceService:
         Analyze all posts for a profile and generate aggregated insights
         """
         try:
-            # Get profile and posts
+            # Get profile and posts - load all necessary data upfront
             profile_result = await db.execute(
                 select(Profile).where(Profile.id == profile_id)
             )
@@ -190,20 +262,34 @@ class ContentIntelligenceService:
             
             logger.info(f"Analyzing {len(posts)} posts for profile {profile.username}")
             
-            # Analyze each post
-            analysis_tasks = []
+            # Extract post data immediately to avoid lazy loading issues
+            posts_data = []
             for post in posts:
-                task = self.analyze_post_content(post, profile.followers_count or 0)
-                analysis_tasks.append((post.id, task))
+                posts_data.append({
+                    'id': str(post.id),
+                    'caption': post.caption,
+                    'hashtags': post.hashtags or [],
+                    'media_type': post.media_type
+                })
+            
+            # Analyze each post using extracted data
+            analysis_tasks = []
+            for post_data in posts_data:
+                task = self.analyze_post_content_from_data(post_data, profile.followers_count or 0)
+                analysis_tasks.append((post_data['id'], task))
             
             # Process analyses and update posts
             successful_analyses = 0
             category_distribution = {}
             sentiment_scores = []
             language_counts = {}
+            total_tasks = len(analysis_tasks)
             
-            for post_id, analysis_task in analysis_tasks:
+            logger.info(f"🔄 Starting analysis of {total_tasks} posts for profile {profile.username}")
+            
+            for i, (post_id, analysis_task) in enumerate(analysis_tasks, 1):
                 try:
+                    logger.info(f"📊 Analyzing post {i}/{total_tasks} (ID: {str(post_id)[:8]}...)")
                     analysis_result = await analysis_task
                     
                     if "error" not in analysis_result:
@@ -211,8 +297,13 @@ class ContentIntelligenceService:
                         await self.update_post_ai_analysis(db, str(post_id), analysis_result)
                         successful_analyses += 1
                         
-                        # Aggregate data for profile insights
+                        # Log analysis results
                         category = analysis_result.get("ai_content_category")
+                        sentiment = analysis_result.get("ai_sentiment")
+                        language = analysis_result.get("ai_language_code")
+                        logger.info(f"✅ Post {i}/{total_tasks} analyzed - Category: {category}, Sentiment: {sentiment}, Language: {language}")
+                        
+                        # Aggregate data for profile insights
                         if category:
                             category_distribution[category] = category_distribution.get(category, 0) + 1
                         
@@ -220,12 +311,17 @@ class ContentIntelligenceService:
                         if sentiment_score is not None:
                             sentiment_scores.append(sentiment_score)
                         
-                        language = analysis_result.get("ai_language_code")
                         if language:
                             language_counts[language] = language_counts.get(language, 0) + 1
+                    else:
+                        logger.warning(f"❌ Post {i}/{total_tasks} analysis failed: {analysis_result.get('error')}")
+                    
+                    # Progress indicator
+                    progress_pct = int((i / total_tasks) * 100)
+                    logger.info(f"📈 Progress: {progress_pct}% ({i}/{total_tasks} posts processed)")
                     
                 except Exception as e:
-                    logger.error(f"Failed to analyze post {post_id}: {e}")
+                    logger.error(f"❌ Failed to analyze post {i}/{total_tasks} (ID: {post_id}): {e}")
                     continue
             
             # Calculate profile-level insights
@@ -234,7 +330,16 @@ class ContentIntelligenceService:
             )
             
             # Update profile with aggregated insights
+            logger.info(f"💾 Updating profile {profile.username} with aggregated AI insights...")
             await self.update_profile_ai_insights(db, profile_id, profile_insights)
+            
+            # Log completion summary
+            logger.info(f"🎉 AI Analysis COMPLETE for {profile.username}!")
+            logger.info(f"📊 Summary: {successful_analyses}/{len(posts)} posts analyzed")
+            logger.info(f"🏷️ Top categories: {dict(list(category_distribution.items())[:3])}")
+            logger.info(f"💭 Avg sentiment: {profile_insights.get('ai_avg_sentiment_score', 0)}")
+            logger.info(f"🌍 Languages: {list(language_counts.keys())}")
+            logger.info(f"⭐ Content quality score: {profile_insights.get('ai_content_quality_score', 0)}")
             
             return {
                 "profile_id": profile_id,

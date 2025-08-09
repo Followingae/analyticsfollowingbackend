@@ -331,66 +331,83 @@ class ProductionSupabaseAuthService:
             current_time = datetime.now(timezone.utc)
             logger.info(f"SYNC: Using UTC time: {current_time}")
             
-            async with SessionLocal() as db:
+            # Add retry logic for database connection timeouts
+            max_retries = 3
+            retry_delay = 1  # seconds
+            
+            for attempt in range(max_retries):
                 try:
-                    # Check if user exists by Supabase ID first (more reliable)
-                    logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id}")
-                    result = await db.execute(select(User).where(User.supabase_user_id == supabase_user.id))
-                    existing_user = result.scalar_one_or_none()
-                    
-                    if not existing_user:
-                        # Check by email as fallback
-                        logger.info(f"SYNC: User not found by Supabase ID, checking by email: {supabase_user.email}")
-                        result = await db.execute(select(User).where(User.email == supabase_user.email))
+                    async with SessionLocal() as db:
+                        # Set reasonable timeout for this specific operation
+                        from sqlalchemy import text
+                        await db.execute(text("SET statement_timeout = '30s'"))
+                        
+                        # Check if user exists by Supabase ID first (more reliable)
+                        logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id} (attempt {attempt + 1})")
+                        result = await db.execute(select(User).where(User.supabase_user_id == supabase_user.id))
                         existing_user = result.scalar_one_or_none()
-                    
-                    if existing_user:
-                        # Update existing user's last login and Supabase ID
-                        logger.info(f"SYNC: Updating existing user ID: {existing_user.id}")
-                        await db.execute(
-                            update(User)
-                            .where(User.id == existing_user.id)
-                            .values(
-                                supabase_user_id=supabase_user.id,
-                                last_login=current_time,
-                                last_activity=current_time,
-                                email_verified=bool(supabase_user.email_confirmed_at)
+                        
+                        if not existing_user:
+                            # Check by email as fallback
+                            logger.info(f"SYNC: User not found by Supabase ID, checking by email: {supabase_user.email}")
+                            result = await db.execute(select(User).where(User.email == supabase_user.email))
+                            existing_user = result.scalar_one_or_none()
+                        
+                        if existing_user:
+                            # Update existing user's last login and Supabase ID
+                            logger.info(f"SYNC: Updating existing user ID: {existing_user.id}")
+                            await db.execute(
+                                update(User)
+                                .where(User.id == existing_user.id)
+                                .values(
+                                    supabase_user_id=supabase_user.id,
+                                    last_login=current_time,
+                                    last_activity=current_time,
+                                    email_verified=bool(supabase_user.email_confirmed_at)
+                                )
                             )
-                        )
-                        logger.info(f"SYNC: Successfully updated existing user: {supabase_user.email}")
+                            logger.info(f"SYNC: Successfully updated existing user: {supabase_user.email}")
+                        else:
+                            # Create new user in database - only required fields
+                            logger.info(f"SYNC: Creating new user for: {supabase_user.email}")
+                            
+                            # Validate role before creating
+                            role_value = user_metadata.get("role", "free")
+                            if role_value not in ["free", "premium", "admin", "super_admin"]:
+                                role_value = "free"
+                            
+                            new_user = User(
+                                supabase_user_id=supabase_user.id,  # Link to Supabase
+                                email=supabase_user.email,
+                                full_name=user_metadata.get("full_name", ""),
+                                role=role_value,
+                                status="active",
+                                email_verified=bool(supabase_user.email_confirmed_at),
+                                last_login=current_time,
+                                last_activity=current_time
+                                # Don't set created_at - let database handle it with server_default
+                            )
+                            db.add(new_user)
+                            logger.info(f"SYNC: Successfully created new user: {supabase_user.email}")
+                        
+                        await db.commit()
+                        logger.info(f"SYNC: Database commit successful for: {supabase_user.email}")
+                        break  # Success - exit retry loop
+                        
+                except (TimeoutError, ConnectionError, Exception) as db_error:
+                    if hasattr(db, 'rollback'):
+                        await db.rollback()
+                    
+                    if attempt < max_retries - 1:
+                        logger.warning(f"SYNC: Database timeout/error (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
                     else:
-                        # Create new user in database - only required fields
-                        logger.info(f"SYNC: Creating new user for: {supabase_user.email}")
-                        
-                        # Validate role before creating
-                        role_value = user_metadata.get("role", "free")
-                        if role_value not in ["free", "premium", "admin", "super_admin"]:
-                            role_value = "free"
-                        
-                        new_user = User(
-                            supabase_user_id=supabase_user.id,  # Link to Supabase
-                            email=supabase_user.email,
-                            full_name=user_metadata.get("full_name", ""),
-                            role=role_value,
-                            status="active",
-                            email_verified=bool(supabase_user.email_confirmed_at),
-                            last_login=current_time,
-                            last_activity=current_time
-                            # Don't set created_at - let database handle it with server_default
-                        )
-                        db.add(new_user)
-                        logger.info(f"SYNC: Successfully created new user: {supabase_user.email}")
-                    
-                    await db.commit()
-                    logger.info(f"SYNC: Database commit successful for: {supabase_user.email}")
-                    
-                except Exception as db_error:
-                    await db.rollback()
-                    logger.error(f"SYNC: Database sync failed for {supabase_user.email}: {db_error}")
-                    logger.error(f"SYNC: Error type: {type(db_error).__name__}")
-                    import traceback
-                    logger.error(f"SYNC: Traceback: {traceback.format_exc()}")
-                    # Don't raise - make this non-blocking for authentication
+                        logger.error(f"SYNC: Database sync failed after {max_retries} attempts for {supabase_user.email}")
+                        logger.error(f"SYNC: Error type: {type(db_error).__name__}")
+                        import traceback
+                        logger.error(f"SYNC: Traceback: {traceback.format_exc()}")
+                        # Don't raise - make this non-blocking for authentication
                     
         except Exception as e:
             logger.error(f"SYNC: Failed to sync user to database: {e}")

@@ -3,6 +3,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from datetime import datetime
 import time
 import logging
+from typing import Dict, List
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -11,12 +13,41 @@ class FrontendHeadersMiddleware(BaseHTTPMiddleware):
     Middleware to add helpful headers for frontend integration
     """
     
+    def __init__(self, app):
+        super().__init__(app)
+        self._request_times: Dict[str, List[float]] = defaultdict(list)
+        self._rate_limit_window = 10  # seconds
+        self._rate_limit_count = 100  # requests per window
+    
+    def _check_rate_limit(self, client_ip: str) -> bool:
+        """Check if client has exceeded rate limit"""
+        current_time = time.time()
+        client_requests = self._request_times[client_ip]
+        
+        # Remove old requests outside the window
+        cutoff_time = current_time - self._rate_limit_window
+        client_requests[:] = [t for t in client_requests if t > cutoff_time]
+        
+        # Check if within limit
+        if len(client_requests) >= self._rate_limit_count:
+            return False
+        
+        # Add current request
+        client_requests.append(current_time)
+        return True
+    
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
         
         # Log incoming requests for debugging
         client_ip = request.client.host if request.client else "unknown"
         logger.info(f"GLOBAL: {request.method} {request.url.path} from {client_ip}")
+        
+        # Check rate limit (but be lenient for localhost development)
+        if not client_ip.startswith("127.0.0.1") and not self._check_rate_limit(client_ip):
+            logger.warning(f"   RATE_LIMIT: Client {client_ip} exceeded {self._rate_limit_count} requests per {self._rate_limit_window}s")
+            from fastapi import HTTPException
+            raise HTTPException(status_code=429, detail="Too many requests")
         
         # Log request headers for CORS debugging
         origin = request.headers.get("origin", "none")
@@ -52,7 +83,11 @@ class FrontendHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Timestamp"] = datetime.now().isoformat()
         
         # Add rate limiting info (helpful for frontend)
-        response.headers["X-Rate-Limit-Remaining"] = "unlimited"
+        client_requests = len(self._request_times.get(client_ip, []))
+        remaining = max(0, self._rate_limit_count - client_requests)
+        response.headers["X-Rate-Limit-Remaining"] = str(remaining)
+        response.headers["X-Rate-Limit-Limit"] = str(self._rate_limit_count)
+        response.headers["X-Rate-Limit-Window"] = str(self._rate_limit_window)
         response.headers["X-Retry-Mechanism"] = "enabled"
         
         return response

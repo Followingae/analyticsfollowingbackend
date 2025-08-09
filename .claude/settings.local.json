@@ -42,7 +42,8 @@
       "Bash(touch:*)",
       "Bash(cmd //c:*)",
       "Bash(py:*)",
-      "Bash(set DATABASE_URL=postgresql://postgres.olrxnhxaaxwpnewvvfhc:ClientPass2024!@aws-0-us-east-1.pooler.supabase.com:6543/postgres)"
+      "Bash(set DATABASE_URL=postgresql://postgres.olrxnhxaaxwpnewvvfhc:ClientPass2024!@aws-0-us-east-1.pooler.supabase.com:6543/postgres)",
+      "Bash(uvicorn:*)"
     ],
     "deny": []
   }

@@ -9,6 +9,10 @@ from datetime import datetime
 import uvicorn
 import asyncio
 import os
+
+# Suppress TensorFlow verbose startup messages
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.api.cleaned_routes import router
@@ -16,11 +20,13 @@ from app.api.cleaned_auth_routes import router as auth_router
 from app.api.settings_routes import router as settings_router
 from app.api.engagement_routes import router as engagement_router
 from app.api.ai_routes import router as ai_router
+from app.api.ai_refresh_routes import router as ai_refresh_router
 from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
 from app.database.comprehensive_service import comprehensive_service
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
 from app.cache import periodic_cache_cleanup
+# Removed automatic AI refresh scheduler - using manual refresh only
 
 
 @asynccontextmanager  
@@ -64,6 +70,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Cache cleanup task failed: {e}")
     
+    # AI refresh is now manual-only via API endpoints
+    
     yield
     # Shutdown
     print("Shutting down Analytics Following Backend...")
@@ -71,7 +79,7 @@ async def lifespan(app: FastAPI):
         await close_database()
         await comprehensive_service.close_pool()
     except Exception as e:
-        print(f"Database cleanup failed: {e}")
+        print(f"Cleanup failed: {e}")
 
 
 app = FastAPI(
@@ -155,6 +163,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(engagement_router, prefix="/api/v1")
 app.include_router(ai_router, prefix="/api/v1")
+app.include_router(ai_refresh_router, prefix="/api/v1")
 
 # Include My Lists routes
 from app.api.lists_routes import router as lists_router

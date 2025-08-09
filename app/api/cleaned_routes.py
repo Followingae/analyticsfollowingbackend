@@ -277,8 +277,41 @@ async def analyze_instagram_profile(
         except Exception as access_error:
             logger.warning(f"Failed to grant user access: {access_error}")
         
-        # STEP 4: Return the data from _fetch_with_retry
-        logger.info(f"SUCCESS: Profile analysis complete for {username}")
+        # STEP 4: AUTO-TRIGGER AI ANALYSIS for new profiles
+        try:
+            from fastapi import BackgroundTasks
+            from app.services.ai.content_intelligence_service import content_intelligence_service
+            
+            # Get the newly stored profile
+            new_profile = await comprehensive_service.get_profile_by_username(db, username)
+            if new_profile:
+                logger.info(f"🤖 AUTO-TRIGGERING AI analysis for new profile: {username}")
+                
+                # Start AI analysis in background with fresh DB session
+                import asyncio
+                
+                async def run_ai_analysis():
+                    from app.database.connection import AsyncSession, async_engine
+                    async with AsyncSession(async_engine) as fresh_db:
+                        await content_intelligence_service.analyze_profile_content(
+                            fresh_db, str(new_profile.id)
+                        )
+                
+                asyncio.create_task(run_ai_analysis())
+                logger.info(f"✅ AI analysis started in background for {username}")
+            
+        except Exception as ai_error:
+            logger.warning(f"Failed to auto-trigger AI analysis for {username}: {ai_error}")
+            # Don't fail the main request if AI fails
+        
+        # STEP 5: Return the data with AI analysis status
+        logger.info(f"SUCCESS: Profile analysis complete for {username} (AI analysis running in background)")
+        
+        # Add AI auto-trigger info to response
+        if response_data and "meta" in response_data:
+            response_data["meta"]["ai_analysis_auto_triggered"] = True
+            response_data["meta"]["ai_analysis_started_at"] = datetime.now(timezone.utc).isoformat()
+        
         return JSONResponse(content=response_data)
         
     except (DecodoAPIError, DecodoInstabilityError) as e:
@@ -483,13 +516,41 @@ async def force_refresh_profile_data(
             }
         )
         
-        # STEP 5: Return complete profile data (same format as main endpoint)
-        logger.info(f"SUCCESS: Complete profile refresh for {username}")
+        # STEP 5: AUTO-TRIGGER AI ANALYSIS for refreshed profiles
+        try:
+            from app.services.ai.content_intelligence_service import content_intelligence_service
+            
+            # Get the refreshed profile
+            refreshed_profile = await comprehensive_service.get_profile_by_username(db, username)
+            if refreshed_profile:
+                logger.info(f"🤖 AUTO-TRIGGERING AI analysis for refreshed profile: {username}")
+                
+                # Start AI analysis in background with fresh DB session
+                import asyncio
+                
+                async def run_ai_analysis():
+                    from app.database.connection import AsyncSession, async_engine
+                    async with AsyncSession(async_engine) as fresh_db:
+                        await content_intelligence_service.analyze_profile_content(
+                            fresh_db, str(refreshed_profile.id)
+                        )
+                
+                asyncio.create_task(run_ai_analysis())
+                logger.info(f"✅ AI analysis started in background for refreshed {username}")
+            
+        except Exception as ai_error:
+            logger.warning(f"Failed to auto-trigger AI analysis for refreshed {username}: {ai_error}")
+            # Don't fail the main request if AI fails
+        
+        # STEP 6: Return complete profile data (same format as main endpoint)
+        logger.info(f"SUCCESS: Complete profile refresh for {username} (AI analysis running in background)")
         
         # Add refresh metadata to response
         response_data["meta"]["refresh_type"] = "complete_replacement"
         response_data["meta"]["refreshed_at"] = datetime.now(timezone.utc).isoformat()
         response_data["meta"]["all_data_replaced"] = True
+        response_data["meta"]["ai_analysis_auto_triggered"] = True
+        response_data["meta"]["ai_analysis_started_at"] = datetime.now(timezone.utc).isoformat()
         
         return JSONResponse(content=response_data)
         
