@@ -167,6 +167,7 @@ class User(Base):
     favorites = relationship("UserFavorite", back_populates="user", cascade="all, delete-orphan")
     user_lists = relationship("UserList", back_populates="user", cascade="all, delete-orphan")
     user_list_items = relationship("UserListItem", back_populates="user", cascade="all, delete-orphan")
+    ai_analysis_jobs = relationship("AIAnalysisJob", back_populates="user", cascade="all, delete-orphan")
     
     # Constraints
     __table_args__ = (
@@ -333,6 +334,7 @@ class Profile(Base):
     mentions = relationship("Mention", back_populates="profile", cascade="all, delete-orphan")
     campaign_profiles = relationship("CampaignProfile", back_populates="profile")
     search_history = relationship("SearchHistory", back_populates="profile", cascade="all, delete-orphan")
+    ai_analysis_jobs = relationship("AIAnalysisJob", back_populates="profile", cascade="all, delete-orphan")
     
     __table_args__ = (
         Index('idx_profiles_username_lower', func.lower(username)),
@@ -801,4 +803,110 @@ class UserAvatar(Base):
         Index('idx_user_avatars_user_id', 'user_id'),
         Index('idx_user_avatars_active', 'user_id', 'is_active'),
         CheckConstraint('is_active IN (true, false)', name='check_is_active_boolean'),
+    )
+
+
+# =============================================================================
+# AI ANALYSIS JOB TRACKING SYSTEM
+# =============================================================================
+
+class AIAnalysisJob(Base):
+    """AI Analysis Job Tracking - Mission Critical for Background Task Management"""
+    __tablename__ = "ai_analysis_jobs"
+    
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    job_id = Column(String(255), unique=True, nullable=False, index=True)  # Human-readable job ID
+    
+    # Job scope and target
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    job_type = Column(String(50), nullable=False, index=True)  # 'profile_analysis', 'bulk_analysis', 'repair_analysis'
+    
+    # Job status tracking
+    status = Column(String(20), nullable=False, default='pending', index=True)  
+    # pending, running, completed, failed, cancelled, repair_needed
+    
+    # Progress tracking
+    total_posts = Column(Integer, default=0)
+    posts_processed = Column(Integer, default=0)
+    posts_successful = Column(Integer, default=0)
+    posts_failed = Column(Integer, default=0)
+    
+    # Timing
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    last_heartbeat = Column(DateTime(timezone=True), nullable=True)  # For detecting hung jobs
+    
+    # Error handling and diagnostics
+    error_message = Column(Text, nullable=True)
+    error_details = Column(JSONB, nullable=True)  # Detailed error info for debugging
+    retry_count = Column(Integer, default=0)
+    max_retries = Column(Integer, default=3)
+    
+    # Results and validation
+    profile_analysis_completed = Column(Boolean, default=False)  # Critical: Profile-level aggregation done
+    data_consistency_validated = Column(Boolean, default=False)  # Critical: Data integrity checked
+    analysis_metadata = Column(JSONB, nullable=True)  # Analysis results summary
+    
+    # Performance metrics
+    processing_duration_seconds = Column(Integer, nullable=True)
+    posts_per_second = Column(Float, nullable=True)
+    
+    # Relationships
+    profile = relationship("Profile", back_populates="ai_analysis_jobs")
+    user = relationship("User", back_populates="ai_analysis_jobs")
+    
+    # Database constraints and indexes
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'repair_needed')", 
+                       name='check_job_status_valid'),
+        CheckConstraint("job_type IN ('profile_analysis', 'bulk_analysis', 'repair_analysis')", 
+                       name='check_job_type_valid'),
+        CheckConstraint("posts_processed >= 0", name='check_posts_processed_non_negative'),
+        CheckConstraint("posts_successful >= 0", name='check_posts_successful_non_negative'),
+        CheckConstraint("posts_failed >= 0", name='check_posts_failed_non_negative'),
+        CheckConstraint("retry_count >= 0", name='check_retry_count_non_negative'),
+        CheckConstraint("max_retries >= 0", name='check_max_retries_non_negative'),
+        Index('idx_ai_jobs_status_created', 'status', 'created_at'),
+        Index('idx_ai_jobs_profile_status', 'profile_id', 'status'),
+        Index('idx_ai_jobs_user_created', 'user_id', 'created_at'),
+        Index('idx_ai_jobs_heartbeat', 'last_heartbeat'),
+        Index('idx_ai_jobs_job_type', 'job_type'),
+        Index('idx_ai_jobs_completion_status', 'profile_analysis_completed', 'data_consistency_validated'),
+    )
+
+
+class AIAnalysisJobLog(Base):
+    """Detailed logging for AI Analysis Jobs - Critical for Debugging and Monitoring"""
+    __tablename__ = "ai_analysis_job_logs"
+    
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    job_id = Column(UUID(as_uuid=True), ForeignKey('ai_analysis_jobs.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # Log entry details
+    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    log_level = Column(String(10), nullable=False, index=True)  # INFO, WARNING, ERROR, CRITICAL
+    message = Column(Text, nullable=False)
+    
+    # Contextual information
+    post_id = Column(UUID(as_uuid=True), nullable=True)  # If log relates to specific post
+    processing_step = Column(String(50), nullable=True)  # 'post_analysis', 'profile_aggregation', 'validation'
+    execution_time_ms = Column(Integer, nullable=True)  # Time taken for this step
+    
+    # Additional context
+    log_metadata = Column(JSONB, nullable=True)  # Additional structured data
+    
+    # Relationships
+    job = relationship("AIAnalysisJob", backref="logs")
+    
+    # Database constraints and indexes
+    __table_args__ = (
+        CheckConstraint("log_level IN ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')", 
+                       name='check_log_level_valid'),
+        Index('idx_ai_job_logs_job_timestamp', 'job_id', 'timestamp'),
+        Index('idx_ai_job_logs_level_timestamp', 'log_level', 'timestamp'),
+        Index('idx_ai_job_logs_step', 'processing_step'),
     )

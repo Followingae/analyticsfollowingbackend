@@ -83,11 +83,11 @@ class CategoryClassifier:
         try:
             # Category classification is loaded on-demand to save memory
             self.initialized = True
-            logger.info("✅ Category Classifier initialized")
+            logger.info(" Category Classifier initialized")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Category Classifier: {e}")
+            logger.error(f" Failed to initialize Category Classifier: {e}")
             return False
     
     async def classify_content(

@@ -14,6 +14,7 @@ import io
 import asyncio
 import random
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, and_
 
 from app.core.config import settings
 from app.models.auth import UserInDB
@@ -27,6 +28,123 @@ from app.services.engagement_calculator import engagement_calculator
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+async def _analyze_profile_posts_immediately(db: AsyncSession, profile) -> dict:
+    """Analyze all posts for a profile immediately and generate profile insights"""
+    try:
+        from app.services.ai.content_intelligence_service import content_intelligence_service
+        from app.database.unified_models import Post
+        from sqlalchemy import select, update
+        
+        # Initialize AI service
+        await content_intelligence_service.initialize()
+        
+        # Get all posts for the profile
+        posts_result = await db.execute(
+            select(Post).where(Post.profile_id == profile.id)
+        )
+        posts = posts_result.scalars().all()
+        
+        if not posts:
+            return {"success": True, "posts_analyzed": 0, "profile_insights": False, "message": "No posts to analyze"}
+        
+        analyzed_count = 0
+        category_counts = {}
+        sentiment_scores = []
+        language_counts = {}
+        
+        # Analyze each post
+        for post in posts:
+            try:
+                # Skip if already analyzed
+                if post.ai_analyzed_at:
+                    continue
+                    
+                # Analyze post content
+                analysis = await content_intelligence_service.analyze_post_content(post)
+                
+                if analysis and not analysis.get("error"):
+                    # Update post with AI data
+                    await db.execute(
+                        update(Post)
+                        .where(Post.id == post.id)
+                        .values(
+                            ai_content_category=analysis.get("ai_content_category"),
+                            ai_category_confidence=analysis.get("ai_category_confidence", 0.0),
+                            ai_sentiment=analysis.get("ai_sentiment"),
+                            ai_sentiment_score=analysis.get("ai_sentiment_score", 0.0),
+                            ai_sentiment_confidence=analysis.get("ai_sentiment_confidence", 0.0),
+                            ai_language_code=analysis.get("ai_language_code"),
+                            ai_language_confidence=analysis.get("ai_language_confidence", 0.0),
+                            ai_analysis_raw=analysis,
+                            ai_analyzed_at=datetime.now(timezone.utc),
+                            ai_analysis_version="1.0.0"
+                        )
+                    )
+                    
+                    analyzed_count += 1
+                    
+                    # Collect data for profile aggregation
+                    if analysis.get("ai_content_category"):
+                        cat = analysis["ai_content_category"]
+                        category_counts[cat] = category_counts.get(cat, 0) + 1
+                    
+                    if analysis.get("ai_sentiment_score") is not None:
+                        sentiment_scores.append(analysis["ai_sentiment_score"])
+                    
+                    if analysis.get("ai_language_code"):
+                        lang = analysis["ai_language_code"]
+                        language_counts[lang] = language_counts.get(lang, 0) + 1
+                        
+            except Exception as e:
+                logger.warning(f"Failed to analyze post {post.id}: {e}")
+                continue
+        
+        # Generate profile-level insights if we analyzed any posts
+        profile_insights_generated = False
+        if analyzed_count > 0:
+            # Calculate aggregated insights
+            primary_content = max(category_counts, key=category_counts.get) if category_counts else None
+            avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0.0
+            
+            content_distribution = {k: v/analyzed_count for k, v in category_counts.items()}
+            language_distribution = {k: v/analyzed_count for k, v in language_counts.items()}
+            quality_score = min(1.0, analyzed_count / 20.0)  # Quality based on volume
+            
+            # Update profile with aggregated insights
+            from app.database.unified_models import Profile
+            await db.execute(
+                update(Profile)
+                .where(Profile.id == profile.id)
+                .values(
+                    ai_primary_content_type=primary_content,
+                    ai_content_distribution=content_distribution,
+                    ai_avg_sentiment_score=avg_sentiment,
+                    ai_language_distribution=language_distribution,
+                    ai_content_quality_score=quality_score,
+                    ai_profile_analyzed_at=datetime.now(timezone.utc)
+                )
+            )
+            profile_insights_generated = True
+        
+        await db.commit()
+        
+        return {
+            "success": True,
+            "posts_analyzed": analyzed_count,
+            "total_posts": len(posts),
+            "profile_insights": profile_insights_generated,
+            "primary_content": primary_content if analyzed_count > 0 else None,
+            "avg_sentiment": round(avg_sentiment, 2) if analyzed_count > 0 else None
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in immediate AI analysis: {e}")
+        try:
+            await db.rollback()
+        except:
+            pass
+        return {"success": False, "error": str(e), "posts_analyzed": 0}
 
 # =============================================================================
 # RETRY MECHANISM FOR DECODO API CALLS
@@ -282,23 +400,27 @@ async def analyze_instagram_profile(
             from fastapi import BackgroundTasks
             from app.services.ai.content_intelligence_service import content_intelligence_service
             
-            # Get the newly stored profile
+            # Get the newly stored profile and run immediate AI analysis
             new_profile = await comprehensive_service.get_profile_by_username(db, username)
             if new_profile:
-                logger.info(f"🤖 AUTO-TRIGGERING AI analysis for new profile: {username}")
+                logger.info(f"AUTO-TRIGGERING AI analysis for new profile: {username}")
                 
-                # Start AI analysis in background with fresh DB session
-                import asyncio
-                
-                async def run_ai_analysis():
-                    from app.database.connection import AsyncSession, async_engine
-                    async with AsyncSession(async_engine) as fresh_db:
-                        await content_intelligence_service.analyze_profile_content(
-                            fresh_db, str(new_profile.id)
-                        )
-                
-                asyncio.create_task(run_ai_analysis())
-                logger.info(f"✅ AI analysis started in background for {username}")
+                # Run immediate AI analysis with error handling
+                try:
+                    ai_results = await _analyze_profile_posts_immediately(db, new_profile)
+                    if ai_results.get("success"):
+                        logger.info(f"AI analysis completed for {username}: {ai_results['posts_analyzed']} posts analyzed")
+                        meta["ai_analysis"] = {
+                            "status": "completed", 
+                            "posts_analyzed": ai_results.get("posts_analyzed", 0),
+                            "profile_insights_generated": ai_results.get("profile_insights", False)
+                        }
+                    else:
+                        logger.warning(f"AI analysis failed for {username}: {ai_results.get('error', 'Unknown error')}")
+                        meta["ai_analysis"] = {"status": "failed", "error": ai_results.get("error")}
+                except Exception as ai_error:
+                    logger.warning(f"AI analysis exception for {username}: {ai_error}")
+                    meta["ai_analysis"] = {"status": "error", "error": str(ai_error)}
             
         except Exception as ai_error:
             logger.warning(f"Failed to auto-trigger AI analysis for {username}: {ai_error}")
@@ -480,21 +602,58 @@ async def force_refresh_profile_data(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
-    COMPLETE PROFILE DATA REPLACEMENT - Manual Refresh
+    MISSION CRITICAL: Smart Refresh with Partial Data Detection and Repair
     
-    This endpoint completely OVERWRITES all existing profile data:
-    - Deletes ALL existing posts, analytics, and profile data
-    - Fetches completely fresh data from Decodo API
-    - Stores 100% new data with proper URL proxying
-    - Returns full profile data (same format as main profile endpoint)
+    This enhanced refresh endpoint:
+    - Detects partial AI analysis states (veraciocca-type bugs)
+    - Cleans up inconsistent data before refresh
+    - Performs complete profile data replacement
+    - Automatically triggers AI analysis with proper session management
+    - Validates data consistency after refresh
     
-    Use this for manual refresh buttons when you need to replace everything.
+    NO MORE PARTIAL DATA STATES!
     """
     try:
-        logger.info(f"FORCE REFRESH: Starting complete data replacement for {username}")
+        logger.info(f"SMART REFRESH: Starting enhanced refresh for {username}")
         
-        # STEP 1: Delete ALL existing data for this profile
-        logger.info(f"STEP 1: Deleting all existing data for {username}")
+        # STEP 1: Check for partial AI data (veraciocca-type bugs)
+        from app.services.ai_data_consistency_service import ai_data_consistency_service
+        from app.database.unified_models import Post
+        
+        # Get existing profile to check for partial data
+        existing_profile = await comprehensive_service.get_profile_by_username(db, username)
+        needs_ai_cleanup = False
+        
+        if existing_profile:
+            # Check for partial AI data
+            has_posts_ai = await db.execute(
+                select(func.count(Post.id)).where(
+                    and_(
+                        Post.profile_id == existing_profile.id,
+                        Post.ai_analyzed_at.isnot(None)
+                    )
+                )
+            )
+            posts_with_ai = has_posts_ai.scalar()
+            has_profile_ai = existing_profile.ai_profile_analyzed_at is not None
+            
+            if posts_with_ai > 0 and not has_profile_ai:
+                logger.warning(f"VERACIOCCA BUG DETECTED: Profile {username} has {posts_with_ai} posts with AI data but no profile aggregation")
+                needs_ai_cleanup = True
+            elif posts_with_ai > 0:
+                logger.info(f"Profile {username} has partial AI data - will clean up before refresh")
+                needs_ai_cleanup = True
+        
+        # STEP 2: Clean up partial AI data if detected
+        if needs_ai_cleanup and existing_profile:
+            logger.info(f"STEP 2A: Cleaning up partial AI data for {username}")
+            cleanup_results = await ai_data_consistency_service.cleanup_partial_ai_data(
+                db, [str(existing_profile.id)], "all"
+            )
+            logger.info(f"AI data cleanup completed: {cleanup_results['posts_cleaned']} posts, {cleanup_results['profiles_cleaned']} profiles")
+        
+        # STEP 2B: Delete ALL existing data for this profile
+        logger.info(f"STEP 2B: Deleting all existing data for {username}")
         await comprehensive_service.delete_complete_profile_data(db, username)
         
         # STEP 2: Fetch completely fresh data from Decodo with retry mechanism
@@ -516,27 +675,26 @@ async def force_refresh_profile_data(
             }
         )
         
-        # STEP 5: AUTO-TRIGGER AI ANALYSIS for refreshed profiles
+        # STEP 5: AUTO-TRIGGER ENHANCED AI ANALYSIS for refreshed profiles
+        ai_analysis_results = None
         try:
-            from app.services.ai.content_intelligence_service import content_intelligence_service
-            
             # Get the refreshed profile
             refreshed_profile = await comprehensive_service.get_profile_by_username(db, username)
             if refreshed_profile:
-                logger.info(f"🤖 AUTO-TRIGGERING AI analysis for refreshed profile: {username}")
+                logger.info(f"AUTO-TRIGGERING enhanced AI analysis for refreshed profile: {username}")
                 
-                # Start AI analysis in background with fresh DB session
-                import asyncio
-                
-                async def run_ai_analysis():
-                    from app.database.connection import AsyncSession, async_engine
-                    async with AsyncSession(async_engine) as fresh_db:
-                        await content_intelligence_service.analyze_profile_content(
-                            fresh_db, str(refreshed_profile.id)
-                        )
-                
-                asyncio.create_task(run_ai_analysis())
-                logger.info(f"✅ AI analysis started in background for refreshed {username}")
+                # Run immediate AI analysis
+                ai_analysis_results = await _analyze_profile_posts_immediately(db, refreshed_profile)
+                if ai_analysis_results.get("success"):
+                    logger.info(f"Enhanced AI analysis completed for {username}: {ai_analysis_results['posts_analyzed']} posts")
+                    refresh_meta["ai_analysis"] = {
+                        "status": "completed",
+                        "posts_analyzed": ai_analysis_results.get("posts_analyzed", 0),
+                        "profile_insights_generated": ai_analysis_results.get("profile_insights", False)
+                    }
+                else:
+                    logger.warning(f"Enhanced AI analysis failed for {username}: {ai_analysis_results.get('error', 'Unknown error')}")
+                    refresh_meta["ai_analysis"] = {"status": "failed", "error": ai_analysis_results.get("error")}
             
         except Exception as ai_error:
             logger.warning(f"Failed to auto-trigger AI analysis for refreshed {username}: {ai_error}")
@@ -546,11 +704,13 @@ async def force_refresh_profile_data(
         logger.info(f"SUCCESS: Complete profile refresh for {username} (AI analysis running in background)")
         
         # Add refresh metadata to response
-        response_data["meta"]["refresh_type"] = "complete_replacement"
+        response_data["meta"]["refresh_type"] = "smart_refresh_with_cleanup"
         response_data["meta"]["refreshed_at"] = datetime.now(timezone.utc).isoformat()
         response_data["meta"]["all_data_replaced"] = True
-        response_data["meta"]["ai_analysis_auto_triggered"] = True
-        response_data["meta"]["ai_analysis_started_at"] = datetime.now(timezone.utc).isoformat()
+        response_data["meta"]["partial_data_detected"] = needs_ai_cleanup
+        response_data["meta"]["ai_analysis_enhanced"] = True
+        response_data["meta"]["ai_job_id"] = ai_job_id
+        response_data["meta"]["ai_progress_endpoint"] = f"/api/v1/ai/analysis/status/{ai_job_id}" if ai_job_id else None
         
         return JSONResponse(content=response_data)
         

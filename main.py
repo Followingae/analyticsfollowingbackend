@@ -19,8 +19,7 @@ from app.api.cleaned_routes import router
 from app.api.cleaned_auth_routes import router as auth_router
 from app.api.settings_routes import router as settings_router
 from app.api.engagement_routes import router as engagement_router
-from app.api.ai_routes import router as ai_router
-from app.api.ai_refresh_routes import router as ai_refresh_router
+from app.api.ai_fix_routes import router as ai_fix_router
 from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
 from app.database.comprehensive_service import comprehensive_service
@@ -162,8 +161,7 @@ app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(engagement_router, prefix="/api/v1")
-app.include_router(ai_router, prefix="/api/v1")
-app.include_router(ai_refresh_router, prefix="/api/v1")
+app.include_router(ai_fix_router, prefix="/api/v1")
 
 # Include My Lists routes
 from app.api.lists_routes import router as lists_router

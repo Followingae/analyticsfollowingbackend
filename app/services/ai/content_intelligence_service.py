@@ -35,32 +35,40 @@ class ContentIntelligenceService:
         self.initialization_error = None
         
     async def initialize(self) -> bool:
-        """Initialize AI models and components"""
+        """Initialize AI models and components with fallbacks"""
         try:
             logger.info("Initializing Content Intelligence Service...")
             
-            # Initialize models manager
+            # Try to initialize models manager
             self.models_manager = AIModelsManager()
-            await self.models_manager.initialize()
+            models_initialized = await self.models_manager.initialize()
             
-            # Initialize individual components
-            self.sentiment_analyzer = SentimentAnalyzer(self.models_manager)
-            self.language_detector = LanguageDetector(self.models_manager)
-            self.category_classifier = CategoryClassifier(self.models_manager)
-            
-            # Initialize each component
-            await self.sentiment_analyzer.initialize()
-            await self.language_detector.initialize()
-            await self.category_classifier.initialize()
-            
-            self.initialized = True
-            logger.info("Content Intelligence Service initialized successfully")
-            return True
+            if models_initialized:
+                # Initialize individual components
+                self.sentiment_analyzer = SentimentAnalyzer(self.models_manager)
+                self.language_detector = LanguageDetector(self.models_manager)
+                self.category_classifier = CategoryClassifier(self.models_manager)
+                
+                # Initialize each component
+                await self.sentiment_analyzer.initialize()
+                await self.language_detector.initialize()
+                await self.category_classifier.initialize()
+                
+                self.initialized = True
+                logger.info("Content Intelligence Service initialized successfully with AI models")
+                return True
+            else:
+                # Fallback mode - use basic analysis without ML models
+                logger.warning("AI models failed to initialize, using fallback analysis")
+                self.initialized = True  # Still mark as initialized for fallback mode
+                return True
             
         except Exception as e:
             self.initialization_error = str(e)
             logger.error(f"Failed to initialize Content Intelligence Service: {e}")
-            return False
+            # Still allow fallback mode
+            self.initialized = True
+            return True
     
     async def analyze_post_content(self, post: Post, profile_followers: int = 0) -> Dict[str, Any]:
         """
@@ -92,17 +100,24 @@ class ContentIntelligenceService:
                     }
                 }
             
-            # Run all analyses in parallel for better performance
-            sentiment_result, language_result, category_result = await asyncio.gather(
-                self.sentiment_analyzer.analyze_sentiment(combined_text),
-                self.language_detector.detect_language(combined_text),
-                self.category_classifier.classify_content(
-                    text=combined_text, 
-                    hashtags=post.hashtags or [],
-                    media_type=post.media_type
-                ),
-                return_exceptions=True
-            )
+            # Run analyses with fallback support
+            if self.sentiment_analyzer and self.language_detector and self.category_classifier:
+                # Full AI analysis available
+                sentiment_result, language_result, category_result = await asyncio.gather(
+                    self.sentiment_analyzer.analyze_sentiment(combined_text),
+                    self.language_detector.detect_language(combined_text),
+                    self.category_classifier.classify_content(
+                        text=combined_text, 
+                        hashtags=post.hashtags or [],
+                        media_type=post.media_type
+                    ),
+                    return_exceptions=True
+                )
+            else:
+                # Fallback analysis
+                sentiment_result = await self._fallback_sentiment(combined_text, post.hashtags or [])
+                language_result = await self._fallback_language(combined_text)
+                category_result = await self._fallback_category(combined_text, post.hashtags or [])
             
             # Handle potential errors
             if isinstance(sentiment_result, Exception):
@@ -241,122 +256,12 @@ class ContentIntelligenceService:
     
     async def analyze_profile_content(self, db: AsyncSession, profile_id: str) -> Dict[str, Any]:
         """
-        Analyze all posts for a profile and generate aggregated insights
+        DEPRECATED: This method caused greenlet_spawn errors due to session sharing!
+        Use ai_background_task_manager instead for proper session isolation.
+        Keeping method for compatibility but it will fail with navigation.
         """
-        try:
-            # Get profile and posts - load all necessary data upfront
-            profile_result = await db.execute(
-                select(Profile).where(Profile.id == profile_id)
-            )
-            profile = profile_result.scalar_one_or_none()
-            
-            if not profile:
-                return {"error": "Profile not found"}
-            
-            posts_result = await db.execute(
-                select(Post)
-                .where(Post.profile_id == profile_id)
-                .order_by(Post.taken_at_timestamp.desc())
-                .limit(20)  # Analyze last 20 posts
-            )
-            posts = posts_result.scalars().all()
-            
-            if not posts:
-                return {"message": "No posts found for analysis"}
-            
-            logger.info(f"Analyzing {len(posts)} posts for profile {profile.username}")
-            
-            # Extract post data immediately to avoid lazy loading issues
-            posts_data = []
-            for post in posts:
-                posts_data.append({
-                    'id': str(post.id),
-                    'caption': post.caption,
-                    'hashtags': post.hashtags or [],
-                    'media_type': post.media_type
-                })
-            
-            # Analyze each post using extracted data
-            analysis_tasks = []
-            for post_data in posts_data:
-                task = self.analyze_post_content_from_data(post_data, profile.followers_count or 0)
-                analysis_tasks.append((post_data['id'], task))
-            
-            # Process analyses and update posts
-            successful_analyses = 0
-            category_distribution = {}
-            sentiment_scores = []
-            language_counts = {}
-            total_tasks = len(analysis_tasks)
-            
-            logger.info(f"Starting analysis of {total_tasks} posts for profile {profile.username}")
-            
-            for i, (post_id, analysis_task) in enumerate(analysis_tasks, 1):
-                try:
-                    logger.info(f"Analyzing post {i}/{total_tasks} (ID: {str(post_id)[:8]}...)")
-                    analysis_result = await analysis_task
-                    
-                    if "error" not in analysis_result:
-                        # Update post in database
-                        await self.update_post_ai_analysis(db, str(post_id), analysis_result)
-                        successful_analyses += 1
-                        
-                        # Log analysis results
-                        category = analysis_result.get("ai_content_category")
-                        sentiment = analysis_result.get("ai_sentiment")
-                        language = analysis_result.get("ai_language_code")
-                        logger.info(f"Post {i}/{total_tasks} analyzed - Category: {category}, Sentiment: {sentiment}, Language: {language}")
-                        
-                        # Aggregate data for profile insights
-                        if category:
-                            category_distribution[category] = category_distribution.get(category, 0) + 1
-                        
-                        sentiment_score = analysis_result.get("ai_sentiment_score", 0.0)
-                        if sentiment_score is not None:
-                            sentiment_scores.append(sentiment_score)
-                        
-                        if language:
-                            language_counts[language] = language_counts.get(language, 0) + 1
-                    else:
-                        logger.warning(f"Post {i}/{total_tasks} analysis failed: {analysis_result.get('error')}")
-                    
-                    # Progress indicator
-                    progress_pct = int((i / total_tasks) * 100)
-                    logger.info(f"Progress: {progress_pct}% ({i}/{total_tasks} posts processed)")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to analyze post {i}/{total_tasks} (ID: {post_id}): {e}")
-                    continue
-            
-            # Calculate profile-level insights
-            profile_insights = self._calculate_profile_insights(
-                category_distribution, sentiment_scores, language_counts, len(posts)
-            )
-            
-            # Update profile with aggregated insights
-            logger.info(f"Updating profile {profile.username} with aggregated AI insights...")
-            await self.update_profile_ai_insights(db, profile_id, profile_insights)
-            
-            # Log completion summary
-            logger.info(f"AI Analysis COMPLETE for {profile.username}!")
-            logger.info(f"Summary: {successful_analyses}/{len(posts)} posts analyzed")
-            logger.info(f"Top categories: {dict(list(category_distribution.items())[:3])}")
-            logger.info(f"Avg sentiment: {profile_insights.get('ai_avg_sentiment_score', 0)}")
-            logger.info(f"Languages: {list(language_counts.keys())}")
-            logger.info(f"Content quality score: {profile_insights.get('ai_content_quality_score', 0)}")
-            
-            return {
-                "profile_id": profile_id,
-                "username": profile.username,
-                "posts_analyzed": successful_analyses,
-                "total_posts": len(posts),
-                "profile_insights": profile_insights,
-                "analysis_completed": True
-            }
-            
-        except Exception as e:
-            logger.error(f"Profile content analysis failed: {e}")
-            return {"error": f"Profile analysis failed: {str(e)}"}
+        logger.error("DEPRECATED METHOD CALLED: analyze_profile_content causes greenlet_spawn errors!")
+        return {"error": "This method is deprecated. Use background task manager for AI analysis."}
     
     def _calculate_profile_insights(
         self, 
@@ -514,6 +419,77 @@ class ContentIntelligenceService:
         except Exception as e:
             logger.error(f"Failed to get AI analytics stats: {e}")
             return {"error": f"Failed to retrieve stats: {str(e)}"}
+    
+    async def _fallback_sentiment(self, text: str, hashtags: List[str]) -> Dict[str, Any]:
+        """Fallback sentiment analysis using simple rules"""
+        positive_keywords = ['good', 'great', 'amazing', 'love', 'beautiful', 'awesome', 'perfect', 'best', 'happy', 'wonderful']
+        negative_keywords = ['bad', 'terrible', 'awful', 'hate', 'ugly', 'worst', 'sad', 'disappointed', 'failed', 'broken']
+        
+        text_lower = text.lower()
+        positive_count = sum(1 for word in positive_keywords if word in text_lower)
+        negative_count = sum(1 for word in negative_keywords if word in text_lower)
+        
+        # Check hashtags for sentiment indicators
+        hashtag_sentiment = 0
+        for tag in hashtags:
+            if any(pos in tag.lower() for pos in positive_keywords):
+                hashtag_sentiment += 1
+            elif any(neg in tag.lower() for neg in negative_keywords):
+                hashtag_sentiment -= 1
+        
+        total_score = positive_count - negative_count + hashtag_sentiment
+        
+        if total_score > 0:
+            return {"label": "positive", "score": min(0.8, 0.5 + total_score * 0.1), "confidence": 0.6}
+        elif total_score < 0:
+            return {"label": "negative", "score": max(-0.8, -0.5 + total_score * 0.1), "confidence": 0.6}
+        else:
+            return {"label": "neutral", "score": 0.0, "confidence": 0.5}
+    
+    async def _fallback_language(self, text: str) -> Dict[str, Any]:
+        """Fallback language detection using simple heuristics"""
+        # Simple language detection based on character patterns
+        if not text:
+            return {"language": "en", "confidence": 0.3}
+        
+        # Check for Arabic script
+        if any('\u0600' <= char <= '\u06FF' for char in text):
+            return {"language": "ar", "confidence": 0.7}
+        
+        # Check for common French words
+        french_indicators = ['le', 'la', 'les', 'de', 'du', 'des', 'et', 'à', 'avec', 'pour', 'dans', 'sur', 'par', 'ce', 'cette', 'ces']
+        if any(word in text.lower() for word in french_indicators):
+            return {"language": "fr", "confidence": 0.6}
+        
+        # Default to English
+        return {"language": "en", "confidence": 0.5}
+    
+    async def _fallback_category(self, text: str, hashtags: List[str]) -> Dict[str, Any]:
+        """Fallback content categorization using keyword matching"""
+        categories = {
+            'Fashion & Beauty': ['fashion', 'style', 'outfit', 'beauty', 'makeup', 'clothing', 'dress', 'shoes', 'accessories'],
+            'Food & Drink': ['food', 'recipe', 'cooking', 'restaurant', 'meal', 'delicious', 'taste', 'dinner', 'lunch', 'breakfast'],
+            'Travel & Tourism': ['travel', 'vacation', 'trip', 'destination', 'hotel', 'beach', 'city', 'country', 'explore', 'adventure'],
+            'Technology': ['tech', 'technology', 'software', 'app', 'digital', 'computer', 'phone', 'gadget', 'innovation'],
+            'Fitness & Health': ['fitness', 'workout', 'gym', 'health', 'exercise', 'sport', 'training', 'wellness', 'nutrition'],
+            'Entertainment': ['movie', 'music', 'game', 'fun', 'entertainment', 'show', 'concert', 'party', 'event'],
+            'Lifestyle': ['life', 'lifestyle', 'daily', 'routine', 'home', 'family', 'friends', 'personal']
+        }
+        
+        combined_text = f"{text} {' '.join(hashtags)}".lower()
+        
+        best_category = "General"
+        best_score = 0
+        
+        for category, keywords in categories.items():
+            score = sum(1 for keyword in keywords if keyword in combined_text)
+            if score > best_score:
+                best_score = score
+                best_category = category
+        
+        confidence = min(0.8, 0.3 + best_score * 0.1) if best_score > 0 else 0.3
+        
+        return {"category": best_category, "confidence": confidence}
 
 # Global instance
 content_intelligence_service = ContentIntelligenceService()

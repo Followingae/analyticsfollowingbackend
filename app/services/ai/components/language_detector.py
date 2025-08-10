@@ -51,11 +51,11 @@ class LanguageDetector:
                 return False
             
             self.initialized = True
-            logger.info("✅ Language Detector initialized")
+            logger.info(" Language Detector initialized")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Language Detector: {e}")
+            logger.error(f" Failed to initialize Language Detector: {e}")
             return False
     
     async def detect_language(self, text: str) -> Dict[str, Any]:

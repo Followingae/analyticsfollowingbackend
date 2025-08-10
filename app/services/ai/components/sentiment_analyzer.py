@@ -27,11 +27,11 @@ class SentimentAnalyzer:
                 return False
             
             self.initialized = True
-            logger.info("✅ Sentiment Analyzer initialized")
+            logger.info(" Sentiment Analyzer initialized")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Sentiment Analyzer: {e}")
+            logger.error(f" Failed to initialize Sentiment Analyzer: {e}")
             return False
     
     async def analyze_sentiment(self, text: str) -> Dict[str, Any]:

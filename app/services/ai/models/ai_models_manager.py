@@ -71,11 +71,11 @@ class AIModelsManager:
             await self._load_language_model()
             
             self.initialized = True
-            logger.info("✅ AI Models Manager initialized successfully")
+            logger.info(" AI Models Manager initialized successfully")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to initialize AI Models Manager: {e}")
+            logger.error(f" Failed to initialize AI Models Manager: {e}")
             return False
     
     async def _load_sentiment_model(self) -> bool:
@@ -95,11 +95,11 @@ class AIModelsManager:
             )
             
             self.pipelines_cache['sentiment'] = sentiment_pipeline
-            logger.info("✅ Sentiment model loaded successfully")
+            logger.info(" Sentiment model loaded successfully")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to load sentiment model: {e}")
+            logger.error(f" Failed to load sentiment model: {e}")
             return False
     
     async def _load_language_model(self) -> bool:
@@ -119,11 +119,11 @@ class AIModelsManager:
             )
             
             self.pipelines_cache['language'] = language_pipeline
-            logger.info("✅ Language model loaded successfully")
+            logger.info(" Language model loaded successfully")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to load language model: {e}")
+            logger.error(f" Failed to load language model: {e}")
             return False
     
     def get_sentiment_pipeline(self) -> Optional[Pipeline]:
@@ -150,10 +150,10 @@ class AIModelsManager:
                 )
                 
                 self.pipelines_cache['category'] = category_pipeline
-                logger.info("✅ Category model loaded successfully")
+                logger.info(" Category model loaded successfully")
                 
             except Exception as e:
-                logger.error(f"❌ Failed to load category model: {e}")
+                logger.error(f" Failed to load category model: {e}")
                 return None
         
         return self.pipelines_cache.get('category')
