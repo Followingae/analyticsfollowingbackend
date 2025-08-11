@@ -1,16 +1,21 @@
 """
 AI Background Task Manager - Handles AI analysis task scheduling and monitoring
-Integrates with Celery workers for scalable background processing
+Integrates with Celery workers for scalable background processing (with development fallback)
 """
 import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 import uuid
 
-from celery.result import AsyncResult
-
-# Import Celery app
-from app.workers.ai_background_worker import celery_app
+# Optional Celery imports for development
+try:
+    from celery.result import AsyncResult
+    from app.workers.ai_background_worker import celery_app
+    CELERY_AVAILABLE = True
+except ImportError:
+    CELERY_AVAILABLE = False
+    AsyncResult = None
+    celery_app = None
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,17 @@ class AIBackgroundTaskManager:
         Returns:
             Task information including task_id
         """
+        # Development fallback when Celery is not available
+        if not CELERY_AVAILABLE:
+            logger.warning("Celery not available - returning mock task for development")
+            mock_task_id = f"dev_task_{uuid.uuid4().hex[:8]}"
+            return {
+                "success": True,
+                "task_id": mock_task_id,
+                "message": "Development mode - AI analysis scheduled (mock)",
+                "estimated_duration": "2-5 minutes (mock)"
+            }
+            
         try:
             # Check if analysis is already running for this profile
             for task_id, task_info in self.active_tasks.items():
@@ -95,6 +111,22 @@ class AIBackgroundTaskManager:
         Returns:
             Task status information
         """
+        # Development fallback when Celery is not available
+        if not CELERY_AVAILABLE:
+            if task_id.startswith("dev_task_"):
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "status": "SUCCESS",
+                    "result": "Development mode - AI analysis completed (mock)"
+                }
+            else:
+                return {
+                    "success": False,
+                    "task_id": task_id,
+                    "error": "Development mode - Celery not available"
+                }
+                
         try:
             # Get task result from Celery
             task_result = AsyncResult(task_id, app=celery_app)
@@ -257,6 +289,18 @@ class AIBackgroundTaskManager:
     
     def get_system_stats(self) -> Dict[str, Any]:
         """Get background processing system statistics"""
+        # Development fallback when Celery is not available
+        if not CELERY_AVAILABLE:
+            return {
+                "active_workers": 0,
+                "active_tasks_count": 0,
+                "task_status_breakdown": {},
+                "celery_broker": "Not available (development mode)",
+                "system_healthy": False,
+                "last_check": datetime.now(timezone.utc).isoformat(),
+                "development_mode": True
+            }
+            
         try:
             # Get Celery worker stats
             active_workers = celery_app.control.inspect().active()

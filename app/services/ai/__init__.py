@@ -1,8 +1,9 @@
 """
 AI/ML Services Package
-Provides content intelligence and machine learning capabilities for Instagram analytics
+Provides bulletproof content intelligence and machine learning capabilities for Instagram analytics
 """
 
-from .content_intelligence_service import ContentIntelligenceService
+from .bulletproof_content_intelligence import bulletproof_content_intelligence
+from .ai_manager_singleton import ai_manager
 
-__all__ = ['ContentIntelligenceService']
+__all__ = ['bulletproof_content_intelligence', 'ai_manager']

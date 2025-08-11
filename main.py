@@ -19,12 +19,12 @@ from app.api.cleaned_routes import router
 from app.api.cleaned_auth_routes import router as auth_router
 from app.api.settings_routes import router as settings_router
 from app.api.engagement_routes import router as engagement_router
-from app.api.ai_fix_routes import router as ai_fix_router
+# Removed ai_fix_routes - functionality integrated into main routes
 from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
 from app.database.comprehensive_service import comprehensive_service
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
-from app.cache import periodic_cache_cleanup
+# Cache cleanup moved to Redis cache manager
 # Removed automatic AI refresh scheduler - using manual refresh only
 
 
@@ -62,12 +62,8 @@ async def lifespan(app: FastAPI):
         print(f"Comprehensive service failed: {e}")
         # Don't fail startup - the service can operate without the pool
     
-    # Start cache cleanup task
-    try:
-        asyncio.create_task(periodic_cache_cleanup())
-        print("Cache cleanup task started")
-    except Exception as e:
-        print(f"Cache cleanup task failed: {e}")
+    # Cache cleanup now handled by Redis cache manager
+    print("Cache management integrated into Redis cache system")
     
     # AI refresh is now manual-only via API endpoints
     
@@ -161,7 +157,7 @@ app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(engagement_router, prefix="/api/v1")
-app.include_router(ai_fix_router, prefix="/api/v1")
+# ai_fix_router removed - functionality integrated
 
 # Include My Lists routes
 from app.api.lists_routes import router as lists_router
