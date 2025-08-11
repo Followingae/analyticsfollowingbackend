@@ -39,58 +39,58 @@ router = APIRouter()
 @router.get("/ai/status/profile/{username}")
 async def get_profile_ai_analysis_status(
     username: str = Path(..., description="Instagram username"),
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get AI analysis status for a specific profile"""
     try:
         # Get profile from database first
-        async with get_db() as db:
-            profile = await comprehensive_service.get_profile_by_username(db, username)
+        profile = await comprehensive_service.get_profile_by_username(db, username)
+        
+        if not profile:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "profile_username": username,
+                    "ai_analysis_status": "profile_not_found",
+                    "message": f"Profile {username} not found in database"
+                }
+            )
+        
+        # Check for active background tasks
+        task_status = ai_background_task_manager.get_profile_analysis_status(str(profile.id))
+        
+        # Check existing AI analysis in database
+        has_existing_analysis = bool(profile.ai_profile_analyzed_at)
+        posts_analyzed_count = 0
+        
+        if has_existing_analysis:
+            from app.database.unified_models import Post
+            from sqlalchemy import select, func
             
-            if not profile:
-                return JSONResponse(
-                    status_code=404,
-                    content={
-                        "profile_username": username,
-                        "ai_analysis_status": "profile_not_found",
-                        "message": f"Profile {username} not found in database"
-                    }
+            posts_analyzed_result = await db.execute(
+                select(func.count(Post.id)).where(
+                    Post.profile_id == profile.id,
+                    Post.ai_analyzed_at.isnot(None)
                 )
-            
-            # Check for active background tasks
-            task_status = ai_background_task_manager.get_profile_analysis_status(str(profile.id))
-            
-            # Check existing AI analysis in database
-            has_existing_analysis = bool(profile.ai_profile_analyzed_at)
-            posts_analyzed_count = 0
-            
-            if has_existing_analysis:
-                from app.database.unified_models import Post
-                from sqlalchemy import select, func
-                
-                posts_analyzed_result = await db.execute(
-                    select(func.count(Post.id)).where(
-                        Post.profile_id == profile.id,
-                        Post.ai_analyzed_at.isnot(None)
-                    )
-                )
-                posts_analyzed_count = posts_analyzed_result.scalar() or 0
-            
-            return JSONResponse(content={
-                "profile_username": username,
-                "profile_id": str(profile.id),
-                "ai_analysis_status": {
-                    "has_active_analysis": task_status.get("has_active_analysis", False),
-                    "has_existing_analysis": has_existing_analysis,
-                    "posts_analyzed_count": posts_analyzed_count,
-                    "last_analysis_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
-                    "primary_content_type": profile.ai_primary_content_type,
-                    "avg_sentiment_score": float(profile.ai_avg_sentiment_score) if profile.ai_avg_sentiment_score else None,
-                    "content_quality_score": float(profile.ai_content_quality_score) if profile.ai_content_quality_score else None
-                },
-                "background_task": task_status.get("task_status") if task_status.get("has_active_analysis") else None,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            })
+            )
+            posts_analyzed_count = posts_analyzed_result.scalar() or 0
+        
+        return JSONResponse(content={
+            "profile_username": username,
+            "profile_id": str(profile.id),
+            "ai_analysis_status": {
+                "has_active_analysis": task_status.get("has_active_analysis", False),
+                "has_existing_analysis": has_existing_analysis,
+                "posts_analyzed_count": posts_analyzed_count,
+                "last_analysis_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                "primary_content_type": profile.ai_primary_content_type,
+                "avg_sentiment_score": float(profile.ai_avg_sentiment_score) if profile.ai_avg_sentiment_score else None,
+                "content_quality_score": float(profile.ai_content_quality_score) if profile.ai_content_quality_score else None
+            },
+            "background_task": task_status.get("task_status") if task_status.get("has_active_analysis") else None,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
             
     except Exception as e:
         logger.error(f"Failed to get AI status for {username}: {e}")
@@ -100,6 +100,78 @@ async def get_profile_ai_analysis_status(
                 "profile_username": username,
                 "error": str(e),
                 "ai_analysis_status": "error"
+            }
+        )
+
+@router.post("/ai/fix/profile/{username}")
+async def fix_profile_ai_analysis(
+    username: str = Path(..., description="Instagram username"),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Fix/repair AI analysis for a profile"""
+    try:
+        # Get profile from database first
+        profile = await comprehensive_service.get_profile_by_username(db, username)
+        
+        if not profile:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "success": False,
+                    "message": f"Profile {username} not found in database",
+                    "username": username
+                }
+            )
+        
+        # Check if profile already has AI analysis
+        if profile.ai_profile_analyzed_at:
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "message": f"Profile {username} already has AI analysis completed",
+                    "username": username,
+                    "last_analysis": profile.ai_profile_analyzed_at.isoformat(),
+                    "action_taken": "none_required"
+                }
+            )
+        
+        # Start AI analysis for this profile
+        ai_result = await _schedule_background_ai_analysis(str(profile.id), username)
+        
+        if ai_result.get("success"):
+            return JSONResponse(
+                content={
+                    "success": True,
+                    "message": f"AI analysis repair started for {username}",
+                    "username": username,
+                    "task_id": ai_result.get("task_id"),
+                    "estimated_duration": ai_result.get("estimated_duration"),
+                    "action_taken": "analysis_scheduled"
+                }
+            )
+        else:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "success": False,
+                    "message": f"Failed to start AI analysis repair for {username}",
+                    "username": username,
+                    "error": ai_result.get("error"),
+                    "action_taken": "failed"
+                }
+            )
+            
+    except Exception as e:
+        logger.error(f"Failed to fix AI analysis for {username}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"Error attempting to fix AI analysis for {username}",
+                "username": username,
+                "error": str(e),
+                "action_taken": "error"
             }
         )
 
