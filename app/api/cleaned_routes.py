@@ -18,133 +18,182 @@ from sqlalchemy import select, func, and_
 
 from app.core.config import settings
 from app.models.auth import UserInDB
+
+# Import bulletproof AI system
+from app.services.ai_background_task_manager import ai_background_task_manager
 from app.database.connection import get_db
 from app.database.comprehensive_service import comprehensive_service
 # proxy_instagram_url import removed - using external proxy service instead
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient, DecodoAPIError, DecodoInstabilityError
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
-from app.cache import profile_cache
+from app.services.cache_integration_service import cache_integration_service
 from app.services.engagement_calculator import engagement_calculator
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-async def _analyze_profile_posts_immediately(db: AsyncSession, profile) -> dict:
-    """Analyze all posts for a profile immediately and generate profile insights"""
+# =============================================================================
+# AI ANALYSIS STATUS ENDPOINTS (Production Ready)
+# =============================================================================
+
+@router.get("/ai/status/profile/{username}")
+async def get_profile_ai_analysis_status(
+    username: str = Path(..., description="Instagram username"),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get AI analysis status for a specific profile"""
     try:
-        from app.services.ai.content_intelligence_service import content_intelligence_service
-        from app.database.unified_models import Post
-        from sqlalchemy import select, update
-        
-        # Initialize AI service
-        await content_intelligence_service.initialize()
-        
-        # Get all posts for the profile
-        posts_result = await db.execute(
-            select(Post).where(Post.profile_id == profile.id)
-        )
-        posts = posts_result.scalars().all()
-        
-        if not posts:
-            return {"success": True, "posts_analyzed": 0, "profile_insights": False, "message": "No posts to analyze"}
-        
-        analyzed_count = 0
-        category_counts = {}
-        sentiment_scores = []
-        language_counts = {}
-        
-        # Analyze each post
-        for post in posts:
-            try:
-                # Skip if already analyzed
-                if post.ai_analyzed_at:
-                    continue
-                    
-                # Analyze post content
-                analysis = await content_intelligence_service.analyze_post_content(post)
-                
-                if analysis and not analysis.get("error"):
-                    # Update post with AI data
-                    await db.execute(
-                        update(Post)
-                        .where(Post.id == post.id)
-                        .values(
-                            ai_content_category=analysis.get("ai_content_category"),
-                            ai_category_confidence=analysis.get("ai_category_confidence", 0.0),
-                            ai_sentiment=analysis.get("ai_sentiment"),
-                            ai_sentiment_score=analysis.get("ai_sentiment_score", 0.0),
-                            ai_sentiment_confidence=analysis.get("ai_sentiment_confidence", 0.0),
-                            ai_language_code=analysis.get("ai_language_code"),
-                            ai_language_confidence=analysis.get("ai_language_confidence", 0.0),
-                            ai_analysis_raw=analysis,
-                            ai_analyzed_at=datetime.now(timezone.utc),
-                            ai_analysis_version="1.0.0"
-                        )
-                    )
-                    
-                    analyzed_count += 1
-                    
-                    # Collect data for profile aggregation
-                    if analysis.get("ai_content_category"):
-                        cat = analysis["ai_content_category"]
-                        category_counts[cat] = category_counts.get(cat, 0) + 1
-                    
-                    if analysis.get("ai_sentiment_score") is not None:
-                        sentiment_scores.append(analysis["ai_sentiment_score"])
-                    
-                    if analysis.get("ai_language_code"):
-                        lang = analysis["ai_language_code"]
-                        language_counts[lang] = language_counts.get(lang, 0) + 1
-                        
-            except Exception as e:
-                logger.warning(f"Failed to analyze post {post.id}: {e}")
-                continue
-        
-        # Generate profile-level insights if we analyzed any posts
-        profile_insights_generated = False
-        if analyzed_count > 0:
-            # Calculate aggregated insights
-            primary_content = max(category_counts, key=category_counts.get) if category_counts else None
-            avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0.0
+        # Get profile from database first
+        async with get_db() as db:
+            profile = await comprehensive_service.get_profile_by_username(db, username)
             
-            content_distribution = {k: v/analyzed_count for k, v in category_counts.items()}
-            language_distribution = {k: v/analyzed_count for k, v in language_counts.items()}
-            quality_score = min(1.0, analyzed_count / 20.0)  # Quality based on volume
-            
-            # Update profile with aggregated insights
-            from app.database.unified_models import Profile
-            await db.execute(
-                update(Profile)
-                .where(Profile.id == profile.id)
-                .values(
-                    ai_primary_content_type=primary_content,
-                    ai_content_distribution=content_distribution,
-                    ai_avg_sentiment_score=avg_sentiment,
-                    ai_language_distribution=language_distribution,
-                    ai_content_quality_score=quality_score,
-                    ai_profile_analyzed_at=datetime.now(timezone.utc)
+            if not profile:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "profile_username": username,
+                        "ai_analysis_status": "profile_not_found",
+                        "message": f"Profile {username} not found in database"
+                    }
                 )
-            )
-            profile_insights_generated = True
-        
-        await db.commit()
-        
-        return {
-            "success": True,
-            "posts_analyzed": analyzed_count,
-            "total_posts": len(posts),
-            "profile_insights": profile_insights_generated,
-            "primary_content": primary_content if analyzed_count > 0 else None,
-            "avg_sentiment": round(avg_sentiment, 2) if analyzed_count > 0 else None
-        }
+            
+            # Check for active background tasks
+            task_status = ai_background_task_manager.get_profile_analysis_status(str(profile.id))
+            
+            # Check existing AI analysis in database
+            has_existing_analysis = bool(profile.ai_profile_analyzed_at)
+            posts_analyzed_count = 0
+            
+            if has_existing_analysis:
+                from app.database.unified_models import Post
+                from sqlalchemy import select, func
+                
+                posts_analyzed_result = await db.execute(
+                    select(func.count(Post.id)).where(
+                        Post.profile_id == profile.id,
+                        Post.ai_analyzed_at.isnot(None)
+                    )
+                )
+                posts_analyzed_count = posts_analyzed_result.scalar() or 0
+            
+            return JSONResponse(content={
+                "profile_username": username,
+                "profile_id": str(profile.id),
+                "ai_analysis_status": {
+                    "has_active_analysis": task_status.get("has_active_analysis", False),
+                    "has_existing_analysis": has_existing_analysis,
+                    "posts_analyzed_count": posts_analyzed_count,
+                    "last_analysis_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                    "primary_content_type": profile.ai_primary_content_type,
+                    "avg_sentiment_score": float(profile.ai_avg_sentiment_score) if profile.ai_avg_sentiment_score else None,
+                    "content_quality_score": float(profile.ai_content_quality_score) if profile.ai_content_quality_score else None
+                },
+                "background_task": task_status.get("task_status") if task_status.get("has_active_analysis") else None,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+            
+    except Exception as e:
+        logger.error(f"Failed to get AI status for {username}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "profile_username": username,
+                "error": str(e),
+                "ai_analysis_status": "error"
+            }
+        )
+
+@router.get("/ai/task/{task_id}/status")
+async def get_ai_task_status(
+    task_id: str = Path(..., description="AI analysis task ID"),
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get status of a specific AI analysis task"""
+    try:
+        task_status = ai_background_task_manager.get_task_status(task_id)
+        return JSONResponse(content=task_status)
         
     except Exception as e:
-        logger.error(f"Error in immediate AI analysis: {e}")
-        try:
-            await db.rollback()
-        except:
-            pass
-        return {"success": False, "error": str(e), "posts_analyzed": 0}
+        logger.error(f"Failed to get task status for {task_id}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "task_id": task_id,
+                "status": "ERROR",
+                "error": str(e)
+            }
+        )
+
+@router.get("/ai/system/health")
+async def get_ai_system_health(current_user: UserInDB = Depends(get_current_active_user)):
+    """Get comprehensive AI system health status"""
+    try:
+        # Get bulletproof AI service health
+        from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
+        ai_health = bulletproof_content_intelligence.get_system_health()
+        
+        # Get background processing stats
+        background_stats = ai_background_task_manager.get_system_stats()
+        
+        return JSONResponse(content={
+            "ai_service_health": ai_health,
+            "background_processing": background_stats,
+            "overall_status": "healthy" if (
+                ai_health.get("overall_status") == "healthy" and 
+                background_stats.get("system_healthy", False)
+            ) else "degraded",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to get AI system health: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "overall_status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+
+async def _schedule_background_ai_analysis(profile_id: str, profile_username: str) -> dict:
+    """Schedule AI analysis for a profile using background processing (bulletproof approach)"""
+    try:
+        logger.info(f"📋 Scheduling background AI analysis for profile: {profile_username}")
+        
+        # Schedule the background task using our task manager
+        task_result = ai_background_task_manager.schedule_profile_analysis(
+            profile_id=profile_id, 
+            profile_username=profile_username
+        )
+        
+        if task_result.get("success"):
+            logger.info(f"✅ Background AI analysis scheduled for {profile_username}: task_id={task_result.get('task_id')}")
+            return {
+                "success": True,
+                "background_processing": True,
+                "task_id": task_result.get("task_id"),
+                "status": task_result.get("status"),
+                "message": f"AI analysis scheduled in background for {profile_username}",
+                "estimated_duration": task_result.get("estimated_duration", "2-5 minutes")
+            }
+        else:
+            logger.warning(f"⚠️ Failed to schedule background AI analysis for {profile_username}: {task_result.get('error')}")
+            return {
+                "success": False, 
+                "background_processing": True,
+                "error": task_result.get("error"),
+                "message": f"Failed to schedule AI analysis for {profile_username}"
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Error scheduling background AI analysis for {profile_username}: {e}")
+        return {
+            "success": False, 
+            "background_processing": True,
+            "error": str(e),
+            "message": f"Failed to schedule AI analysis for {profile_username}"
+        }
 
 # =============================================================================
 # RETRY MECHANISM FOR DECODO API CALLS
@@ -405,22 +454,26 @@ async def analyze_instagram_profile(
             if new_profile:
                 logger.info(f"AUTO-TRIGGERING AI analysis for new profile: {username}")
                 
-                # Run immediate AI analysis with error handling
+                # Schedule background AI analysis with error handling
                 try:
-                    ai_results = await _analyze_profile_posts_immediately(db, new_profile)
+                    ai_results = await _schedule_background_ai_analysis(str(new_profile.id), username)
                     if ai_results.get("success"):
-                        logger.info(f"AI analysis completed for {username}: {ai_results['posts_analyzed']} posts analyzed")
-                        meta["ai_analysis"] = {
-                            "status": "completed", 
-                            "posts_analyzed": ai_results.get("posts_analyzed", 0),
-                            "profile_insights_generated": ai_results.get("profile_insights", False)
-                        }
+                        logger.info(f"AI analysis scheduled for {username}: task_id={ai_results.get('task_id')}")
+                        if response_data and "meta" in response_data:
+                            response_data["meta"]["ai_analysis"] = {
+                                "status": "scheduled_background", 
+                                "task_id": ai_results.get("task_id"),
+                                "background_processing": True,
+                                "estimated_duration": ai_results.get("estimated_duration")
+                            }
                     else:
-                        logger.warning(f"AI analysis failed for {username}: {ai_results.get('error', 'Unknown error')}")
-                        meta["ai_analysis"] = {"status": "failed", "error": ai_results.get("error")}
+                        logger.warning(f"AI analysis scheduling failed for {username}: {ai_results.get('error', 'Unknown error')}")
+                        if response_data and "meta" in response_data:
+                            response_data["meta"]["ai_analysis"] = {"status": "scheduling_failed", "error": ai_results.get("error")}
                 except Exception as ai_error:
-                    logger.warning(f"AI analysis exception for {username}: {ai_error}")
-                    meta["ai_analysis"] = {"status": "error", "error": str(ai_error)}
+                    logger.warning(f"AI analysis scheduling exception for {username}: {ai_error}")
+                    if response_data and "meta" in response_data:
+                        response_data["meta"]["ai_analysis"] = {"status": "scheduling_error", "error": str(ai_error)}
             
         except Exception as ai_error:
             logger.warning(f"Failed to auto-trigger AI analysis for {username}: {ai_error}")
@@ -683,18 +736,19 @@ async def force_refresh_profile_data(
             if refreshed_profile:
                 logger.info(f"AUTO-TRIGGERING enhanced AI analysis for refreshed profile: {username}")
                 
-                # Run immediate AI analysis
-                ai_analysis_results = await _analyze_profile_posts_immediately(db, refreshed_profile)
+                # Schedule background AI analysis for refreshed profile  
+                ai_analysis_results = await _schedule_background_ai_analysis(str(refreshed_profile.id), username)
                 if ai_analysis_results.get("success"):
-                    logger.info(f"Enhanced AI analysis completed for {username}: {ai_analysis_results['posts_analyzed']} posts")
+                    logger.info(f"Enhanced AI analysis scheduled for {username}: task_id={ai_analysis_results.get('task_id')}")
                     refresh_meta["ai_analysis"] = {
-                        "status": "completed",
-                        "posts_analyzed": ai_analysis_results.get("posts_analyzed", 0),
-                        "profile_insights_generated": ai_analysis_results.get("profile_insights", False)
+                        "status": "scheduled_background",
+                        "task_id": ai_analysis_results.get("task_id"),
+                        "background_processing": True,
+                        "estimated_duration": ai_analysis_results.get("estimated_duration")
                     }
                 else:
-                    logger.warning(f"Enhanced AI analysis failed for {username}: {ai_analysis_results.get('error', 'Unknown error')}")
-                    refresh_meta["ai_analysis"] = {"status": "failed", "error": ai_analysis_results.get("error")}
+                    logger.warning(f"Enhanced AI analysis scheduling failed for {username}: {ai_analysis_results.get('error', 'Unknown error')}")
+                    refresh_meta["ai_analysis"] = {"status": "scheduling_failed", "error": ai_analysis_results.get("error")}
             
         except Exception as ai_error:
             logger.warning(f"Failed to auto-trigger AI analysis for refreshed {username}: {ai_error}")
