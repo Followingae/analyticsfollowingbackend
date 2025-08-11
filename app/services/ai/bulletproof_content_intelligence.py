@@ -34,7 +34,7 @@ class BulletproofContentIntelligence:
     async def initialize(self) -> bool:
         """Initialize all AI components with comprehensive error handling"""
         try:
-            logger.info("🚀 Initializing Bulletproof Content Intelligence Service...")
+            logger.info("[INIT] Initializing Bulletproof Content Intelligence Service...")
             
             # Initialize global AI manager first
             await ai_manager.initialize_models(['sentiment', 'language'])
@@ -62,17 +62,17 @@ class BulletproofContentIntelligence:
             self.initialized = any([sentiment_ok, language_ok, category_ok])
             
             if self.initialized:
-                logger.info("✅ Bulletproof Content Intelligence Service initialized successfully")
+                logger.info("[SUCCESS] Bulletproof Content Intelligence Service initialized successfully")
                 logger.info(f"Components status: Sentiment={sentiment_ok}, Language={language_ok}, Category={category_ok}")
                 return True
             else:
                 self.initialization_error = "All AI components failed to initialize"
-                logger.error("❌ All AI components failed to initialize")
+                logger.error("[FAILED] All AI components failed to initialize")
                 return False
             
         except Exception as e:
             self.initialization_error = str(e)
-            logger.error(f"❌ Failed to initialize Bulletproof Content Intelligence Service: {e}")
+            logger.error(f"[FAILED] Failed to initialize Bulletproof Content Intelligence Service: {e}")
             return False
     
     async def analyze_post_content(self, post_data: Dict[str, Any]) -> Dict[str, Any]:

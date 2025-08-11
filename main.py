@@ -163,6 +163,10 @@ app.include_router(engagement_router, prefix="/api/v1")
 from app.api.lists_routes import router as lists_router
 app.include_router(lists_router, prefix="/api/v1")
 
+# Include Direct AI Analysis routes
+from app.api.direct_ai_routes import router as direct_ai_router
+app.include_router(direct_ai_router, prefix="/api/v1")
+
 
 @app.get("/")
 async def root():

@@ -40,13 +40,12 @@ class AIBackgroundTaskManager:
         """
         # Development fallback when Celery is not available
         if not CELERY_AVAILABLE:
-            logger.warning("Celery not available - returning mock task for development")
-            mock_task_id = f"dev_task_{uuid.uuid4().hex[:8]}"
+            logger.error("Celery not available - AI background processing disabled")
             return {
-                "success": True,
-                "task_id": mock_task_id,
-                "message": "Development mode - AI analysis scheduled (mock)",
-                "estimated_duration": "2-5 minutes (mock)"
+                "success": False,
+                "error": "Background processing not available",
+                "message": f"AI analysis requires Celery worker. Use direct analysis endpoint: POST /api/v1/ai/analyze/direct/{profile_username}",
+                "recommendation": "Use direct AI analysis for immediate results"
             }
             
         try:
@@ -113,19 +112,14 @@ class AIBackgroundTaskManager:
         """
         # Development fallback when Celery is not available
         if not CELERY_AVAILABLE:
-            if task_id.startswith("dev_task_"):
-                return {
-                    "success": True,
-                    "task_id": task_id,
-                    "status": "SUCCESS",
-                    "result": "Development mode - AI analysis completed (mock)"
-                }
-            else:
-                return {
-                    "success": False,
-                    "task_id": task_id,
-                    "error": "Development mode - Celery not available"
-                }
+            return {
+                "success": False,
+                "task_id": task_id,
+                "status": "UNAVAILABLE",
+                "error": "Celery not available",
+                "message": "Background processing not available. Use direct AI analysis instead.",
+                "recommendation": f"Use POST /api/v1/ai/analyze/direct/{{username}} for immediate AI analysis"
+            }
                 
         try:
             # Get task result from Celery

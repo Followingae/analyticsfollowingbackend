@@ -28,7 +28,11 @@ class DecodoAPIError(Exception):
         self.response_data = response_data
 
 class DecodoInstabilityError(DecodoAPIError):
-    """Specific exception for instagram_graphql_profile instability (Error 613, etc.)"""
+    """Exception for temporary Decodo API issues that should be retried"""
+    pass
+
+class DecodoProfileNotFoundError(DecodoAPIError):
+    """Exception for non-existent profiles that should NOT be retried"""
     pass
 
 class EnhancedDecodoClient:
@@ -65,6 +69,48 @@ class EnhancedDecodoClient:
         encoded_credentials = base64.b64encode(credentials.encode()).decode()
         return f"Basic {encoded_credentials}"
     
+    async def _make_request_smart_retry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Smart retry that detects non-existent profiles and fails fast"""
+        username = payload.get('query', 'unknown')
+        empty_content_count = 0
+        last_exception = None
+        
+        for attempt in range(5):  # Max 5 attempts
+            try:
+                return await self._make_request_with_retry(payload)
+            except DecodoInstabilityError as e:
+                last_exception = e
+                if "Empty content received" in str(e):
+                    empty_content_count += 1
+                    logger.warning(f"Empty content attempt {empty_content_count}/5 for {username}")
+                    
+                    # If we get empty content 3 times in a row, likely profile doesn't exist
+                    if empty_content_count >= 3:
+                        logger.error(f"Profile {username} likely doesn't exist - got empty content {empty_content_count} times")
+                        raise DecodoProfileNotFoundError(f"Profile '{username}' not found on Instagram") from e
+                else:
+                    # Reset counter for non-empty-content errors
+                    empty_content_count = 0
+                    
+                # Continue retrying for other types of instability errors
+                if attempt < 4:  # Don't wait after last attempt
+                    wait_time = min(2 * (1.5 ** attempt), 15)
+                    logger.warning(f"Retrying {username} in {wait_time}s (attempt {attempt + 1}/5)")
+                    await asyncio.sleep(wait_time)
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_exception = e
+                # Network issues - reset empty content counter and retry
+                empty_content_count = 0
+                if attempt < 4:
+                    wait_time = min(2 * (1.5 ** attempt), 15)
+                    await asyncio.sleep(wait_time)
+        
+        # If we get here, all retries failed
+        if empty_content_count >= 3:
+            raise DecodoProfileNotFoundError(f"Profile '{username}' not found on Instagram") from last_exception
+        else:
+            raise last_exception
+
     @retry(
         stop=stop_after_attempt(5),  # Increased retries as Decodo tech team confirmed retrying is effective
         wait=wait_exponential(multiplier=1.5, min=2, max=15),  # More aggressive retry strategy
@@ -214,7 +260,7 @@ class EnhancedDecodoClient:
                 # Add small random delay to avoid hitting rate limits  
                 await asyncio.sleep(random.uniform(0.5, 2.0))
                 
-                response_data = await self._make_request_with_retry(config)
+                response_data = await self._make_request_smart_retry(config)
                 
                 # Validate response structure
                 if not isinstance(response_data, dict) or 'results' not in response_data:
