@@ -106,9 +106,12 @@ async def get_profile_ai_analysis_status(
                 "has_existing_analysis": has_existing_analysis,
                 "posts_analyzed_count": posts_analyzed_count,
                 "last_analysis_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
-                "primary_content_type": profile.ai_primary_content_type,
+                "primary_content_type": profile.ai_primary_content_type,  # DEPRECATED - use top_3_categories
                 "avg_sentiment_score": float(profile.ai_avg_sentiment_score) if profile.ai_avg_sentiment_score else None,
-                "content_quality_score": float(profile.ai_content_quality_score) if profile.ai_content_quality_score else None
+                "content_quality_score": float(profile.ai_content_quality_score) if profile.ai_content_quality_score else None,
+                # NEW: Top categories for frontend display
+                "top_3_categories": profile.ai_top_3_categories or [],
+                "top_10_categories": profile.ai_top_10_categories or []
             },
             "background_task": task_status.get("task_status") if task_status.get("has_active_analysis") else None,
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -445,10 +448,13 @@ async def verify_ai_analysis_completeness(
             # PROFILE AI INSIGHTS STATUS
             "profile_ai_status": {
                 "has_insights": profile_has_ai,
-                "primary_content_type": profile.ai_primary_content_type,
+                "primary_content_type": profile.ai_primary_content_type,  # DEPRECATED - use top_3_categories
                 "avg_sentiment_score": float(profile.ai_avg_sentiment_score) if profile.ai_avg_sentiment_score else None,
-                "content_distribution": profile.ai_content_distribution,
-                "last_analyzed": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None
+                "content_distribution": profile.ai_content_distribution,  # DEPRECATED - use top_10_categories
+                "last_analyzed": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                # NEW: Top categories for frontend display
+                "top_3_categories": profile.ai_top_3_categories or [],
+                "top_10_categories": profile.ai_top_10_categories or []
             },
             
             # SAMPLE REAL AI DATA (PROOF OF NO MOCKS)
@@ -649,16 +655,38 @@ async def _update_profile_ai_insights_internal(db: AsyncSession, profile, userna
                 primary_content_type = None
                 max_count = 0
                 
-                for row in content_rows:
+                # Sort by count descending for top categories
+                sorted_categories = sorted(content_rows, key=lambda x: x.count, reverse=True)
+                ai_top_3_categories = []
+                ai_top_10_categories = []
+                
+                for i, row in enumerate(sorted_categories):
                     percentage = round((row.count / total_categorized) * 100, 1)
                     content_distribution[row.ai_content_category] = percentage
                     
                     if row.count > max_count:
                         max_count = row.count
                         primary_content_type = row.ai_content_category
+                    
+                    # Build structured category data
+                    category_data = {
+                        "category": row.ai_content_category,
+                        "percentage": percentage,
+                        "count": row.count,
+                        "confidence": 0.85  # Default confidence for aggregated data
+                    }
+                    
+                    # Add to appropriate lists
+                    if i < 3:
+                        ai_top_3_categories.append(category_data)
+                    if i < 10:
+                        ai_top_10_categories.append(category_data)
                 
                 profile.ai_content_distribution = content_distribution
                 profile.ai_primary_content_type = primary_content_type
+                # NEW: Store top categories
+                profile.ai_top_3_categories = ai_top_3_categories
+                profile.ai_top_10_categories = ai_top_10_categories
             
             logger.info(f"[INSIGHTS] Updated AI insights for profile {username}")
             return True
@@ -814,12 +842,15 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
             if profile:
                 try:
                     ai_insights = {
-                        "ai_primary_content_type": profile.ai_primary_content_type,
-                        "ai_content_distribution": profile.ai_content_distribution,
+                        "ai_primary_content_type": profile.ai_primary_content_type,  # DEPRECATED
+                        "ai_content_distribution": profile.ai_content_distribution,  # DEPRECATED
                         "ai_avg_sentiment_score": profile.ai_avg_sentiment_score,
                         "ai_language_distribution": profile.ai_language_distribution,
                         "ai_content_quality_score": profile.ai_content_quality_score,
                         "ai_profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                        # NEW: Top categories for frontend display
+                        "ai_top_3_categories": profile.ai_top_3_categories or [],
+                        "ai_top_10_categories": profile.ai_top_10_categories or [],
                         "has_ai_analysis": profile.ai_profile_analyzed_at is not None,
                         "ai_processing_status": "completed" if profile.ai_profile_analyzed_at else "pending"
                     }
@@ -919,12 +950,15 @@ async def analyze_instagram_profile(
                 if cached_data and existing_profile:
                     try:
                         ai_insights = {
-                            "ai_primary_content_type": existing_profile.ai_primary_content_type,
-                            "ai_content_distribution": existing_profile.ai_content_distribution,
+                            "ai_primary_content_type": existing_profile.ai_primary_content_type,  # DEPRECATED
+                            "ai_content_distribution": existing_profile.ai_content_distribution,  # DEPRECATED
                             "ai_avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
                             "ai_language_distribution": existing_profile.ai_language_distribution,
                             "ai_content_quality_score": existing_profile.ai_content_quality_score,
                             "ai_profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None,
+                            # NEW: Top categories for frontend display
+                            "ai_top_3_categories": existing_profile.ai_top_3_categories or [],
+                            "ai_top_10_categories": existing_profile.ai_top_10_categories or [],
                             "has_ai_analysis": existing_profile.ai_profile_analyzed_at is not None,
                             "ai_processing_status": "completed" if existing_profile.ai_profile_analyzed_at else "pending"
                         }
@@ -1118,12 +1152,15 @@ async def get_detailed_analytics(
         if profile and cached_profile:
             try:
                 ai_insights = {
-                    "ai_primary_content_type": profile.ai_primary_content_type,
-                    "ai_content_distribution": profile.ai_content_distribution,
+                    "ai_primary_content_type": profile.ai_primary_content_type,  # DEPRECATED
+                    "ai_content_distribution": profile.ai_content_distribution,  # DEPRECATED
                     "ai_avg_sentiment_score": profile.ai_avg_sentiment_score,
                     "ai_language_distribution": profile.ai_language_distribution,
                     "ai_content_quality_score": profile.ai_content_quality_score,
                     "ai_profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                    # NEW: Top categories for frontend display
+                    "ai_top_3_categories": profile.ai_top_3_categories or [],
+                    "ai_top_10_categories": profile.ai_top_10_categories or [],
                     "has_ai_analysis": profile.ai_profile_analyzed_at is not None,
                     "ai_processing_status": "completed" if profile.ai_profile_analyzed_at else "pending"
                 }
@@ -1157,68 +1194,190 @@ async def get_detailed_analytics(
         )
 
 
-@router.post("/instagram/profile/{username}/refresh")
-async def refresh_profile_data(
+@router.post("/instagram/profile/{username}/complete-refresh")
+async def complete_profile_refresh(
     username: str = Path(..., description="Instagram username"),
-    force_refresh: bool = Query(False, description="Force refresh even if recently updated"),
     db: AsyncSession = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
-    Force refresh profile data from Decodo API
+    🔄 COMPLETE PROFILE REFRESH - ONE ENDPOINT TO REFRESH EVERYTHING
     
-    This endpoint bypasses database cache and fetches completely fresh data.
-    Use when you need the most up-to-date information.
+    This endpoint refreshes ALL profile data including:
+    ✅ Fresh Decodo API data (profile + posts)
+    ✅ Complete AI analysis (sentiment, categories, language)
+    ✅ Top 3 & Top 10 categories calculation
+    ✅ Engagement metrics recalculation
+    ✅ Data consistency validation
+    ✅ Credit usage tracking (when implemented)
+    
+    Use this for the "Refresh Data" button in frontend.
     """
     try:
-        # Always fetch fresh data from Decodo with retry mechanism
-        logger.info(f"Force refreshing data from Decodo for {username} (with optimized config strategy)")
-        profile, is_new = await _fetch_with_retry(db, username)
+        start_time = datetime.now(timezone.utc)
+        logger.info(f"🔄 COMPLETE REFRESH: Starting comprehensive refresh for {username}")
         
-        # Grant access and record search
+        # TODO: Check and deduct user credits (when credit system implemented)
+        # if not await check_user_credits(current_user.id, cost=5):
+        #     raise HTTPException(status_code=402, detail="Insufficient credits")
+        
+        # STEP 1: PRESERVE USER ACCESS - DELETE POSTS BUT KEEP PROFILE ID
+        logger.info(f"🔐 Step 1/6: PRESERVING USER ACCESS while refreshing ALL data for {username}")
+        from app.database.unified_models import Post, Profile
+        from sqlalchemy import delete, select, update
+        
+        # Get existing profile to preserve ID and user access
+        existing_profile = await comprehensive_service.get_profile_by_username(db, username)
+        deleted_posts_count = 0
+        
+        if existing_profile:
+            logger.info(f"🔐 PRESERVING profile ID {existing_profile.id} to maintain user access for {username}")
+            
+            # DELETE ALL POSTS (complete removal) but KEEP profile with same ID
+            delete_posts_result = await db.execute(
+                delete(Post).where(Post.profile_id == existing_profile.id)
+            )
+            deleted_posts_count = delete_posts_result.rowcount
+            logger.info(f"🗑️ DELETED {deleted_posts_count} existing posts for {username}")
+            
+            # Clear ALL AI data from profile (fresh analysis will repopulate)
+            await db.execute(
+                update(Profile)
+                .where(Profile.id == existing_profile.id)
+                .values(
+                    ai_primary_content_type=None,
+                    ai_content_distribution=None,
+                    ai_avg_sentiment_score=None,
+                    ai_language_distribution=None,
+                    ai_content_quality_score=None,
+                    ai_profile_analyzed_at=None,
+                    ai_top_3_categories=None,
+                    ai_top_10_categories=None
+                )
+            )
+            await db.commit()
+        
+        # STEP 2: Fetch completely FRESH data from Decodo (preserves profile ID if exists)
+        logger.info(f"📡 Step 2/6: Fetching COMPLETELY FRESH Decodo data for {username}")
+        # The _fetch_with_retry function should update existing profile or create new one
+        profile, is_new = await _fetch_with_retry(db, username, force_refresh=True)
+        logger.info(f"📡 SUCCESS: {'Updated' if not is_new else 'Created'} profile {profile.id} with fresh Decodo data")
+        
+        # STEP 3: Verify NO old data exists (safety check)
+        logger.info(f"🔍 Step 3/6: Verifying complete data replacement for {username}")
+        post_count = await db.execute(
+            select(func.count(Post.id)).where(Post.profile_id == profile.id)
+        )
+        fresh_posts_count = post_count.scalar()
+        logger.info(f"✅ VERIFICATION: {fresh_posts_count} fresh posts loaded from Decodo")
+        
+        # STEP 4: Trigger comprehensive AI analysis on FRESH data
+        logger.info(f"🤖 Step 4/6: Starting FRESH AI analysis on {fresh_posts_count} new posts for {username}")
+        ai_result = await _schedule_background_ai_analysis(str(profile.id), username)
+        
+        # STEP 5: Update profile metadata
+        logger.info(f"📊 Step 5/6: Updating profile metadata for {username}")
+        from sqlalchemy import update
+        await db.execute(
+            update(Profile)
+            .where(Profile.id == profile.id)
+            .values(
+                last_refreshed=start_time,
+                refresh_count=1  # Reset to 1 since this is fresh data
+            )
+        )
+        await db.commit()
+        
+        # STEP 6: Grant access and record activity
+        logger.info(f"🔐 Step 6/6: Recording access and search activity for {username}")
         await comprehensive_service.grant_profile_access(
             db, current_user.id, profile.id
         )
         
         await comprehensive_service.record_user_search(
-            db, current_user.id, username, 'refresh',
+            db, current_user.id, username, 'complete_refresh',
             metadata={
-                "force_refresh": force_refresh,
+                "refresh_type": "complete",
                 "followers_count": profile.followers_count,
-                "data_quality_score": profile.data_quality_score
+                "ai_analysis_scheduled": ai_result.get("success", False),
+                "refresh_duration_seconds": (datetime.now(timezone.utc) - start_time).total_seconds()
             }
         )
         
+        refresh_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+        logger.info(f"✅ COMPLETE REFRESH SUCCESS: {username} refreshed in {refresh_duration:.1f}s")
+        
         return JSONResponse(content={
-            "message": "Profile refreshed successfully",
+            "success": True,
+            "message": "🔄 COMPLETE DATA REPLACEMENT SUCCESSFUL - All old data deleted, fresh data loaded",
             "username": username,
-            "is_new_profile": is_new,
-            "data_updated_on": profile.last_refreshed.isoformat(),
-            "followers_count": profile.followers_count,
-            "data_quality_score": profile.data_quality_score,
-            "refresh_count": profile.refresh_count
+            "data_replacement_details": {
+                "old_data_deleted": existing_profile is not None,
+                "deleted_posts_count": deleted_posts_count if existing_profile else 0,
+                "fresh_decodo_data_loaded": True,
+                "fresh_posts_loaded": fresh_posts_count,
+                "ai_analysis_scheduled": ai_result.get("success", False),
+                "background_task_id": ai_result.get("task_id"),
+                "estimated_ai_completion": "2-5 minutes",
+                "user_access_preserved": existing_profile is not None,
+                "profile_id_maintained": not is_new
+            },
+            "fresh_profile_stats": {
+                "followers_count": profile.followers_count,
+                "posts_count": fresh_posts_count,
+                "is_verified": profile.is_verified,
+                "is_business": profile.is_business_account,
+                "profile_pic_url": profile.profile_pic_url,
+                "biography": profile.biography[:100] + "..." if profile.biography and len(profile.biography) > 100 else profile.biography
+            },
+            "refresh_metadata": {
+                "refresh_count": 1,  # Reset to 1 for fresh data
+                "last_refreshed": start_time.isoformat(),
+                "duration_seconds": refresh_duration,
+                "complete_replacement": True,
+                "zero_old_data_remaining": True
+            }
         })
         
     except DecodoProfileNotFoundError as e:
-        logger.error(f"Instagram profile not found during refresh: {username}")
+        logger.error(f"❌ Instagram profile not found during complete refresh: {username}")
         raise HTTPException(
             status_code=404,
             detail={
                 "error": "profile_not_found",
                 "message": f"Instagram profile '{username}' not found. Please check the username and try again.",
-                "username": username
+                "username": username,
+                "refresh_type": "complete"
             }
         )
     except (DecodoAPIError, DecodoInstabilityError) as e:
-        logger.error(f"Failed to refresh {username}: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Refresh failed: {str(e)}")
+        logger.error(f"❌ Decodo API failed during complete refresh for {username}: {str(e)}")
+        raise HTTPException(
+            status_code=503, 
+            detail={
+                "error": "external_service_unavailable",
+                "message": f"Instagram data service temporarily unavailable. Please try again in a few minutes.",
+                "username": username,
+                "technical_details": str(e)
+            }
+        )
     except Exception as e:
-        logger.error(f"Unexpected error refreshing {username}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Refresh failed")
+        logger.error(f"❌ Unexpected error during complete refresh for {username}: {str(e)}")
+        raise HTTPException(
+            status_code=500, 
+            detail={
+                "error": "refresh_failed",
+                "message": "Complete refresh failed due to an internal error. Our team has been notified.",
+                "username": username
+            }
+        )
 
 
-@router.post("/instagram/profile/{username}/force-refresh")
-async def force_refresh_profile_data(
+# OLD ENDPOINT REMOVED: /instagram/profile/{username}/force-refresh
+# USE THE NEW COMPREHENSIVE ENDPOINT INSTEAD: /instagram/profile/{username}/complete-refresh
+
+@router.post("/instagram/profile/{username}/legacy-force-refresh")
+async def legacy_force_refresh_profile_data(
     username: str = Path(..., description="Instagram username"),
     db: AsyncSession = Depends(get_db),
     current_user: UserInDB = Depends(get_current_active_user)

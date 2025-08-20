@@ -20,13 +20,15 @@ logger = logging.getLogger(__name__)
 
 class AIManagerSingleton:
     """
-    Thread-safe singleton AI manager for global model caching
-    Ensures models are loaded only once per application lifecycle
+    MANDATORY AI Manager - NO FALLBACKS ALLOWED
+    Ensures all AI models are loaded during system startup
+    SYSTEM WILL NOT START if AI models fail to load
     """
     
     _instance = None
     _lock = threading.Lock()
     _initialized = False
+    _startup_validation_required = True  # NEW: Mandatory startup validation
     
     def __new__(cls):
         if cls._instance is None:
@@ -175,55 +177,39 @@ class AIManagerSingleton:
             logger.error(f"Failed to load {model_type} model: {e}")
             return False
     
-    def get_model_pipeline(self, model_type: str) -> Optional[Pipeline]:
+    def get_model_pipeline(self, model_type: str) -> Pipeline:
         """
-        Get model pipeline with usage tracking
-        Lazy loads model if not already loaded
+        Get model pipeline - NO FALLBACKS, NO LAZY LOADING
+        Models MUST be loaded during system startup
         """
-        try:
-            # Check if model is already loaded
-            if model_type in self.pipelines_cache:
-                self.model_usage_count[model_type] = self.model_usage_count.get(model_type, 0) + 1
-                return self.pipelines_cache[model_type]
-            
-            # Lazy load if not already loaded
-            logger.info(f"Lazy loading model: {model_type}")
-            
-            # Run async loading in sync context (for compatibility)
-            loop = None
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            if loop.is_running():
-                # If we're in an async context, we can't use run_until_complete
-                logger.warning(f"Cannot lazy load {model_type} in async context - please use await initialize_models()")
-                return None
-            else:
-                success = loop.run_until_complete(self._load_model(model_type))
-                if success:
-                    self.model_load_times[model_type] = datetime.now(timezone.utc)
-                    self.model_usage_count[model_type] = 1
-                    return self.pipelines_cache.get(model_type)
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"Failed to get {model_type} pipeline: {e}")
-            return None
+        if not self._initialized:
+            raise RuntimeError(
+                f"🚨 CRITICAL ERROR: AI system not initialized! "
+                f"Model '{model_type}' requested but AI Manager not started. "
+                f"System should have failed during startup."
+            )
+        
+        if model_type not in self.pipelines_cache:
+            raise RuntimeError(
+                f"🚨 CRITICAL ERROR: Model '{model_type}' not loaded! "
+                f"All models should be loaded during system startup. "
+                f"Available models: {list(self.pipelines_cache.keys())}"
+            )
+        
+        # Track usage and return model
+        self.model_usage_count[model_type] = self.model_usage_count.get(model_type, 0) + 1
+        return self.pipelines_cache[model_type]
     
-    def get_sentiment_pipeline(self) -> Optional[Pipeline]:
-        """Get sentiment analysis pipeline"""
+    def get_sentiment_pipeline(self) -> Pipeline:
+        """Get sentiment analysis pipeline - MANDATORY"""
         return self.get_model_pipeline('sentiment')
     
-    def get_language_pipeline(self) -> Optional[Pipeline]:
-        """Get language detection pipeline"""
+    def get_language_pipeline(self) -> Pipeline:
+        """Get language detection pipeline - MANDATORY"""
         return self.get_model_pipeline('language')
     
-    def get_category_pipeline(self) -> Optional[Pipeline]:
-        """Get category classification pipeline"""
+    def get_category_pipeline(self) -> Pipeline:
+        """Get category classification pipeline - MANDATORY"""
         return self.get_model_pipeline('category')
     
     def preprocess_text_for_model(self, text: str, model_type: str) -> str:
@@ -349,6 +335,62 @@ class AIManagerSingleton:
             
         except Exception as e:
             logger.error(f"Failed to clear cache: {e}")
+    
+    async def mandatory_startup_initialization(self) -> None:
+        """
+        🚨 MANDATORY: Initialize ALL AI models during system startup
+        System WILL NOT START if this fails
+        NO FALLBACKS ALLOWED
+        """
+        logger.info("🚨 MANDATORY AI STARTUP: Initializing ALL models - NO FALLBACKS")
+        
+        try:
+            # Initialize ALL required models
+            all_models = ['sentiment', 'language', 'category']
+            
+            logger.info(f"Loading {len(all_models)} AI models: {all_models}")
+            
+            # Load all models
+            success = await self.initialize_models(all_models)
+            
+            if not success:
+                raise RuntimeError("❌ AI model initialization FAILED during startup")
+            
+            # Verify ALL models are loaded
+            missing_models = []
+            for model_type in all_models:
+                if model_type not in self.pipelines_cache:
+                    missing_models.append(model_type)
+            
+            if missing_models:
+                raise RuntimeError(
+                    f"❌ CRITICAL: Models failed to load: {missing_models}. "
+                    f"System cannot start without AI models."
+                )
+            
+            # Mark as fully initialized
+            AIManagerSingleton._initialized = True
+            
+            logger.info("✅ MANDATORY AI STARTUP: ALL models loaded successfully")
+            logger.info(f"✅ Available models: {list(self.pipelines_cache.keys())}")
+            
+        except Exception as e:
+            logger.critical(f"🚨 FATAL ERROR: AI startup failed: {e}")
+            logger.critical("🚨 SYSTEM CANNOT START - AI models are required")
+            raise SystemExit(f"AI startup failed: {e}")
+    
+    def validate_startup_requirements(self) -> None:
+        """
+        Validate all startup requirements are met
+        """
+        if not self._initialized:
+            raise RuntimeError("🚨 AI system not initialized - call mandatory_startup_initialization() first")
+        
+        required_models = ['sentiment', 'language', 'category']
+        missing = [m for m in required_models if m not in self.pipelines_cache]
+        
+        if missing:
+            raise RuntimeError(f"🚨 Missing required AI models: {missing}")
 
 # Global singleton instance
 ai_manager = AIManagerSingleton()

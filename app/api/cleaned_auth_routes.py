@@ -523,38 +523,6 @@ async def list_users_admin(
 # SYSTEM HEALTH FOR AUTH SERVICE
 # =============================================================================
 
-@router.post("/admin/refresh-stale-urls")
-async def refresh_stale_profile_urls(
-    max_profiles: int = Query(50, ge=1, le=100, description="Maximum profiles to refresh"),
-    current_user: UserInDB = Depends(require_admin()),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Admin: Bulk refresh profiles with stale image URLs
-    
-    This endpoint identifies profiles with image URLs older than 5 days
-    and refreshes them with fresh URLs from Instagram. This prevents
-    403 errors when URLs become stale.
-    
-    Requires admin or super_admin role.
-    """
-    try:
-        result = await comprehensive_service.bulk_refresh_stale_urls(db, max_profiles)
-        
-        return JSONResponse(content={
-            "message": "Bulk URL refresh completed",
-            "admin_user": current_user.email,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "results": result
-        })
-        
-    except Exception as e:
-        logger.error(f"Bulk refresh failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Bulk refresh failed: {str(e)}"
-        )
-
 
 @router.get("/health")
 async def auth_health_check():

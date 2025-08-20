@@ -82,7 +82,7 @@ class AIBackgroundTaskManager:
             
             self.active_tasks[task_result.id] = task_info
             
-            logger.info(f"✅ Scheduled AI analysis task {task_result.id} for profile {profile_username}")
+            logger.info(f"[SUCCESS] Scheduled AI analysis task {task_result.id} for profile {profile_username}")
             
             return {
                 "success": True,

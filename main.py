@@ -19,7 +19,6 @@ from app.api.cleaned_routes import router
 from app.api.cleaned_auth_routes import router as auth_router
 from app.api.settings_routes import router as settings_router
 from app.api.engagement_routes import router as engagement_router
-# Removed ai_fix_routes - functionality integrated into main routes
 from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
 from app.database.comprehensive_service import comprehensive_service
@@ -65,7 +64,32 @@ async def lifespan(app: FastAPI):
     # Cache cleanup now handled by Redis cache manager
     print("Cache management integrated into Redis cache system")
     
-    # AI refresh is now manual-only via API endpoints
+    # 🚨 MANDATORY AI SYSTEM INITIALIZATION - NO FALLBACKS ALLOWED
+    try:
+        print("🚨 MANDATORY: Initializing AI system - System will NOT START if this fails...")
+        from app.services.ai.ai_manager_singleton import ai_manager
+        
+        # Mandatory AI initialization
+        await ai_manager.mandatory_startup_initialization()
+        print("✅ AI system initialized successfully - All models loaded")
+        
+    except Exception as e:
+        print(f"🚨 FATAL ERROR: AI system initialization failed: {e}")
+        print("🚨 APPLICATION CANNOT START - AI models are required for platform functionality")
+        raise SystemExit(f"AI initialization failed: {e}")
+    
+    # Validate Redis connection is available for background processing
+    try:
+        print("Checking Redis connection for AI background processing...")
+        import redis
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        r = redis.from_url(redis_url)
+        r.ping()
+        print("✅ Redis connection successful - Background AI processing available")
+    except Exception as e:
+        print(f"⚠️  WARNING: Redis not available: {e}")
+        print("⚠️  Background AI processing will not be available")
+        # Don't fail startup - Redis is needed for background processing but not critical for startup
     
     yield
     # Shutdown
@@ -157,15 +181,12 @@ app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(engagement_router, prefix="/api/v1")
-# ai_fix_router removed - functionality integrated
 
 # Include My Lists routes
 from app.api.lists_routes import router as lists_router
 app.include_router(lists_router, prefix="/api/v1")
 
-# Include Direct AI Analysis routes
-from app.api.direct_ai_routes import router as direct_ai_router
-app.include_router(direct_ai_router, prefix="/api/v1")
+# Direct AI routes temporarily removed - will be restored if needed
 
 
 @app.get("/")

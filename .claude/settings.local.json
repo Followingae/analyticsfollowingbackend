@@ -43,8 +43,24 @@
       "Bash(cmd //c:*)",
       "Bash(py:*)",
       "Bash(set DATABASE_URL=postgresql://postgres.olrxnhxaaxwpnewvvfhc:ClientPass2024!@aws-0-us-east-1.pooler.supabase.com:6543/postgres)",
-      "Bash(uvicorn:*)"
+      "Bash(uvicorn:*)",
+      "Bash(psql:*)",
+      "Bash(mv:*)",
+      "Bash(npm install:*)",
+      "WebSearch",
+      "Bash(npx playwright:*)",
+      "Bash(npx @playwright/mcp:*)",
+      "Bash(npx @executeautomation/playwright-mcp-server:*)",
+      "Bash(node:*)",
+      "Bash(set DATABASE_URL=postgresql://postgres.vkbuxemkprorqxmzzkuu:Hhotmail8991%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres)",
+      "Bash(ping:*)",
+      "Bash(telnet:*)",
+      "Bash(bash:*)"
     ],
-    "deny": []
+    "deny": [],
+    "additionalDirectories": [
+      "C:\\",
+      "C:\\d C:\\Users\\user\\Desktop"
+    ]
   }
 }

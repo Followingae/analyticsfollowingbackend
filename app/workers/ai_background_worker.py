@@ -102,11 +102,11 @@ def analyze_profile_posts(self, profile_id: str, profile_username: str) -> Dict[
         # Run the async analysis in the background thread
         result = asyncio.run(_async_analyze_profile_posts(profile_id, profile_username, task_id))
         
-        logger.info(f"✅ AI analysis task {task_id} completed for {profile_username}: {result.get('posts_analyzed', 0)} posts")
+        logger.info(f"[SUCCESS] AI analysis task {task_id} completed for {profile_username}: {result.get('posts_analyzed', 0)} posts")
         return result
         
     except Exception as e:
-        logger.error(f"❌ AI analysis task {task_id} failed for {profile_username}: {e}")
+        logger.error(f"[ERROR] AI analysis task {task_id} failed for {profile_username}: {e}")
         
         # Retry on failure (Celery will handle this based on configuration)
         raise self.retry(exc=e, countdown=60, max_retries=3)
@@ -243,12 +243,31 @@ async def _update_profile_ai_insights(db: AsyncSession, profile_id: str, profile
         # Calculate insights
         primary_content_type = None
         content_distribution = {}
+        ai_top_3_categories = []
+        ai_top_10_categories = []
+        
         if category_counts:
-            primary_content_type = max(category_counts, key=category_counts.get)
-            content_distribution = {
-                category: round(count / total_analyzed, 2)
-                for category, count in category_counts.items()
-            }
+            # Sort categories by count (descending)
+            sorted_categories = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
+            primary_content_type = sorted_categories[0][0]  # Keep for backwards compatibility
+            
+            # Calculate percentages and build structured data
+            for category, count in sorted_categories:
+                percentage = round((count / total_analyzed) * 100, 1)
+                content_distribution[category] = round(count / total_analyzed, 2)  # Keep for backwards compatibility
+                
+                category_data = {
+                    "category": category,
+                    "percentage": percentage,
+                    "count": count,
+                    "confidence": 0.85  # Default confidence for aggregated data
+                }
+                
+                # Add to appropriate lists
+                if len(ai_top_3_categories) < 3:
+                    ai_top_3_categories.append(category_data)
+                if len(ai_top_10_categories) < 10:
+                    ai_top_10_categories.append(category_data)
         
         avg_sentiment_score = 0.0
         if sentiment_scores:
@@ -276,7 +295,10 @@ async def _update_profile_ai_insights(db: AsyncSession, profile_id: str, profile
                 ai_avg_sentiment_score=avg_sentiment_score,
                 ai_language_distribution=language_distribution,
                 ai_content_quality_score=content_quality_score,
-                ai_profile_analyzed_at=datetime.now(timezone.utc)
+                ai_profile_analyzed_at=datetime.now(timezone.utc),
+                # NEW: Store top 3 and top 10 categories
+                ai_top_3_categories=ai_top_3_categories if ai_top_3_categories else None,
+                ai_top_10_categories=ai_top_10_categories if ai_top_10_categories else None
             )
         )
         

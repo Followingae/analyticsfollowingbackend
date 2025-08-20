@@ -21,31 +21,19 @@ class RobustSentimentAnalyzer:
         self.initialized = False
         self.fallback_mode = False
         
-    async def initialize(self) -> bool:
-        """Initialize sentiment analyzer using global singleton"""
-        try:
-            # Ensure the global AI manager is initialized
-            if not ai_manager._initialized:
-                await ai_manager.initialize_models(['sentiment'])
-            
-            # Check if sentiment model is available
-            pipeline = ai_manager.get_sentiment_pipeline()
-            if pipeline:
-                self.initialized = True
-                self.fallback_mode = False
-                logger.info("✅ Robust Sentiment Analyzer initialized with AI models")
-            else:
-                self.initialized = True
-                self.fallback_mode = True
-                logger.warning("⚠️ Sentiment Analyzer initialized in FALLBACK mode (no AI models)")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Robust Sentiment Analyzer: {e}")
-            self.initialized = True
-            self.fallback_mode = True
-            return True  # Always return True to allow fallback mode
+    async def initialize(self) -> None:
+        """Initialize sentiment analyzer - MANDATORY, NO FALLBACKS"""
+        if not ai_manager._initialized:
+            raise RuntimeError(
+                "🚨 AI Manager not initialized! System should have initialized all models during startup."
+            )
+        
+        # Verify sentiment model is available (will raise exception if not)
+        pipeline = ai_manager.get_sentiment_pipeline()
+        
+        self.initialized = True
+        self.fallback_mode = False
+        logger.info("✅ Sentiment Analyzer initialized with MANDATORY AI models")
     
     async def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """

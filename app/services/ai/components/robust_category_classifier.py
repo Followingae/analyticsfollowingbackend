@@ -145,36 +145,24 @@ class RobustCategoryClassifier:
             }
         }
         
-    async def initialize(self) -> bool:
-        """Initialize category classifier using global singleton"""
-        try:
-            # Ensure the global AI manager is initialized
-            if not ai_manager._initialized:
-                await ai_manager.initialize_models(['category'])
-            
-            # Check if category model is available
-            pipeline = ai_manager.get_category_pipeline()
-            if pipeline:
-                self.initialized = True
-                self.fallback_mode = False
-                logger.info("✅ Robust Category Classifier initialized with AI models")
-            else:
-                self.initialized = True
-                self.fallback_mode = True
-                logger.warning("⚠️ Category Classifier initialized in FALLBACK mode (no AI models)")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Robust Category Classifier: {e}")
-            self.initialized = True
-            self.fallback_mode = True
-            return True  # Always return True to allow fallback mode
+    async def initialize(self) -> None:
+        """Initialize category classifier - MANDATORY, NO FALLBACKS"""
+        if not ai_manager._initialized:
+            raise RuntimeError(
+                "🚨 AI Manager not initialized! System should have initialized all models during startup."
+            )
+        
+        # Verify category model is available (will raise exception if not)
+        pipeline = ai_manager.get_category_pipeline()
+        
+        self.initialized = True
+        self.fallback_mode = False
+        logger.info("✅ Category Classifier initialized with MANDATORY AI models")
     
     async def classify_content(self, text: str, hashtags: List[str] = None, 
                              media_type: str = None) -> Dict[str, Any]:
         """
-        Classify content category with hybrid AI + rule-based approach
+        Classify content category - MANDATORY AI ANALYSIS ONLY
         
         Args:
             text: Caption/description text
@@ -185,7 +173,7 @@ class RobustCategoryClassifier:
         {
             "category": str,
             "confidence": float (0.0 to 1.0),
-            "method": "ai"|"hybrid"|"fallback",
+            "method": "ai"|"hybrid",
             "processing_info": dict
         }
         """
@@ -196,57 +184,33 @@ class RobustCategoryClassifier:
             "text_length": len(text) if text else 0,
             "hashtags_count": len(hashtags) if hashtags else 0,
             "media_type": media_type,
-            "method_used": "fallback"
+            "method_used": "ai"
         }
         
-        try:
-            # Input validation
-            if not text and not hashtags:
-                return {
-                    "category": "General",
-                    "confidence": 0.3,
-                    "method": "fallback",
-                    "processing_info": {**processing_info, "reason": "no_content"}
-                }
-            
-            hashtags = hashtags or []
-            
-            # Try AI analysis first if available
-            ai_result = None
-            if not self.fallback_mode and text:
-                try:
-                    ai_result = await self._ai_category_classification(text, processing_info)
-                    processing_info["method_used"] = "ai"
-                except Exception as ai_error:
-                    logger.warning(f"AI category classification failed: {ai_error}")
-                    # Continue to rule-based or hybrid
-            
-            # Rule-based analysis (always run for hybrid approach)
-            rule_result = await self._rule_based_classification(text, hashtags, processing_info)
-            
-            # Combine results if both are available (hybrid approach)
-            if ai_result and ai_result.get("confidence", 0) > 0.3:
-                final_result = await self._combine_ai_and_rule_results(ai_result, rule_result, processing_info)
-                final_result["method"] = "hybrid"
-                processing_info["method_used"] = "hybrid"
-            elif ai_result:
-                final_result = ai_result
-                final_result["method"] = "ai"
-            else:
-                final_result = rule_result
-                final_result["method"] = "fallback"
-            
-            final_result["processing_info"] = processing_info
-            return final_result
-            
-        except Exception as e:
-            logger.error(f"Category classification completely failed: {e}")
-            return {
-                "category": "General",
-                "confidence": 0.3,
-                "method": "error",
-                "processing_info": {**processing_info, "error": str(e)}
-            }
+        # Input validation
+        if not text and not hashtags:
+            raise ValueError("No content provided for AI classification")
+        
+        hashtags = hashtags or []
+        
+        # MANDATORY AI analysis - NO FALLBACKS
+        ai_result = await self._ai_category_classification(text, processing_info)
+        processing_info["method_used"] = "ai"
+        
+        # Rule-based analysis for hybrid validation
+        rule_result = await self._rule_based_classification(text, hashtags, processing_info)
+        
+        # Combine AI and rule results for better accuracy
+        if ai_result.get("confidence", 0) > 0.3:
+            final_result = await self._combine_ai_and_rule_results(ai_result, rule_result, processing_info)
+            final_result["method"] = "hybrid"
+            processing_info["method_used"] = "hybrid"
+        else:
+            final_result = ai_result
+            final_result["method"] = "ai"
+        
+        final_result["processing_info"] = processing_info
+        return final_result
     
     async def _ai_category_classification(self, text: str, processing_info: Dict) -> Dict[str, Any]:
         """AI-powered category classification"""

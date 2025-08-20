@@ -62,10 +62,10 @@ class MonitoringDashboard:
             # Start auto health check
             self.auto_health_check_task = asyncio.create_task(self._auto_health_check_loop())
             
-            logger.info("✅ Monitoring system started successfully")
+            logger.info("[SUCCESS] Monitoring system started successfully")
             
         except Exception as e:
-            logger.error(f"❌ Failed to start monitoring system: {e}")
+            logger.error(f"[ERROR] Failed to start monitoring system: {e}")
             raise
     
     async def stop_monitoring(self):

@@ -309,12 +309,16 @@ class Profile(Base):
     instagram_business_category = Column(String(100), nullable=True)  # Renamed for clarity
     
     # AI-Enhanced Content Intelligence (added by AI migration)
-    ai_primary_content_type = Column(String(50), nullable=True)  # AI-determined main category
+    ai_primary_content_type = Column(String(50), nullable=True)  # AI-determined main category (DEPRECATED - use ai_top_3_categories)
     ai_content_distribution = Column(JSONB, nullable=True)  # {"Fashion": 0.4, "Travel": 0.3, etc}
     ai_avg_sentiment_score = Column(Float, nullable=True, default=0.0)  # Average sentiment across posts
     ai_language_distribution = Column(JSONB, nullable=True)  # {"en": 0.8, "ar": 0.2, etc}
     ai_content_quality_score = Column(Float, nullable=True, default=0.0)  # Overall content quality
     ai_profile_analyzed_at = Column(DateTime(timezone=True), nullable=True)  # When AI analysis was done
+    
+    # NEW: Top Categories System for Frontend Display
+    ai_top_3_categories = Column(JSONB, nullable=True)  # [{"category": "Fashion & Beauty", "percentage": 45.2, "confidence": 0.87}, ...]
+    ai_top_10_categories = Column(JSONB, nullable=True)  # [{"category": "Fashion & Beauty", "percentage": 45.2, "confidence": 0.87}, ...]
     
     # Data management
     refresh_count = Column(Integer, nullable=True, default=0)
