@@ -16,6 +16,9 @@ import random
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_
 
+# Global request deduplication for AI analysis
+_active_ai_requests = set()
+
 from app.core.config import settings
 from app.models.auth import UserInDB
 
@@ -44,6 +47,25 @@ async def get_profile_ai_analysis_status(
 ):
     """Get AI analysis status for a specific profile"""
     try:
+        # Handle "default" case by returning a generic response
+        if username == "default":
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "profile_username": "default",
+                    "ai_analysis_status": {
+                        "has_active_analysis": False,
+                        "has_existing_analysis": False,
+                        "analysis_complete": True,
+                        "posts_analyzed_count": 0,
+                        "total_posts": 0,
+                        "progress_percentage": 100,
+                        "status": "no_profile_selected"
+                    },
+                    "message": "No specific profile selected for AI analysis"
+                }
+            )
+        
         # Get profile from database first
         profile = await comprehensive_service.get_profile_by_username(db, username)
         
@@ -111,21 +133,41 @@ async def fix_profile_ai_analysis(
 ):
     """Fix/repair AI analysis for a profile"""
     try:
-        # Get profile from database first
-        profile = await comprehensive_service.get_profile_by_username(db, username)
-        
-        if not profile:
+        # Check if analysis is already in progress for this profile
+        if username in _active_ai_requests:
             return JSONResponse(
-                status_code=404,
                 content={
                     "success": False,
-                    "message": f"Profile {username} not found in database",
-                    "username": username
+                    "message": f"AI analysis already in progress for {username}",
+                    "username": username,
+                    "status": "duplicate_request"
                 }
             )
         
+        # Add to active requests to prevent duplicates
+        _active_ai_requests.add(username)
+        
+        try:
+            # Get profile from database first
+            profile = await comprehensive_service.get_profile_by_username(db, username)
+            
+            if not profile:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "success": False,
+                        "message": f"Profile {username} not found in database",
+                        "username": username
+                    }
+                )
+        except Exception as e:
+            # Remove from active requests on error
+            _active_ai_requests.discard(username)
+            raise
+        
         # Check if profile already has AI analysis
         if profile.ai_profile_analyzed_at:
+            _active_ai_requests.discard(username)
             return JSONResponse(
                 content={
                     "success": True,
@@ -138,6 +180,9 @@ async def fix_profile_ai_analysis(
         
         # Run direct AI analysis instead of background Celery processing
         ai_result = await _run_direct_ai_analysis_internal(db, profile, username)
+        
+        # Clean up active request after completion
+        _active_ai_requests.discard(username)
         
         if ai_result.get("success"):
             return JSONResponse(
@@ -218,6 +263,8 @@ async def fix_profile_ai_analysis(
             )
             
     except Exception as e:
+        # Clean up active request on error
+        _active_ai_requests.discard(username)
         logger.error(f"Failed to fix AI analysis for {username}: {e}")
         return JSONResponse(
             status_code=500,
@@ -451,6 +498,17 @@ async def _run_direct_ai_analysis_internal(db: AsyncSession, profile, username: 
         posts = posts_result.scalars().all()
         
         if not posts:
+            # Even if no posts to analyze, mark profile as complete to prevent endless loops
+            current_time = datetime.now(timezone.utc)
+            profile.ai_profile_analyzed_at = current_time
+            
+            try:
+                await db.commit()
+                logger.info(f"[COMPLETE] Profile {username} marked as analyzed (no posts to process)")
+            except Exception as commit_error:
+                logger.error(f"[COMMIT_ERROR] Failed to mark {username} as complete: {commit_error}")
+                await db.rollback()
+            
             return {
                 "success": True,
                 "profile_id": str(profile.id),
@@ -499,14 +557,32 @@ async def _run_direct_ai_analysis_internal(db: AsyncSession, profile, username: 
                 if update_success:
                     successful_updates += 1
         
-        # Update profile insights if we have updates
+        # Update profile insights and mark as complete
         profile_insights_updated = False
         if successful_updates > 0:
-            # Import the direct profile insights function from direct_ai_routes
-            from app.api.direct_ai_routes import _update_profile_ai_insights_direct
-            profile_insights_updated = await _update_profile_ai_insights_direct(
-                db, str(profile.id), username
+            # Update profile AI insights directly
+            profile_insights_updated = await _update_profile_ai_insights_internal(
+                db, profile, username
             )
+        
+        # Always mark profile as analyzed (even if no posts to prevent endless loops)
+        current_time = datetime.now(timezone.utc)
+        profile.ai_profile_analyzed_at = current_time
+        
+        # Commit all changes to database
+        try:
+            await db.commit()
+            logger.info(f"[COMMIT] Database changes committed for {username}")
+        except Exception as commit_error:
+            logger.error(f"[COMMIT_ERROR] Failed to commit changes for {username}: {commit_error}")
+            await db.rollback()
+            return {
+                "success": False,
+                "error": f"Database commit failed: {commit_error}",
+                "message": f"AI analysis completed but failed to save for {username}",
+                "direct_processing": True,
+                "action_taken": "commit_failed"
+            }
         
         logger.info(f"[SUCCESS] Direct AI analysis completed for {username}: {successful_updates}/{len(posts_data)} posts analyzed")
         
@@ -531,6 +607,67 @@ async def _run_direct_ai_analysis_internal(db: AsyncSession, profile, username: 
             "direct_processing": True,
             "action_taken": "failed"
         }
+
+async def _update_profile_ai_insights_internal(db: AsyncSession, profile, username: str) -> bool:
+    """Update profile with AI insights based on analyzed posts"""
+    try:
+        from app.database.unified_models import Post
+        from sqlalchemy import select, func
+        
+        # Get AI analysis stats from posts
+        posts_query = select(
+            func.count(Post.id).label('total_posts'),
+            func.avg(Post.ai_sentiment_score).label('avg_sentiment'),
+            func.count().filter(Post.ai_content_category.isnot(None)).label('categorized_posts')
+        ).where(
+            Post.profile_id == profile.id,
+            Post.ai_analyzed_at.isnot(None)
+        )
+        
+        result = await db.execute(posts_query)
+        stats = result.first()
+        
+        if stats and stats.total_posts > 0:
+            # Update profile with aggregated AI insights
+            profile.ai_avg_sentiment_score = float(stats.avg_sentiment or 0)
+            
+            # Get content distribution
+            content_query = select(
+                Post.ai_content_category,
+                func.count(Post.id).label('count')
+            ).where(
+                Post.profile_id == profile.id,
+                Post.ai_content_category.isnot(None)
+            ).group_by(Post.ai_content_category)
+            
+            content_result = await db.execute(content_query)
+            content_rows = content_result.fetchall()
+            
+            if content_rows:
+                total_categorized = sum(row.count for row in content_rows)
+                content_distribution = {}
+                primary_content_type = None
+                max_count = 0
+                
+                for row in content_rows:
+                    percentage = round((row.count / total_categorized) * 100, 1)
+                    content_distribution[row.ai_content_category] = percentage
+                    
+                    if row.count > max_count:
+                        max_count = row.count
+                        primary_content_type = row.ai_content_category
+                
+                profile.ai_content_distribution = content_distribution
+                profile.ai_primary_content_type = primary_content_type
+            
+            logger.info(f"[INSIGHTS] Updated AI insights for profile {username}")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logger.error(f"[INSIGHTS_ERROR] Failed to update profile insights for {username}: {e}")
+        return False
 
 async def _schedule_background_ai_analysis(profile_id: str, profile_username: str) -> dict:
     """Schedule AI analysis for a profile using background processing (bulletproof approach)"""
@@ -835,7 +972,7 @@ async def analyze_instagram_profile(
         # STEP 4: AUTO-TRIGGER AI ANALYSIS for new profiles
         try:
             from fastapi import BackgroundTasks
-            from app.services.ai.content_intelligence_service import content_intelligence_service
+            from app.services.ai.bulletproof_content_intelligence import BulletproofContentIntelligence
             
             # Get the newly stored profile and run immediate AI analysis
             new_profile = await comprehensive_service.get_profile_by_username(db, username)

@@ -319,7 +319,6 @@ class Profile(Base):
     # Data management
     refresh_count = Column(Integer, nullable=True, default=0)
     last_refreshed = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
-    image_urls_updated_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     created_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=True, server_default=func.now())
     
@@ -346,7 +345,6 @@ class Profile(Base):
         Index('idx_profiles_engagement_desc', 'engagement_rate'),
         Index('idx_profiles_influence_desc', 'influence_score'),
         Index('idx_profiles_last_refreshed', 'last_refreshed'),
-        Index('idx_profiles_image_urls_updated_at', 'image_urls_updated_at'),
     )
 
 

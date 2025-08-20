@@ -471,9 +471,6 @@ class ComprehensiveDataService:
             })
         profile_data['profile_images'] = profile_images
         
-        # Set timestamp for when profile image URLs were updated
-        current_time = datetime.now(timezone.utc)
-        profile_data['image_urls_updated_at'] = current_time
         
         # Generate thumbnails from profile images
         profile_thumbnails = []
@@ -1298,9 +1295,8 @@ class ComprehensiveDataService:
                 logger.error(f"Database error for user {user_id}: {str(db_error)}")
                 raise ValueError(f"Database operation failed: {str(db_error)}")
             
-            # Format response and check for stale URLs
+            # Format response
             profiles = []
-            profiles_needing_refresh = []
             
             for access_record, profile in access_records:
                 # Calculate days until expiry
@@ -1309,18 +1305,6 @@ class ComprehensiveDataService:
                     time_diff = access_record.expires_at - datetime.now(timezone.utc)
                     days_remaining = max(0, time_diff.days)
                 
-                # Check if profile image URLs are stale (older than 5 days)
-                urls_are_stale = False
-                if profile.image_urls_updated_at:
-                    time_since_update = current_time - profile.image_urls_updated_at
-                    urls_are_stale = time_since_update.days >= 5
-                else:
-                    # If no timestamp, consider URLs stale
-                    urls_are_stale = True
-                
-                # Track profiles that need refresh for background processing
-                if urls_are_stale:
-                    profiles_needing_refresh.append(profile.username)
                 
                 profile_data = {
                     "username": profile.username,
@@ -1340,47 +1324,9 @@ class ComprehensiveDataService:
                     "days_remaining": days_remaining,
                     "profile_id": str(profile.id),
                     
-                    # URL freshness information
-                    "image_urls_updated_at": profile.image_urls_updated_at.isoformat() if profile.image_urls_updated_at else None,
-                    "urls_are_stale": urls_are_stale,
-                    "days_since_url_update": time_since_update.days if profile.image_urls_updated_at else None
                 }
                 profiles.append(profile_data)
             
-            # Log profiles needing refresh for monitoring
-            if profiles_needing_refresh:
-                logger.info(f"Found {len(profiles_needing_refresh)} profiles with stale URLs: {profiles_needing_refresh[:5]}{'...' if len(profiles_needing_refresh) > 5 else ''}")
-                
-                # Automatic refresh for the first few stale profiles (limit to avoid overwhelming API)
-                max_auto_refresh = min(3, len(profiles_needing_refresh))
-                auto_refreshed = []
-                
-                for username in profiles_needing_refresh[:max_auto_refresh]:
-                    try:
-                        # Import here to avoid circular imports
-                        from app.api.cleaned_routes import _fetch_with_retry
-                        
-                        logger.info(f"Auto-refreshing stale URLs for {username}")
-                        refreshed_profile, is_new = await _fetch_with_retry(db, username)
-                        auto_refreshed.append(username)
-                        
-                        # Update the profile data in our response with fresh URLs
-                        for profile_data in profiles:
-                            if profile_data["username"] == username:
-                                profile_data["profile_pic_url"] = refreshed_profile.profile_pic_url or ""
-                                profile_data["profile_pic_url_hd"] = refreshed_profile.profile_pic_url_hd or ""
-                                profile_data["image_urls_updated_at"] = refreshed_profile.image_urls_updated_at.isoformat() if refreshed_profile.image_urls_updated_at else None
-                                profile_data["urls_are_stale"] = False
-                                profile_data["days_since_url_update"] = 0
-                                break
-                        
-                    except Exception as refresh_error:
-                        logger.warning(f"Failed to auto-refresh {username}: {refresh_error}")
-                
-                if auto_refreshed:
-                    logger.info(f"Successfully auto-refreshed URLs for: {auto_refreshed}")
-                    # Update the count of stale profiles
-                    profiles_needing_refresh = [p for p in profiles_needing_refresh if p not in auto_refreshed]
             
             return {
                 "profiles": profiles,
@@ -1396,12 +1342,6 @@ class ComprehensiveDataService:
                     "user_id": user_id,
                     "retrieved_at": datetime.now(timezone.utc).isoformat(),
                     "note": "All image URLs are pre-proxied to eliminate CORS issues",
-                    "url_freshness": {
-                        "total_profiles": len(profiles),
-                        "profiles_with_stale_urls": len(profiles_needing_refresh),
-                        "stale_url_threshold_days": 5,
-                        "refresh_system_active": True
-                    }
                 }
             }
             
@@ -1551,117 +1491,6 @@ class ComprehensiveDataService:
             await db.rollback()
             return False
     
-    async def refresh_stale_profile_urls(self, db: AsyncSession, username: str) -> bool:
-        """Refresh a profile's image URLs if they are stale (>5 days old)"""
-        try:
-            # Get profile
-            profile = await self.get_profile_by_username(db, username)
-            if not profile:
-                logger.warning(f"Cannot refresh URLs - profile {username} not found")
-                return False
-            
-            # Check if URLs are actually stale
-            current_time = datetime.now(timezone.utc)
-            if profile.image_urls_updated_at:
-                time_since_update = current_time - profile.image_urls_updated_at
-                if time_since_update.days < 5:
-                    logger.info(f"Profile {username} URLs are still fresh ({time_since_update.days} days old)")
-                    return False
-            
-            logger.info(f"Refreshing stale URLs for profile {username}")
-            
-            # Import here to avoid circular imports
-            from app.api.cleaned_routes import _fetch_with_retry
-            
-            # Refresh the profile data (this will update image URLs and set image_urls_updated_at)
-            refreshed_profile, is_new = await _fetch_with_retry(db, username)
-            
-            logger.info(f"Successfully refreshed URLs for profile {username}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to refresh stale URLs for {username}: {e}")
-            return False
-    
-    async def get_profiles_with_stale_urls(self, db: AsyncSession, limit: int = 100) -> List[str]:
-        """Get usernames of profiles with stale image URLs (>5 days old)"""
-        try:
-            stale_threshold = datetime.now(timezone.utc) - timedelta(days=5)
-            
-            # Query profiles with stale URLs
-            result = await db.execute(
-                select(Profile.username).where(
-                    or_(
-                        Profile.image_urls_updated_at.is_(None),
-                        Profile.image_urls_updated_at < stale_threshold
-                    )
-                ).limit(limit)
-            )
-            
-            stale_usernames = [row[0] for row in result.fetchall()]
-            logger.info(f"Found {len(stale_usernames)} profiles with stale URLs")
-            return stale_usernames
-            
-        except Exception as e:
-            logger.error(f"Error getting profiles with stale URLs: {e}")
-            return []
-    
-    async def bulk_refresh_stale_urls(self, db: AsyncSession, max_profiles: int = 50) -> Dict[str, Any]:
-        """Bulk refresh profiles with stale URLs (background job)"""
-        try:
-            # Get profiles needing refresh
-            stale_usernames = await self.get_profiles_with_stale_urls(db, max_profiles)
-            
-            if not stale_usernames:
-                logger.info("No profiles found with stale URLs")
-                return {
-                    "total_processed": 0,
-                    "successful_refreshes": 0,
-                    "failed_refreshes": 0,
-                    "errors": []
-                }
-            
-            successful_refreshes = 0
-            failed_refreshes = 0
-            errors = []
-            
-            logger.info(f"Starting bulk refresh of {len(stale_usernames)} profiles with stale URLs")
-            
-            for username in stale_usernames:
-                try:
-                    success = await self.refresh_stale_profile_urls(db, username)
-                    if success:
-                        successful_refreshes += 1
-                    else:
-                        failed_refreshes += 1
-                        errors.append(f"{username}: Refresh not needed or failed")
-                        
-                    # Small delay to avoid overwhelming the API
-                    await asyncio.sleep(1)
-                    
-                except Exception as e:
-                    failed_refreshes += 1
-                    errors.append(f"{username}: {str(e)}")
-                    logger.error(f"Failed to refresh {username}: {e}")
-            
-            result = {
-                "total_processed": len(stale_usernames),
-                "successful_refreshes": successful_refreshes,
-                "failed_refreshes": failed_refreshes,
-                "errors": errors[:10]  # Limit error list to prevent huge responses
-            }
-            
-            logger.info(f"Bulk URL refresh completed: {result}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in bulk refresh of stale URLs: {e}")
-            return {
-                "total_processed": 0,
-                "successful_refreshes": 0,
-                "failed_refreshes": 0,
-                "errors": [f"Bulk refresh failed: {str(e)}"]
-            }
 
     async def close_pool(self):
         """Close the connection pool and reset state"""

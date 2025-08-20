@@ -75,8 +75,8 @@ class AIManagerSingleton:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
         
-        # Set transformers cache
-        os.environ['TRANSFORMERS_CACHE'] = str(self.cache_dir)
+        # Set Hugging Face cache directory (updated to use HF_HOME instead of deprecated TRANSFORMERS_CACHE)
+        os.environ['HF_HOME'] = str(self.cache_dir)
         
         # Device detection
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -107,11 +107,11 @@ class AIManagerSingleton:
                             success_count += 1
                             self.model_load_times[model_type] = datetime.now(timezone.utc)
                             self.model_usage_count[model_type] = 0
-                            logger.info(f"✅ Model {model_type} loaded successfully")
+                            logger.info(f"[SUCCESS] Model {model_type} loaded successfully")
                         else:
-                            logger.error(f"❌ Failed to load model {model_type}")
+                            logger.error(f"[ERROR] Failed to load model {model_type}")
                     except Exception as e:
-                        logger.error(f"❌ Exception loading model {model_type}: {e}")
+                        logger.error(f"[ERROR] Exception loading model {model_type}: {e}")
                 
                 self._initialized = success_count > 0
                 logger.info(f"AI Manager initialization complete: {success_count}/{len(models_to_load)} models loaded")
