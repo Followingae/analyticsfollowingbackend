@@ -4,7 +4,7 @@ This replaces the existing routes.py with only production-ready, non-duplicate e
 All obsolete, duplicate, and debug endpoints have been removed
 """
 from fastapi import APIRouter, HTTPException, Query, Depends, Path, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from typing import Optional
 from datetime import datetime, timedelta, timezone
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -802,6 +802,18 @@ async def analyze_instagram_profile(
                         cached_data["ai_insights"] = ai_insights
                         cached_data["meta"]["includes_ai_insights"] = False
                 
+                # Add simple notifications for cached data
+                cached_data["notifications"] = {
+                    "initial_search": {
+                        "message": f"Found Instagram profile: @{username}",
+                        "type": "success"
+                    },
+                    "detailed_search": {
+                        "message": "Complete profile analysis ready",
+                        "type": "success"
+                    }
+                }
+                
                 return JSONResponse(content=cached_data)
                 
         except Exception as cache_error:
@@ -863,6 +875,19 @@ async def analyze_instagram_profile(
             response_data["meta"]["ai_analysis_auto_triggered"] = True
             response_data["meta"]["ai_analysis_started_at"] = datetime.now(timezone.utc).isoformat()
         
+        # Add simple notifications for frontend
+        if response_data:
+            response_data["notifications"] = {
+                "initial_search": {
+                    "message": f"Found Instagram profile: @{username}",
+                    "type": "success"
+                },
+                "detailed_search": {
+                    "message": "Complete profile analysis ready",
+                    "type": "success"
+                }
+            }
+        
         return JSONResponse(content=response_data)
         
     except DecodoProfileNotFoundError as e:
@@ -873,7 +898,17 @@ async def analyze_instagram_profile(
                 "error": "profile_not_found",
                 "message": f"Instagram profile '{username}' not found. Please check the username and try again.",
                 "username": username,
-                "suggestion": "Verify the username exists on Instagram"
+                "suggestion": "Verify the username exists on Instagram",
+                "notifications": {
+                    "initial_search": {
+                        "message": f"Profile @{username} not found",
+                        "type": "error"
+                    },
+                    "detailed_search": {
+                        "message": "Search failed",
+                        "type": "error"
+                    }
+                }
             }
         )
     except (DecodoAPIError, DecodoInstabilityError) as e:

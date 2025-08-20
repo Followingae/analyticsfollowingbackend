@@ -210,6 +210,37 @@ class EnhancedDecodoClient:
             logger.error(f"HTTP request error: {str(e)}")
             raise DecodoAPIError(f"Request error: {str(e)}")
     
+    async def get_instagram_profile_basic(self, username: str) -> Dict[str, Any]:
+        """Get basic Instagram profile data for Phase 1 search (lightweight request)"""
+        
+        # Use simple configuration for fast basic data retrieval
+        basic_config = {
+            "url": f"https://www.instagram.com/{username}/",
+            "method": "GET",
+            "render_javascript": False,  # Faster without JS rendering
+            "response_format": "json",
+            "include_headers": False,
+            "timeout": 10,  # Shorter timeout for basic requests
+            "country": "US"
+        }
+        
+        logger.info(f"[PHASE 1] Fetching basic profile data for {username}")
+        
+        try:
+            response = await self._make_request(basic_config)
+            
+            if not response or 'results' not in response:
+                raise DecodoAPIError(f"Invalid basic response for {username}")
+            
+            logger.info(f"[PHASE 1] Successfully retrieved basic data for {username}")
+            return response
+            
+        except DecodoAPIError:
+            raise
+        except Exception as e:
+            logger.error(f"[PHASE 1] Basic profile fetch failed for {username}: {e}")
+            raise DecodoAPIError(f"Basic profile fetch failed: {str(e)}")
+    
     async def get_instagram_profile_comprehensive(self, username: str) -> Dict[str, Any]:
         """Get comprehensive Instagram profile data with Decodo-recommended fallbacks"""
         
