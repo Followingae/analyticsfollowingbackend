@@ -64,7 +64,9 @@
       "Bash(./redis-server.exe)",
       "Bash(dir:*)",
       "Bash(git restore:*)",
-      "Bash(git reset:*)"
+      "Bash(git reset:*)",
+      "Bash(git count-objects:*)",
+      "Bash(git filter-branch:*)"
     ],
     "deny": [],
     "additionalDirectories": [
