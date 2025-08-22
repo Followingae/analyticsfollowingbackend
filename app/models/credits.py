@@ -74,6 +74,8 @@ class CreditWallet(CreditWalletBase):
     total_earned_this_cycle: int = Field(0, ge=0)
     total_purchased_this_cycle: int = Field(0, ge=0)
     total_spent_this_cycle: int = Field(0, ge=0)
+    rollover_months_allowed: int = Field(0, ge=0, le=2)
+    subscription_active: bool = Field(True)
     created_at: datetime
     updated_at: datetime
     
@@ -88,6 +90,13 @@ class CreditWalletSummary(BaseModel):
     subscription_active: bool
     next_reset_date: date
     total_spent_this_cycle: int
+    # Total Plan Credits breakdown
+    total_plan_credits: int = Field(0, description="Total credits available (package + purchased + bonus)")
+    package_credits_balance: int = Field(0, description="Credits from monthly package allowance")
+    purchased_credits_balance: int = Field(0, description="Credits purchased via payments")
+    bonus_credits_balance: int = Field(0, description="Promotional/referral bonus credits")
+    monthly_allowance: int = Field(0, description="Monthly credit allowance from package")
+    package_name: Optional[str] = Field(None, description="Current package name")
 
 
 # =============================================================================
@@ -365,3 +374,17 @@ class CreditBalance(BaseModel):
     balance: int
     is_locked: bool
     next_reset_date: date
+
+
+class TotalPlanCredits(BaseModel):
+    """Total Plan Credits breakdown response"""
+    total_plan_credits: int = Field(..., description="Total credits available (package + purchased + bonus)")
+    package_credits: int = Field(..., description="Credits from monthly package allowance")
+    purchased_credits: int = Field(..., description="Credits purchased via payments")
+    bonus_credits: int = Field(..., description="Promotional/referral bonus credits")
+    monthly_allowance: int = Field(..., description="Monthly credit allowance from current package")
+    package_name: str = Field(..., description="Current subscription package name")
+    current_balance: int = Field(..., description="Current spendable balance")
+    
+    class Config:
+        orm_mode = True

@@ -19,7 +19,7 @@ from app.database.unified_models import (
 )
 from app.models.credits import (
     CreditWalletCreate, CreditWalletUpdate, CreditWalletSummary,
-    CreditBalance, CanPerformActionResponse
+    CreditBalance, CanPerformActionResponse, TotalPlanCredits
 )
 from app.core.exceptions import ValidationError
 from app.cache.redis_cache_manager import cache_manager
@@ -448,17 +448,27 @@ class CreditWalletService:
     # =========================================================================
     
     async def get_wallet_summary(self, user_id: UUID) -> Optional[CreditWalletSummary]:
-        """Get comprehensive wallet summary"""
+        """Get comprehensive wallet summary with total plan credits"""
         wallet = await self.get_wallet(user_id)
         if not wallet:
             return None
+        
+        # Get total plan credits breakdown
+        total_plan_data = await self.get_total_plan_credits(user_id)
         
         return CreditWalletSummary(
             current_balance=wallet.current_balance,
             is_locked=wallet.is_locked,
             subscription_active=wallet.subscription_active,
             next_reset_date=wallet.next_reset_date,
-            total_spent_this_cycle=wallet.total_spent_this_cycle
+            total_spent_this_cycle=wallet.total_spent_this_cycle,
+            # Total plan credits breakdown
+            total_plan_credits=total_plan_data.total_plan_credits if total_plan_data else 0,
+            package_credits_balance=total_plan_data.package_credits if total_plan_data else 0,
+            purchased_credits_balance=total_plan_data.purchased_credits if total_plan_data else 0,
+            bonus_credits_balance=total_plan_data.bonus_credits if total_plan_data else 0,
+            monthly_allowance=total_plan_data.monthly_allowance if total_plan_data else 0,
+            package_name=total_plan_data.package_name if total_plan_data else None
         )
     
     async def get_monthly_spending(self, user_id: UUID, month_year: Optional[date] = None) -> int:
@@ -499,6 +509,98 @@ class CreditWalletService:
         except Exception as e:
             logger.error(f"Error getting unlocked influencers count for user {user_id}: {e}")
             return 0
+    
+    async def get_total_plan_credits(self, user_id: UUID) -> Optional[TotalPlanCredits]:
+        """
+        Get comprehensive Total Plan Credits breakdown
+        Shows package allowance + purchased credits + bonus credits
+        """
+        try:
+            # Check cache first (skip cache for now due to method availability)
+            cache_key = f"{self.cache_prefix}:total_plan:{user_id}"
+            # cached = await cache_manager.get_json(cache_key)
+            # if cached:
+            #     return TotalPlanCredits(**cached)
+            
+            async with get_session() as session:
+                # Use the database function to get total plan credits breakdown
+                result = await session.execute(
+                    text("SELECT * FROM public.calculate_total_plan_credits(:user_id)"),
+                    {"user_id": str(user_id)}
+                )
+                
+                row = result.fetchone()
+                if not row:
+                    logger.warning(f"No credit wallet found for user {user_id}")
+                    return None
+                
+                # Get current balance from wallet
+                wallet = await self.get_wallet(user_id)
+                current_balance = wallet.current_balance if wallet else 0
+                
+                total_plan_credits = TotalPlanCredits(
+                    total_plan_credits=row[0],  # total_plan_credits
+                    package_credits=row[1],     # package_credits
+                    purchased_credits=row[2],   # purchased_credits
+                    bonus_credits=row[3],       # bonus_credits
+                    monthly_allowance=row[4],   # monthly_allowance
+                    package_name=row[5],        # package_name
+                    current_balance=current_balance
+                )
+                
+                # Cache for 10 minutes (skip cache for now)
+                # await cache_manager.set_json(
+                #     cache_key, 
+                #     total_plan_credits.dict(), 
+                #     ttl=600
+                # )
+                
+                return total_plan_credits
+                
+        except Exception as e:
+            logger.error(f"Error getting total plan credits for user {user_id}: {e}")
+            return None
+    
+    async def update_credits_breakdown(
+        self,
+        user_id: UUID,
+        package_credits: Optional[int] = None,
+        purchased_credits: Optional[int] = None,
+        bonus_credits: Optional[int] = None
+    ) -> bool:
+        """
+        Update wallet credits breakdown maintaining consistency
+        Uses database function to ensure total balance matches breakdown
+        """
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    text("""
+                        SELECT public.update_wallet_credits_breakdown(
+                            :user_id, :package_credits, :purchased_credits, :bonus_credits
+                        )
+                    """),
+                    {
+                        "user_id": str(user_id),
+                        "package_credits": package_credits,
+                        "purchased_credits": purchased_credits,
+                        "bonus_credits": bonus_credits
+                    }
+                )
+                
+                success = result.scalar()
+                await session.commit()
+                
+                if success:
+                    # Clear cache
+                    await self._clear_user_cache(user_id)
+                    logger.info(f"Updated credits breakdown for user {user_id}")
+                
+                return success
+                
+        except Exception as e:
+            logger.error(f"Error updating credits breakdown for user {user_id}: {e}")
+            return False
     
     # =========================================================================
     # BILLING CYCLE MANAGEMENT
@@ -576,7 +678,8 @@ class CreditWalletService:
         """Clear all cache entries for a user"""
         cache_keys = [
             f"{self.cache_prefix}:wallet:{user_id}",
-            f"{self.cache_prefix}:balance:{user_id}"
+            f"{self.cache_prefix}:balance:{user_id}",
+            f"{self.cache_prefix}:total_plan:{user_id}"
         ]
         
         # Use direct Redis client to delete cache keys

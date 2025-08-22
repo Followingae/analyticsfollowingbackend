@@ -15,7 +15,7 @@ from app.models.credits import (
     CreditBalance, CreditWalletSummary, CreditDashboard,
     CreditTransactionSummary, MonthlyUsageSummary,
     CreditPricingRule, CanPerformActionResponse,
-    CreditActionRequest, CreditActionResponse
+    CreditActionRequest, CreditActionResponse, TotalPlanCredits
 )
 from app.services.credit_wallet_service import credit_wallet_service
 from app.services.credit_transaction_service import credit_transaction_service
@@ -43,6 +43,32 @@ async def get_credit_balance(
     except Exception as e:
         logger.error(f"Error getting balance for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Error retrieving credit balance")
+
+
+@router.get("/total-plan-credits", response_model=TotalPlanCredits)
+async def get_total_plan_credits(
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """
+    Get Total Plan Credits breakdown showing:
+    - Package credits from monthly allowance
+    - Purchased credits from payments
+    - Bonus credits from promotions
+    - Total available credits (sum of all)
+    """
+    user_id = UUID(str(current_user.id))
+    
+    try:
+        total_plan_credits = await credit_wallet_service.get_total_plan_credits(user_id)
+        if not total_plan_credits:
+            raise HTTPException(status_code=404, detail="Credit wallet not found")
+        
+        return total_plan_credits
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting total plan credits for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Error retrieving total plan credits")
 
 
 @router.get("/wallet/summary", response_model=CreditWalletSummary)
