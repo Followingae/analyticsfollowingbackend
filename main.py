@@ -19,6 +19,7 @@ from app.api.cleaned_routes import router
 from app.api.cleaned_auth_routes import router as auth_router
 from app.api.settings_routes import router as settings_router
 from app.api.engagement_routes import router as engagement_router
+from app.api.credit_routes import router as credit_router
 from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
 from app.database.comprehensive_service import comprehensive_service
@@ -66,16 +67,16 @@ async def lifespan(app: FastAPI):
     
     # 🚨 MANDATORY AI SYSTEM INITIALIZATION - NO FALLBACKS ALLOWED
     try:
-        print("🚨 MANDATORY: Initializing AI system - System will NOT START if this fails...")
+        print("MANDATORY: Initializing AI system - System will NOT START if this fails...")
         from app.services.ai.ai_manager_singleton import ai_manager
         
         # Mandatory AI initialization
         await ai_manager.mandatory_startup_initialization()
-        print("✅ AI system initialized successfully - All models loaded")
+        print("AI system initialized successfully - All models loaded")
         
     except Exception as e:
-        print(f"🚨 FATAL ERROR: AI system initialization failed: {e}")
-        print("🚨 APPLICATION CANNOT START - AI models are required for platform functionality")
+        print(f"FATAL ERROR: AI system initialization failed: {e}")
+        print("APPLICATION CANNOT START - AI models are required for platform functionality")
         raise SystemExit(f"AI initialization failed: {e}")
     
     # Validate Redis connection is available for background processing
@@ -85,10 +86,10 @@ async def lifespan(app: FastAPI):
         redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
         r = redis.from_url(redis_url)
         r.ping()
-        print("✅ Redis connection successful - Background AI processing available")
+        print("Redis connection successful - Background AI processing available")
     except Exception as e:
-        print(f"⚠️  WARNING: Redis not available: {e}")
-        print("⚠️  Background AI processing will not be available")
+        print(f"WARNING: Redis not available: {e}")
+        print("Background AI processing will not be available")
         # Don't fail startup - Redis is needed for background processing but not critical for startup
     
     yield
@@ -181,10 +182,27 @@ app.include_router(router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(engagement_router, prefix="/api/v1")
+app.include_router(credit_router, prefix="/api/v1")
 
 # Include My Lists routes
 from app.api.lists_routes import router as lists_router
 app.include_router(lists_router, prefix="/api/v1")
+
+# Include Discovery routes
+from app.api.discovery_routes import router as discovery_router
+app.include_router(discovery_router, prefix="/api/v1")
+
+# Include Campaigns routes
+from app.api.campaigns_routes import router as campaigns_router
+app.include_router(campaigns_router, prefix="/api")
+
+# Include Health and Metrics endpoints
+from app.api.endpoints.health import router as health_router
+app.include_router(health_router, prefix="/api")
+
+# TEMPORARY FIX: Add credit routes with double prefix to fix frontend calling wrong URL
+# This should be removed once frontend is updated to use correct /api/v1/credits/* paths
+app.include_router(credit_router, prefix="/api/v1/api", tags=["Credits (Legacy)"])
 
 # Direct AI routes temporarily removed - will be restored if needed
 

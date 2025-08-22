@@ -9,6 +9,14 @@ import threading
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional, Union
+import warnings
+
+# Suppress TensorFlow deprecation warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
+warnings.filterwarnings('ignore', category=FutureWarning, module='tensorflow')
+
 import torch
 from transformers import (
     AutoTokenizer, AutoModelForSequenceClassification,
@@ -184,14 +192,14 @@ class AIManagerSingleton:
         """
         if not self._initialized:
             raise RuntimeError(
-                f"🚨 CRITICAL ERROR: AI system not initialized! "
+                f"CRITICAL ERROR: AI system not initialized! "
                 f"Model '{model_type}' requested but AI Manager not started. "
                 f"System should have failed during startup."
             )
         
         if model_type not in self.pipelines_cache:
             raise RuntimeError(
-                f"🚨 CRITICAL ERROR: Model '{model_type}' not loaded! "
+                f"CRITICAL ERROR: Model '{model_type}' not loaded! "
                 f"All models should be loaded during system startup. "
                 f"Available models: {list(self.pipelines_cache.keys())}"
             )
@@ -342,7 +350,7 @@ class AIManagerSingleton:
         System WILL NOT START if this fails
         NO FALLBACKS ALLOWED
         """
-        logger.info("🚨 MANDATORY AI STARTUP: Initializing ALL models - NO FALLBACKS")
+        logger.info("MANDATORY AI STARTUP: Initializing ALL models - NO FALLBACKS")
         
         try:
             # Initialize ALL required models
@@ -371,12 +379,12 @@ class AIManagerSingleton:
             # Mark as fully initialized
             AIManagerSingleton._initialized = True
             
-            logger.info("✅ MANDATORY AI STARTUP: ALL models loaded successfully")
-            logger.info(f"✅ Available models: {list(self.pipelines_cache.keys())}")
+            logger.info("MANDATORY AI STARTUP: ALL models loaded successfully")
+            logger.info(f"Available models: {list(self.pipelines_cache.keys())}")
             
         except Exception as e:
-            logger.critical(f"🚨 FATAL ERROR: AI startup failed: {e}")
-            logger.critical("🚨 SYSTEM CANNOT START - AI models are required")
+            logger.critical(f"FATAL ERROR: AI startup failed: {e}")
+            logger.critical("SYSTEM CANNOT START - AI models are required")
             raise SystemExit(f"AI startup failed: {e}")
     
     def validate_startup_requirements(self) -> None:
@@ -384,13 +392,13 @@ class AIManagerSingleton:
         Validate all startup requirements are met
         """
         if not self._initialized:
-            raise RuntimeError("🚨 AI system not initialized - call mandatory_startup_initialization() first")
+            raise RuntimeError("AI system not initialized - call mandatory_startup_initialization() first")
         
         required_models = ['sentiment', 'language', 'category']
         missing = [m for m in required_models if m not in self.pipelines_cache]
         
         if missing:
-            raise RuntimeError(f"🚨 Missing required AI models: {missing}")
+            raise RuntimeError(f"Missing required AI models: {missing}")
 
 # Global singleton instance
 ai_manager = AIManagerSingleton()

@@ -149,7 +149,7 @@ class RobustCategoryClassifier:
         """Initialize category classifier - MANDATORY, NO FALLBACKS"""
         if not ai_manager._initialized:
             raise RuntimeError(
-                "🚨 AI Manager not initialized! System should have initialized all models during startup."
+                "AI Manager not initialized! System should have initialized all models during startup."
             )
         
         # Verify category model is available (will raise exception if not)
@@ -157,7 +157,7 @@ class RobustCategoryClassifier:
         
         self.initialized = True
         self.fallback_mode = False
-        logger.info("✅ Category Classifier initialized with MANDATORY AI models")
+        logger.info("Category Classifier initialized with MANDATORY AI models")
     
     async def classify_content(self, text: str, hashtags: List[str] = None, 
                              media_type: str = None) -> Dict[str, Any]:

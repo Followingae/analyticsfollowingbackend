@@ -29,6 +29,7 @@ from app.database.comprehensive_service import comprehensive_service
 # proxy_instagram_url import removed - using external proxy service instead
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient, DecodoAPIError, DecodoInstabilityError, DecodoProfileNotFoundError
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
+from app.middleware.credit_gate import requires_credits
 from app.services.cache_integration_service import cache_integration_service
 from app.services.engagement_calculator import engagement_calculator
 
@@ -909,6 +910,7 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
 # =============================================================================
 
 @router.get("/instagram/profile/{username}")
+@requires_credits("profile_analysis", return_detailed_response=True)
 async def analyze_instagram_profile(
     username: str = Path(..., description="Instagram username"),
     detailed: bool = Query(True, description="Include detailed analysis"),
@@ -1111,6 +1113,7 @@ async def analyze_instagram_profile(
 
 
 @router.get("/instagram/profile/{username}/analytics")
+@requires_credits("profile_analysis", return_detailed_response=True)
 async def get_detailed_analytics(
     username: str = Path(..., description="Instagram username"),
     db: AsyncSession = Depends(get_db),
@@ -1269,7 +1272,7 @@ async def complete_profile_refresh(
             select(func.count(Post.id)).where(Post.profile_id == profile.id)
         )
         fresh_posts_count = post_count.scalar()
-        logger.info(f"✅ VERIFICATION: {fresh_posts_count} fresh posts loaded from Decodo")
+        logger.info(f"VERIFICATION: {fresh_posts_count} fresh posts loaded from Decodo")
         
         # STEP 4: Trigger comprehensive AI analysis on FRESH data
         logger.info(f"🤖 Step 4/6: Starting FRESH AI analysis on {fresh_posts_count} new posts for {username}")
@@ -1305,7 +1308,7 @@ async def complete_profile_refresh(
         )
         
         refresh_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
-        logger.info(f"✅ COMPLETE REFRESH SUCCESS: {username} refreshed in {refresh_duration:.1f}s")
+        logger.info(f"COMPLETE REFRESH SUCCESS: {username} refreshed in {refresh_duration:.1f}s")
         
         return JSONResponse(content={
             "success": True,
@@ -1534,6 +1537,7 @@ async def legacy_force_refresh_profile_data(
 # =============================================================================
 
 @router.get("/instagram/profile/{username}/posts")
+@requires_credits("posts_analytics", credits_required=10)
 async def get_profile_posts(
     username: str = Path(..., description="Instagram username"),
     limit: int = Query(20, ge=1, le=50, description="Number of posts to return"),

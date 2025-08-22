@@ -25,3 +25,8 @@ class ConfigurationException(APIException):
 class RateLimitException(APIException):
     def __init__(self, detail: str = "Rate limit exceeded"):
         super().__init__(status_code=429, detail=detail)
+
+
+class ValidationError(APIException):
+    def __init__(self, detail: str):
+        super().__init__(status_code=422, detail=f"Validation Error: {detail}")

@@ -152,15 +152,11 @@ async def create_tables():
         logger.error(f"ERROR: Failed to create tables: {str(e)}")
         raise
 
-async def get_session() -> AsyncSession:
-    """Get database session"""
+def get_session():
+    """Get database session context manager"""
     if not SessionLocal:
         raise Exception("Database not initialized")
-    async with SessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
+    return SessionLocal()
 
 def get_supabase() -> Client:
     """Get Supabase client"""
@@ -175,5 +171,5 @@ async def get_db():
         logger.error("❌ Database not initialized - application should not have started")
         raise Exception("Database not initialized - critical system error")
         
-    async for session in get_session():
+    async with get_session() as session:
         yield session

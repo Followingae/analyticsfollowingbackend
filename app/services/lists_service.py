@@ -9,7 +9,10 @@ from uuid import UUID
 import logging
 from datetime import datetime, timezone
 
-from app.database.unified_models import User, UserList, UserListItem, Profile, UserProfileAccess
+from app.database.unified_models import (
+    User, UserList, UserListItem, Profile, UserProfileAccess,
+    ListTemplate, ListCollaboration, ListActivityLog, ListPerformanceMetrics, ListExportJob
+)
 from app.models.lists import (
     UserListCreate, UserListUpdate, UserListResponse, UserListSummary,
     UserListItemCreate, UserListItemUpdate, UserListItemResponse,
@@ -64,6 +67,80 @@ class ListsService:
             return profile_ids
         else:
             raise ValueError("Either profile_ids or profile_usernames must be provided")
+    
+    async def _log_activity(
+        self, 
+        db: AsyncSession, 
+        list_id: UUID, 
+        list_item_id: Optional[UUID], 
+        user_id: UUID, 
+        action_type: str, 
+        action_description: str,
+        old_values: Optional[Dict] = None,
+        new_values: Optional[Dict] = None,
+        affected_fields: Optional[List[str]] = None
+    ):
+        """Log activity for audit trail"""
+        try:
+            activity_log = ListActivityLog(
+                list_id=list_id,
+                list_item_id=list_item_id,
+                user_id=user_id,
+                action_type=action_type,
+                action_description=action_description,
+                old_values=old_values or {},
+                new_values=new_values or {},
+                affected_fields=affected_fields or []
+            )
+            db.add(activity_log)
+            # Don't commit here - let the calling method handle it
+        except Exception as e:
+            logger.error(f"Error logging activity: {e}")
+    
+    async def _check_list_permission(
+        self, 
+        db: AsyncSession, 
+        user_id: UUID, 
+        list_id: UUID, 
+        required_permission: str = "view"
+    ) -> bool:
+        """Check if user has permission to access list"""
+        try:
+            # Check if user owns the list
+            owner_query = select(UserList).where(
+                and_(UserList.id == list_id, UserList.user_id == user_id)
+            )
+            owner_result = await db.execute(owner_query)
+            if owner_result.scalar_one_or_none():
+                return True
+            
+            # Check collaboration permissions
+            collab_query = select(ListCollaboration).where(
+                and_(
+                    ListCollaboration.list_id == list_id,
+                    ListCollaboration.shared_with_user_id == user_id,
+                    ListCollaboration.status == 'accepted'
+                )
+            )
+            collab_result = await db.execute(collab_query)
+            collaboration = collab_result.scalar_one_or_none()
+            
+            if not collaboration:
+                return False
+                
+            # Check permission level
+            permission_hierarchy = {
+                "view": ["view", "comment", "edit", "admin"],
+                "comment": ["comment", "edit", "admin"],
+                "edit": ["edit", "admin"],
+                "admin": ["admin"]
+            }
+            
+            return collaboration.permission_level in permission_hierarchy.get(required_permission, [])
+            
+        except Exception as e:
+            logger.error(f"Error checking list permission: {e}")
+            return False
     
     async def get_user_lists(
         self, 
@@ -205,24 +282,39 @@ class ListsService:
         user_id: UUID, 
         list_data: UserListCreate
     ) -> UserListResponse:
-        """Create a new list"""
+        """Create a new list with enhanced features"""
         try:
             # Convert Supabase user ID to database user ID
             database_user_id = await self._get_database_user_id(db, user_id)
             
-            # Create new list
+            # Create new list with enhanced fields
             new_list = UserList(
                 user_id=database_user_id,
                 name=list_data.name,
                 description=list_data.description,
                 color=list_data.color or "#3B82F6",
                 icon=list_data.icon or "list",
-                is_favorite=list_data.is_favorite or False
+                is_favorite=list_data.is_favorite or False,
+                # Enhanced fields
+                list_type=getattr(list_data, 'list_type', 'custom'),
+                template_id=getattr(list_data, 'template_id', None),
+                sharing_mode=getattr(list_data, 'sharing_mode', 'private'),
+                collaboration_mode=getattr(list_data, 'collaboration_mode', 'owner_only'),
+                max_items=getattr(list_data, 'max_items', 1000),
+                auto_sync=getattr(list_data, 'auto_sync', False),
+                settings=getattr(list_data, 'settings', {}),
+                folder_path=getattr(list_data, 'folder_path', None)
             )
             
             db.add(new_list)
             await db.commit()
             await db.refresh(new_list)
+            
+            # Log activity
+            await self._log_activity(
+                db, new_list.id, None, database_user_id,
+                "list_created", f"Created list '{list_data.name}'"
+            )
             
             return UserListResponse(**new_list.__dict__, items=[])
             
@@ -664,6 +756,388 @@ class ListsService:
             
         except Exception as e:
             logger.error(f"Error getting available profiles: {e}")
+            raise
+
+    # ===============================================================================
+    # ENHANCED LISTS FEATURES - Templates, Collaboration, Analytics, Export
+    # ===============================================================================
+    
+    async def get_list_templates(
+        self, 
+        db: AsyncSession, 
+        user_id: UUID,
+        category: Optional[str] = None,
+        public_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Get available list templates"""
+        try:
+            query = select(ListTemplate)
+            
+            if category:
+                query = query.where(ListTemplate.category == category)
+            
+            if public_only:
+                query = query.where(ListTemplate.is_public == True)
+            else:
+                # Include public templates and user's private templates
+                query = query.where(
+                    or_(
+                        ListTemplate.is_public == True,
+                        ListTemplate.created_by == user_id
+                    )
+                )
+            
+            query = query.order_by(ListTemplate.usage_count.desc(), ListTemplate.template_name)
+            
+            result = await db.execute(query)
+            templates = result.scalars().all()
+            
+            return [template.__dict__ for template in templates]
+            
+        except Exception as e:
+            logger.error(f"Error getting list templates: {e}")
+            raise
+    
+    async def create_list_from_template(
+        self, 
+        db: AsyncSession, 
+        user_id: UUID, 
+        template_id: UUID,
+        list_name: str,
+        customize_settings: Optional[Dict] = None
+    ) -> UserListResponse:
+        """Create a list from a template"""
+        try:
+            # Get template
+            template_query = select(ListTemplate).where(ListTemplate.id == template_id)
+            template_result = await db.execute(template_query)
+            template = template_result.scalar_one_or_none()
+            
+            if not template:
+                raise ValueError("Template not found")
+            
+            # Convert Supabase user ID to database user ID
+            database_user_id = await self._get_database_user_id(db, user_id)
+            
+            # Merge template settings with customizations
+            template_settings = template.default_settings.copy()
+            if customize_settings:
+                template_settings.update(customize_settings)
+            
+            # Create list from template
+            new_list = UserList(
+                user_id=database_user_id,
+                name=list_name,
+                description=template.description,
+                list_type=template.category,
+                template_id=template_id,
+                settings=template_settings,
+                max_items=template_settings.get('max_items', 1000),
+                auto_sync=template_settings.get('auto_sync', False)
+            )
+            
+            db.add(new_list)
+            
+            # Update template usage count
+            await db.execute(
+                update(ListTemplate)
+                .where(ListTemplate.id == template_id)
+                .values(usage_count=ListTemplate.usage_count + 1)
+            )
+            
+            await db.commit()
+            await db.refresh(new_list)
+            
+            # Log activity
+            await self._log_activity(
+                db, new_list.id, None, database_user_id,
+                "list_created_from_template", f"Created list '{list_name}' from template '{template.template_name}'"
+            )
+            await db.commit()
+            
+            return UserListResponse(**new_list.__dict__, items=[])
+            
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Error creating list from template: {e}")
+            raise
+    
+    async def share_list(
+        self, 
+        db: AsyncSession, 
+        owner_user_id: UUID, 
+        list_id: UUID,
+        shared_with_user_id: UUID,
+        permission_level: str = "view",
+        invitation_message: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Share a list with another user"""
+        try:
+            # Check if user owns the list
+            if not await self._check_list_permission(db, owner_user_id, list_id, "admin"):
+                raise ValueError("You don't have permission to share this list")
+            
+            # Check if already shared with this user
+            existing_query = select(ListCollaboration).where(
+                and_(
+                    ListCollaboration.list_id == list_id,
+                    ListCollaboration.shared_with_user_id == shared_with_user_id
+                )
+            )
+            existing_result = await db.execute(existing_query)
+            existing_collaboration = existing_result.scalar_one_or_none()
+            
+            if existing_collaboration:
+                if existing_collaboration.status == 'accepted':
+                    raise ValueError("List already shared with this user")
+                else:
+                    # Update existing invitation
+                    existing_collaboration.permission_level = permission_level
+                    existing_collaboration.invitation_message = invitation_message
+                    existing_collaboration.status = 'pending'
+                    existing_collaboration.updated_at = datetime.now(timezone.utc)
+            else:
+                # Create new collaboration
+                collaboration = ListCollaboration(
+                    list_id=list_id,
+                    shared_with_user_id=shared_with_user_id,
+                    shared_by_user_id=owner_user_id,
+                    permission_level=permission_level,
+                    invitation_message=invitation_message,
+                    status='pending'
+                )
+                db.add(collaboration)
+            
+            # Update list sharing status
+            await db.execute(
+                update(UserList)
+                .where(UserList.id == list_id)
+                .values(is_shared=True)
+            )
+            
+            await db.commit()
+            
+            # Log activity
+            await self._log_activity(
+                db, list_id, None, owner_user_id,
+                "list_shared", f"Shared list with user {shared_with_user_id} ({permission_level} access)"
+            )
+            await db.commit()
+            
+            return {"success": True, "message": "List shared successfully"}
+            
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Error sharing list: {e}")
+            raise
+    
+    async def get_shared_lists(
+        self, 
+        db: AsyncSession, 
+        user_id: UUID,
+        status: str = "accepted"
+    ) -> List[Dict[str, Any]]:
+        """Get lists shared with the user"""
+        try:
+            query = select(UserList, ListCollaboration).join(
+                ListCollaboration,
+                UserList.id == ListCollaboration.list_id
+            ).where(
+                and_(
+                    ListCollaboration.shared_with_user_id == user_id,
+                    ListCollaboration.status == status
+                )
+            ).order_by(ListCollaboration.accepted_at.desc())
+            
+            result = await db.execute(query)
+            shared_lists = []
+            
+            for user_list, collaboration in result:
+                list_dict = user_list.__dict__.copy()
+                list_dict['shared_by_user_id'] = collaboration.shared_by_user_id
+                list_dict['permission_level'] = collaboration.permission_level
+                list_dict['accepted_at'] = collaboration.accepted_at
+                shared_lists.append(list_dict)
+            
+            return shared_lists
+            
+        except Exception as e:
+            logger.error(f"Error getting shared lists: {e}")
+            raise
+    
+    async def get_list_activity(
+        self, 
+        db: AsyncSession, 
+        user_id: UUID, 
+        list_id: UUID,
+        page: int = 1,
+        page_size: int = 20
+    ) -> Dict[str, Any]:
+        """Get activity log for a list"""
+        try:
+            # Check permission
+            if not await self._check_list_permission(db, user_id, list_id, "view"):
+                raise ValueError("You don't have permission to view this list")
+            
+            offset = (page - 1) * page_size
+            
+            # Get activities with user info
+            query = select(ListActivityLog, User.full_name).join(
+                User, ListActivityLog.user_id == User.id
+            ).where(
+                ListActivityLog.list_id == list_id
+            ).order_by(
+                ListActivityLog.created_at.desc()
+            ).offset(offset).limit(page_size)
+            
+            result = await db.execute(query)
+            activities = []
+            
+            for activity, user_name in result:
+                activity_dict = activity.__dict__.copy()
+                activity_dict['user_name'] = user_name
+                activities.append(activity_dict)
+            
+            # Get total count
+            count_query = select(func.count(ListActivityLog.id)).where(
+                ListActivityLog.list_id == list_id
+            )
+            total_result = await db.execute(count_query)
+            total_items = total_result.scalar() or 0
+            
+            total_pages = (total_items + page_size - 1) // page_size
+            pagination = PaginationInfo(
+                current_page=page,
+                total_pages=total_pages,
+                total_items=total_items,
+                items_per_page=page_size,
+                has_next=page < total_pages,
+                has_prev=page > 1
+            )
+            
+            return {
+                "activities": activities,
+                "pagination": pagination.dict()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting list activity: {e}")
+            raise
+    
+    async def export_list(
+        self, 
+        db: AsyncSession, 
+        user_id: UUID, 
+        list_id: UUID,
+        export_format: str = "csv",
+        include_unlocked_data: bool = False,
+        export_fields: Optional[List[str]] = None
+    ) -> UUID:
+        """Create an export job for a list"""
+        try:
+            # Check permission
+            if not await self._check_list_permission(db, user_id, list_id, "view"):
+                raise ValueError("You don't have permission to export this list")
+            
+            # Create export job
+            export_job = ListExportJob(
+                list_id=list_id,
+                user_id=user_id,
+                export_format=export_format,
+                export_fields=export_fields or ["username", "followers_count", "engagement_rate"],
+                include_unlocked_data=include_unlocked_data,
+                status='pending'
+            )
+            
+            db.add(export_job)
+            await db.commit()
+            await db.refresh(export_job)
+            
+            # Log activity
+            await self._log_activity(
+                db, list_id, None, user_id,
+                "export_requested", f"Requested {export_format} export"
+            )
+            await db.commit()
+            
+            # TODO: Trigger background job for actual export processing
+            # This would be handled by a Celery task or similar
+            
+            return export_job.id
+            
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Error creating export job: {e}")
+            raise
+    
+    async def get_list_analytics(
+        self, 
+        db: AsyncSession, 
+        user_id: UUID, 
+        list_id: UUID,
+        date_range: Optional[int] = 30  # days
+    ) -> Dict[str, Any]:
+        """Get analytics for a list"""
+        try:
+            # Check permission
+            if not await self._check_list_permission(db, user_id, list_id, "view"):
+                raise ValueError("You don't have permission to view this list analytics")
+            
+            # Get basic list info
+            list_query = select(UserList).where(UserList.id == list_id)
+            list_result = await db.execute(list_query)
+            user_list = list_result.scalar_one_or_none()
+            
+            if not user_list:
+                raise ValueError("List not found")
+            
+            # Get recent metrics
+            from datetime import date, timedelta
+            start_date = date.today() - timedelta(days=date_range)
+            
+            metrics_query = select(ListPerformanceMetrics).where(
+                and_(
+                    ListPerformanceMetrics.list_id == list_id,
+                    ListPerformanceMetrics.date_recorded >= start_date
+                )
+            ).order_by(ListPerformanceMetrics.date_recorded.desc())
+            
+            metrics_result = await db.execute(metrics_query)
+            metrics = metrics_result.scalars().all()
+            
+            # Calculate summary statistics
+            total_items = user_list.items_count
+            unlocked_items = sum(m.unlocked_items for m in metrics) if metrics else 0
+            total_views = sum(m.views_count for m in metrics) if metrics else 0
+            
+            return {
+                "list_info": {
+                    "id": str(list_id),
+                    "name": user_list.name,
+                    "total_items": total_items,
+                    "created_at": user_list.created_at,
+                    "last_updated": user_list.last_updated
+                },
+                "summary": {
+                    "total_items": total_items,
+                    "unlocked_items": unlocked_items,
+                    "unlock_rate": (unlocked_items / total_items * 100) if total_items > 0 else 0,
+                    "total_views": total_views,
+                    "avg_daily_views": total_views / date_range if date_range > 0 else 0
+                },
+                "daily_metrics": [
+                    {
+                        "date": m.date_recorded,
+                        "items": m.total_items,
+                        "unlocked": m.unlocked_items,
+                        "views": m.views_count,
+                        "updates": m.updates_count
+                    } for m in metrics
+                ]
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting list analytics: {e}")
             raise
 
 # Create service instance
