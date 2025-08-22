@@ -220,3 +220,8 @@ docker-compose.override.yml
 
 # Claude Code specific (optional)
 .claude/settings.local.jsonnul
+redis-server/
+redis-windows.zip
+*.exe
+*.dll
+*.pdb
