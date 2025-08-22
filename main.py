@@ -200,6 +200,14 @@ app.include_router(campaigns_router, prefix="/api")
 from app.api.endpoints.health import router as health_router
 app.include_router(health_router, prefix="/api")
 
+# Include Brand Proposals routes
+from app.api.brand_proposals_routes import router as brand_proposals_router
+app.include_router(brand_proposals_router, prefix="/api")
+
+# Include Comprehensive Admin Routes - TEMPORARILY DISABLED
+# from app.api.admin import admin_router
+# app.include_router(admin_router, prefix="/api")
+
 # TEMPORARY FIX: Add credit routes with double prefix to fix frontend calling wrong URL
 # This should be removed once frontend is updated to use correct /api/v1/credits/* paths
 app.include_router(credit_router, prefix="/api/v1/api", tags=["Credits (Legacy)"])
