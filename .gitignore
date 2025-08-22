@@ -225,3 +225,8 @@ redis-windows.zip
 *.exe
 *.dll
 *.pdb
+ai_models/
+*.safetensors
+*.bin
+pytorch_model.bin
+model.safetensors
