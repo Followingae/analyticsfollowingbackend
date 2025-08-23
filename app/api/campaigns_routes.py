@@ -6,13 +6,13 @@ Provides basic campaign functionality to prevent 404 errors
 from fastapi import APIRouter, Depends, Query, HTTPException
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from app.middleware.auth_middleware import get_current_active_user
+from app.middleware.team_auth_middleware import get_any_team_member_context, TeamContext
 
 router = APIRouter()
 
 @router.get("/campaigns/current")
 async def get_current_campaign(
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Get the current active campaign"""
     return {"current_campaign": None, "recent_campaigns": []}
@@ -22,7 +22,7 @@ async def get_campaigns(
     status: Optional[str] = Query(None, description="Filter by campaign status"),
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(20, ge=1, le=100, description="Number of campaigns per page"),
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Get user campaigns with pagination and filtering"""
     
@@ -44,7 +44,7 @@ async def get_campaigns(
 @router.post("/campaigns")
 async def create_campaign(
     campaign_data: Dict[str, Any],
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Create a new campaign"""
     
@@ -58,7 +58,7 @@ async def create_campaign(
 @router.get("/campaigns/{campaign_id}")
 async def get_campaign(
     campaign_id: str,
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Get a specific campaign by ID"""
     
@@ -72,7 +72,7 @@ async def get_campaign(
 
 @router.get("/campaigns/dashboard")
 async def get_campaigns_dashboard(
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Get campaigns dashboard overview"""
     
@@ -96,7 +96,7 @@ async def get_campaigns_dashboard(
 
 @router.get("/campaigns/templates")
 async def get_campaign_templates(
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Get available campaign templates"""
     
@@ -135,7 +135,7 @@ async def get_campaign_templates(
 async def create_campaign_from_template(
     template_id: str,
     customization_data: Dict[str, Any],
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Create a campaign from a template"""
     
@@ -150,7 +150,7 @@ async def create_campaign_from_template(
 async def get_campaign_analytics(
     campaign_id: str,
     period: str = Query("30d", description="Analytics period"),
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Get campaign analytics and performance metrics"""
     
@@ -172,7 +172,7 @@ async def get_campaign_analytics(
 @router.get("/campaigns/analytics")
 async def get_global_campaigns_analytics(
     period: str = Query("30d", description="Analytics period"),
-    current_user = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context)
 ):
     """Get global campaigns analytics across all campaigns"""
     
