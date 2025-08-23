@@ -38,7 +38,7 @@ class UserProfile(Base):
     __tablename__ = "user_profiles"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+    user_id = Column(UUID(as_uuid=True), nullable=False, unique=True, index=True)  # References auth.users.id
     
     # Profile information
     full_name = Column(Text)
@@ -72,8 +72,8 @@ class UserProfile(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
     
-    # Relationships
-    auth_user = relationship("AuthUser")
+    # Relationships (with explicit primaryjoin since no FK constraint)
+    auth_user = relationship("AuthUser", primaryjoin="UserProfile.user_id == foreign(AuthUser.id)", viewonly=True)
 
 
 class SearchHistory(Base):
