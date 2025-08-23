@@ -10,6 +10,13 @@ from app.middleware.auth_middleware import get_current_active_user
 
 router = APIRouter()
 
+@router.get("/campaigns/current")
+async def get_current_campaign(
+    current_user = Depends(get_current_active_user)
+):
+    """Get the current active campaign"""
+    return {"current_campaign": None, "recent_campaigns": []}
+
 @router.get("/campaigns")
 async def get_campaigns(
     status: Optional[str] = Query(None, description="Filter by campaign status"),
