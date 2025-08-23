@@ -28,6 +28,9 @@ from app.database.connection import get_db
 from app.database.comprehensive_service import comprehensive_service
 # proxy_instagram_url import removed - using external proxy service instead
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient, DecodoAPIError, DecodoInstabilityError, DecodoProfileNotFoundError
+from app.middleware.team_auth_middleware import (
+    get_any_team_member_context, TeamContext, team_usage_gate
+)
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
 from app.middleware.credit_gate import requires_credits
 from app.services.cache_integration_service import cache_integration_service
@@ -910,12 +913,12 @@ async def _fetch_with_retry(db: AsyncSession, username: str):
 # =============================================================================
 
 @router.get("/instagram/profile/{username}")
-@requires_credits("profile_analysis", return_detailed_response=True)
+@team_usage_gate("profiles", 1)  # Uses team's pooled profile limit
 async def analyze_instagram_profile(
     username: str = Path(..., description="Instagram username"),
     detailed: bool = Query(True, description="Include detailed analysis"),
-    db: AsyncSession = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)  # SECURITY: Authentication restored
+    team_context: TeamContext = Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     MAIN Instagram profile analysis endpoint
@@ -938,14 +941,14 @@ async def analyze_instagram_profile(
             if existing_profile:
                 logger.info(f"Profile {username} exists in database - granting user access and returning cached data")
                 
-                # Profile exists - grant THIS user access and return the data
-                await comprehensive_service.grant_user_profile_access(
-                    db, current_user.id, username
+                # Profile exists - grant team access and return the data
+                await comprehensive_service.grant_team_profile_access(
+                    db, team_context.team_id, team_context.user_id, username
                 )
                 
                 # Return the existing profile data with AI insights
-                cached_data = await comprehensive_service.get_user_profile_access(
-                    db, current_user.id, username
+                cached_data = await comprehensive_service.get_team_profile_access(
+                    db, team_context.team_id, username
                 )
                 
                 # Enhance with AI insights if available
@@ -987,6 +990,9 @@ async def analyze_instagram_profile(
                     }
                 }
                 
+                # Add team context to response
+                cached_data["team_context"] = team_context.to_dict()
+                
                 return JSONResponse(content=cached_data)
                 
         except Exception as cache_error:
@@ -996,14 +1002,14 @@ async def analyze_instagram_profile(
         logger.info(f"Fetching fresh data from Decodo for {username}")
         response_data = await _fetch_with_retry(db, username)
         
-        # STEP 3: Grant user access to this profile for 30 days
+        # STEP 3: Grant team access to this profile
         try:
-            await comprehensive_service.grant_user_profile_access(
-                db, current_user.id, username
+            await comprehensive_service.grant_team_profile_access(
+                db, team_context.team_id, team_context.user_id, username
             )
-            logger.info(f"SUCCESS: Granted user access to {username}")
+            logger.info(f"SUCCESS: Granted team access to {username}")
         except Exception as access_error:
-            logger.warning(f"Failed to grant user access: {access_error}")
+            logger.warning(f"Failed to grant team access: {access_error}")
         
         # STEP 4: AUTO-TRIGGER AI ANALYSIS for new profiles
         try:
@@ -1060,6 +1066,8 @@ async def analyze_instagram_profile(
                     "type": "success"
                 }
             }
+            # Add team context to response
+            response_data["team_context"] = team_context.to_dict()
         
         return JSONResponse(content=response_data)
         
@@ -1113,11 +1121,10 @@ async def analyze_instagram_profile(
 
 
 @router.get("/instagram/profile/{username}/analytics")
-@requires_credits("profile_analysis", return_detailed_response=True)
 async def get_detailed_analytics(
     username: str = Path(..., description="Instagram username"),
-    db: AsyncSession = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Get detailed analytics for a profile from DATABASE ONLY
@@ -1133,8 +1140,8 @@ async def get_detailed_analytics(
         logger.info(f"Getting detailed analytics for {username} from DATABASE ONLY")
         
         # ONLY check database - NO Decodo calls allowed
-        cached_profile = await comprehensive_service.get_user_profile_access(
-            db, current_user.id, username
+        cached_profile = await comprehensive_service.get_team_profile_access(
+            db, team_context.team_id, username
         )
         
         if not cached_profile:
@@ -1181,6 +1188,9 @@ async def get_detailed_analytics(
         # Return the cached data with additional metadata for detailed view
         cached_profile["meta"]["view_type"] = "detailed_analytics"
         cached_profile["meta"]["source_note"] = "Retrieved from database cache - no API calls made"
+        
+        # Add team context to response
+        cached_profile["team_context"] = team_context.to_dict()
         
         return JSONResponse(content=cached_profile)
         
@@ -1537,13 +1547,13 @@ async def legacy_force_refresh_profile_data(
 # =============================================================================
 
 @router.get("/instagram/profile/{username}/posts")
-@requires_credits("posts_analytics", credits_required=10)
+@team_usage_gate("posts", 1)  # Uses team's pooled posts limit
 async def get_profile_posts(
     username: str = Path(..., description="Instagram username"),
     limit: int = Query(20, ge=1, le=50, description="Number of posts to return"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
-    db: AsyncSession = Depends(get_db),
-    current_user: UserInDB = Depends(get_current_active_user)
+    team_context: TeamContext = Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     Get posts for a profile that user has access to
@@ -1556,9 +1566,9 @@ async def get_profile_posts(
     - Video metadata for video posts
     """
     try:
-        # Check if user has access to this profile
-        cached_profile = await comprehensive_service.get_user_profile_access(
-            db, current_user.id, username
+        # Check if team has access to this profile
+        cached_profile = await comprehensive_service.get_team_profile_access(
+            db, team_context.team_id, username
         )
         
         if not cached_profile:
@@ -1566,7 +1576,7 @@ async def get_profile_posts(
                 status_code=404,
                 detail={
                     "error": "profile_not_accessible",
-                    "message": f"You don't have access to posts for '{username}'. Please search for this profile first.",
+                    "message": f"Team doesn't have access to posts for '{username}'. Please search for this profile first.",
                     "action_required": "search_profile_first"
                 }
             )
@@ -1682,6 +1692,7 @@ async def get_profile_posts(
                 'total_posts': total_posts
             },
             'posts': formatted_posts,
+            'team_context': team_context.to_dict(),
             'ai_analytics': {
                 'posts_with_ai_analysis': posts_with_ai,
                 'total_posts_returned': len(formatted_posts),

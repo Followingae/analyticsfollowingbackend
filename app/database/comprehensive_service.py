@@ -1490,6 +1490,180 @@ class ComprehensiveDataService:
             logger.error(f"Error granting user profile access: {e}")
             await db.rollback()
             return False
+
+    # ==========================================================================
+    # TEAM PROFILE ACCESS METHODS - B2B SaaS Integration
+    # ==========================================================================
+    
+    async def grant_team_profile_access(self, db: AsyncSession, team_id: UUID, user_id: UUID, username: str) -> bool:
+        """Grant team access to a profile"""
+        try:
+            from app.database.unified_models import TeamProfileAccess
+            from uuid import uuid4
+            
+            # Find profile by username
+            result = await db.execute(
+                select(Profile).where(Profile.username == username)
+            )
+            profile = result.scalar_one_or_none()
+            
+            if not profile:
+                logger.warning(f"Cannot grant team access - profile {username} not found in database")
+                return False
+            
+            # Check if team access already exists
+            existing_access = await db.execute(
+                select(TeamProfileAccess).where(
+                    and_(
+                        TeamProfileAccess.team_id == team_id,
+                        TeamProfileAccess.profile_id == profile.id
+                    )
+                )
+            )
+            access_record = existing_access.scalar_one_or_none()
+            
+            if access_record:
+                # Update access timestamp
+                access_record.accessed_at = datetime.now(timezone.utc)
+                logger.info(f"Updated team access for team {team_id} to profile {username}")
+            else:
+                # Create new team access
+                new_access = TeamProfileAccess(
+                    id=uuid4(),
+                    team_id=team_id,
+                    profile_id=profile.id,
+                    granted_by_user_id=user_id,
+                    accessed_at=datetime.now(timezone.utc)
+                )
+                db.add(new_access)
+                logger.info(f"Granted new team access for team {team_id} to profile {username}")
+            
+            await db.commit()
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error granting team profile access: {e}")
+            await db.rollback()
+            return False
+
+    async def get_team_profile_access(self, db: AsyncSession, team_id: UUID, username: str) -> Optional[Dict]:
+        """Check if team has access to profile and return cached data if available"""
+        try:
+            from app.database.unified_models import TeamProfileAccess
+            
+            # Find profile by username
+            result = await db.execute(
+                select(Profile).where(Profile.username == username)
+            )
+            profile = result.scalar_one_or_none()
+            
+            if not profile:
+                logger.debug(f"Profile {username} not found")
+                return None
+            
+            # Check team access
+            access_result = await db.execute(
+                select(TeamProfileAccess).where(
+                    and_(
+                        TeamProfileAccess.team_id == team_id,
+                        TeamProfileAccess.profile_id == profile.id
+                    )
+                )
+            )
+            access_record = access_result.scalar_one_or_none()
+            
+            if not access_record:
+                logger.debug(f"Team {team_id} does not have access to profile {username}")
+                return None
+            
+            # Return formatted profile data (similar to user profile access)
+            current_time = datetime.now(timezone.utc)
+            
+            # Calculate engagement metrics
+            try:
+                from app.services.engagement_calculator import engagement_calculator
+                engagement_metrics = await engagement_calculator.calculate_and_update_profile_engagement(
+                    db, str(profile.id)
+                )
+            except Exception as engagement_error:
+                logger.warning(f"Engagement calculation failed: {engagement_error}")
+                engagement_metrics = {
+                    'overall_engagement_rate': profile.engagement_rate or 0,
+                    'avg_likes': 0,
+                    'avg_comments': 0,
+                    'avg_total_engagement': 0,
+                    'posts_analyzed': 0
+                }
+            
+            # Collect AI insights if available
+            ai_insights = {}
+            try:
+                ai_insights = {
+                    "ai_primary_content_type": profile.ai_primary_content_type,
+                    "ai_content_distribution": profile.ai_content_distribution,
+                    "ai_avg_sentiment_score": profile.ai_avg_sentiment_score,
+                    "ai_language_distribution": profile.ai_language_distribution,
+                    "ai_content_quality_score": profile.ai_content_quality_score,
+                    "ai_profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                    "ai_top_3_categories": profile.ai_top_3_categories or [],
+                    "ai_top_10_categories": profile.ai_top_10_categories or [],
+                    "has_ai_analysis": profile.ai_profile_analyzed_at is not None,
+                    "ai_processing_status": "completed" if profile.ai_profile_analyzed_at else "pending"
+                }
+            except AttributeError:
+                ai_insights = {
+                    "has_ai_analysis": False,
+                    "ai_processing_status": "not_available"
+                }
+            
+            return {
+                "success": True,
+                "profile": {
+                    "username": profile.username,
+                    "full_name": profile.full_name,
+                    "biography": profile.biography,
+                    "followers_count": profile.followers_count or 0,
+                    "following_count": profile.following_count or 0,
+                    "posts_count": profile.posts_count or 0,
+                    "is_verified": profile.is_verified or False,
+                    "is_private": profile.is_private or False,
+                    "is_business_account": profile.is_business_account or False,
+                    "profile_pic_url": profile.profile_pic_url,
+                    "profile_pic_url_hd": profile.profile_pic_url_hd,
+                    "external_url": profile.external_url,
+                    "engagement_rate": engagement_metrics["overall_engagement_rate"],
+                    "business_category_name": profile.business_category_name,
+                    "avg_likes": engagement_metrics["avg_likes"],
+                    "avg_comments": engagement_metrics["avg_comments"],
+                    "influence_score": profile.influence_score or 0,
+                    "content_quality_score": getattr(profile, 'content_quality_score', 0) or 0
+                },
+                "analytics": {
+                    "engagement_rate": engagement_metrics["overall_engagement_rate"],
+                    "engagement_rate_last_12_posts": engagement_metrics.get('engagement_rate_last_12_posts', 0),
+                    "engagement_rate_last_30_days": engagement_metrics.get('engagement_rate_last_30_days', 0),
+                    "influence_score": profile.influence_score or 0,
+                    "data_quality_score": float(profile.data_quality_score or 1.0),
+                    "avg_likes": engagement_metrics["avg_likes"],
+                    "avg_comments": engagement_metrics["avg_comments"],
+                    "avg_total_engagement": engagement_metrics["avg_total_engagement"],
+                    "posts_analyzed": engagement_metrics["posts_analyzed"],
+                    "content_quality_score": float(getattr(profile, 'content_quality_score', 0) or 0)
+                },
+                "ai_insights": ai_insights,
+                "meta": {
+                    "analysis_timestamp": current_time.isoformat(),
+                    "data_source": "database_team_access",
+                    "stored_in_database": True,
+                    "team_has_access": True,
+                    "access_granted_at": access_record.accessed_at.isoformat(),
+                    "includes_ai_insights": bool(ai_insights.get("has_ai_analysis", False))
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking team profile access: {e}")
+            return None
     
 
     async def close_pool(self):

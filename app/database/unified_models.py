@@ -120,6 +120,7 @@ class User(Base):
     job_title = Column(Text)   # NEW: For settings form
     phone_number = Column(Text)  # NEW: For settings form
     bio = Column(Text)         # NEW: For settings form
+    profile_picture_url = Column(Text)  # Profile picture URL
     role = Column(Text, nullable=False, default='free', index=True)  # free, premium, admin, super_admin
     status = Column(Text, nullable=False, default='active', index=True)  # active, inactive, suspended, pending
     
@@ -1316,6 +1317,7 @@ class CreditWallet(Base):
     # Balance tracking
     current_balance = Column(Integer, default=0, nullable=False)
     total_earned_this_cycle = Column(Integer, default=0, nullable=False)
+    total_purchased_this_cycle = Column(Integer, default=0, nullable=False)
     total_spent_this_cycle = Column(Integer, default=0, nullable=False)
     lifetime_earned = Column(Integer, default=0, nullable=False)
     lifetime_spent = Column(Integer, default=0, nullable=False)
@@ -1323,14 +1325,17 @@ class CreditWallet(Base):
     # Billing cycle management
     current_billing_cycle_start = Column(DateTime(timezone=True))
     current_billing_cycle_end = Column(DateTime(timezone=True))
+    next_reset_date = Column(Date)
     next_credit_refresh_date = Column(DateTime(timezone=True))
+    rollover_months_allowed = Column(Integer, default=0)
     
     # Subscription status
     subscription_status = Column(String(30), default='active', nullable=False)
+    subscription_active = Column(Boolean, default=True, nullable=False)
     auto_refresh_enabled = Column(Boolean, default=True, nullable=False)
     
     # Account management
-    is_frozen = Column(Boolean, default=False, nullable=False)
+    is_locked = Column(Boolean, default=False, nullable=False)
     freeze_reason = Column(Text)
     last_activity_at = Column(DateTime(timezone=True))
     
