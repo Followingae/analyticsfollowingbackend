@@ -1956,7 +1956,7 @@ class TeamMember(Base):
     
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     
     # Role and permissions
     role = Column(String(20), nullable=False, default='member')  # owner, member
@@ -1967,9 +1967,9 @@ class TeamMember(Base):
     joined_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     last_active_at = Column(DateTime(timezone=True), nullable=True)
     
-    # Removal tracking
-    removed_at = Column(DateTime(timezone=True), nullable=True)
-    removed_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    # Invitation tracking
+    invited_by = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    invitation_accepted_at = Column(DateTime(timezone=True), nullable=True)
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -1998,7 +1998,7 @@ class TeamInvitation(Base):
     
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
-    invited_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False)
+    invited_by_user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     
     # Invitation details
     email = Column(String(255), nullable=False)
@@ -2014,11 +2014,11 @@ class TeamInvitation(Base):
     
     # Acceptance tracking
     accepted_at = Column(DateTime(timezone=True), nullable=True)
-    accepted_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    accepted_by_user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     
     # Cancellation tracking
     cancelled_at = Column(DateTime(timezone=True), nullable=True)
-    cancelled_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    cancelled_by_user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2048,7 +2048,7 @@ class TeamProfileAccess(Base):
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
     profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False)
-    granted_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    granted_by_user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     
     # Access tracking
     accessed_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -2079,7 +2079,7 @@ class MonthlyUsageTracking(Base):
     
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
     
     # Usage tracking period
     billing_month = Column(Date, nullable=False)  # First day of the billing month
