@@ -5,6 +5,7 @@ Extracts team context from user authentication and provides team-based access co
 import logging
 from typing import Optional, Dict, Any
 from uuid import UUID
+from functools import wraps
 from fastapi import HTTPException, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, join
@@ -380,6 +381,7 @@ def team_usage_gate(action_type: str, quantity: int = 1):
     Usage: @team_usage_gate("profiles", 1)
     """
     def decorator(func):
+        @wraps(func)
         async def wrapper(*args, **kwargs):
             # Extract team_context and db from kwargs
             team_context = None
