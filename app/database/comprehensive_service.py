@@ -1520,6 +1520,16 @@ class ComprehensiveDataService:
             if not profile:
                 logger.warning(f"Cannot grant team access - profile {username} not found in database")
                 return False
+                
+            # Map auth.users.id to public.users.id for foreign key constraint
+            public_user_result = await db.execute(
+                select(User.id).where(User.supabase_user_id == str(user_id))
+            )
+            public_user_id = public_user_result.scalar_one_or_none()
+            
+            if not public_user_id:
+                logger.error(f"Cannot find public.users record for auth user {user_id}")
+                return False
             
             # Check if team access already exists
             existing_access = await db.execute(
