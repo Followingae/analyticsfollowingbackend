@@ -334,7 +334,7 @@ async def invite_team_member(
 
 @router.get("/invitations", response_model=List[TeamInvitationResponse])
 async def get_team_invitations(
-    status: Optional[str] = Query(None, regex="^(pending|accepted|expired|cancelled)$"),
+    status: Optional[str] = Query(None, pattern="^(pending|accepted|expired|cancelled)$"),
     team_context: TeamContext = Depends(get_team_owner_context),  # Only owners
     db: AsyncSession = Depends(get_db)
 ):

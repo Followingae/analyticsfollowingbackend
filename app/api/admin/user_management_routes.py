@@ -30,7 +30,7 @@ class UserCreateRequest(BaseModel):
     email: EmailStr
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
-    role: str = Field(..., regex="^(brand_free|brand_standard|brand_premium|brand_enterprise|admin|super_admin)$")
+    role: str = Field(..., pattern="^(brand_free|brand_standard|brand_premium|brand_enterprise|admin|super_admin)$")
     subscription_tier: str = Field(default="brand_free")
     monthly_search_limit: Optional[int] = None
     monthly_export_limit: Optional[int] = None
@@ -40,9 +40,9 @@ class UserCreateRequest(BaseModel):
 class UserUpdateRequest(BaseModel):
     first_name: Optional[str] = Field(None, min_length=1, max_length=100)
     last_name: Optional[str] = Field(None, min_length=1, max_length=100)
-    role: Optional[str] = Field(None, regex="^(brand_free|brand_standard|brand_premium|brand_enterprise|admin|super_admin)$")
+    role: Optional[str] = Field(None, pattern="^(brand_free|brand_standard|brand_premium|brand_enterprise|admin|super_admin)$")
     subscription_tier: Optional[str] = None
-    account_status: Optional[str] = Field(None, regex="^(active|suspended|pending|archived)$")
+    account_status: Optional[str] = Field(None, pattern="^(active|suspended|pending|archived)$")
     suspension_reason: Optional[str] = None
     monthly_search_limit: Optional[int] = None
     monthly_export_limit: Optional[int] = None
@@ -107,7 +107,7 @@ async def get_all_users(
     subscription_tier: Optional[str] = Query(None, description="Filter by subscription tier"),
     account_status: Optional[str] = Query(None, description="Filter by account status"),
     sort_by: Optional[str] = Query("created_at", description="Sort by field"),
-    sort_order: Optional[str] = Query("desc", regex="^(asc|desc)$"),
+    sort_order: Optional[str] = Query("desc", pattern="^(asc|desc)$"),
     current_user: Dict[str, Any] = Depends(get_current_user_with_permissions),
     db: AsyncSession = Depends(get_db)
 ):

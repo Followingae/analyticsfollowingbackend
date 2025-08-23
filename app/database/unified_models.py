@@ -3,7 +3,7 @@ FINAL UNIFIED DATABASE MODELS - Complete Instagram Analytics Platform
 Contains ALL tables required for the platform with real Decodo integration
 Includes campaigns, all Decodo datapoints, and proper relationships
 """
-from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, Text, Float, ARRAY, ForeignKey, Date, Index, CheckConstraint, text
+from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, Text, Float, ARRAY, ForeignKey, Date, Index, CheckConstraint, UniqueConstraint, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship, foreign
@@ -1897,7 +1897,7 @@ class Team(Base):
     __tablename__ = 'teams'
     
     # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
     
     # Team information
     name = Column(String(255), nullable=False)
@@ -1952,7 +1952,7 @@ class TeamMember(Base):
     __tablename__ = 'team_members'
     
     # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
     
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
@@ -1994,7 +1994,7 @@ class TeamInvitation(Base):
     __tablename__ = 'team_invitations'
     
     # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
     
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
@@ -2043,7 +2043,7 @@ class TeamProfileAccess(Base):
     __tablename__ = 'team_profile_access'
     
     # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
     
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
@@ -2075,7 +2075,7 @@ class MonthlyUsageTracking(Base):
     __tablename__ = 'monthly_usage_tracking'
     
     # Primary key
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
     
     # Foreign keys
     team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)

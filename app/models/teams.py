@@ -87,7 +87,7 @@ class TeamMemberUpdate(BaseModel):
     """Update team member"""
     role: Optional[TeamRole] = None
     permissions: Optional[Dict[str, bool]] = None
-    status: Optional[str] = Field(None, regex="^(active|inactive|suspended)$")
+    status: Optional[str] = Field(None, pattern="^(active|inactive|suspended)$")
 
 class TeamMemberResponse(BaseModel):
     """Team member information"""
@@ -184,7 +184,7 @@ class TeamUsageSummary(BaseModel):
 
 class TopupOrderCreate(BaseModel):
     """Create topup order"""
-    topup_type: str = Field(..., regex="^(profiles|emails|posts)$")
+    topup_type: str = Field(..., pattern="^(profiles|emails|posts)$")
     quantity: int = Field(..., gt=0)
     
 class TopupOrderResponse(BaseModel):

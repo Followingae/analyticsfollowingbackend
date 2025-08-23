@@ -221,7 +221,7 @@ async def get_profile_posts_analytics(
 @audit_action("export_profiles", "export")  
 async def export_profiles(
     profile_ids: List[UUID] = Query(..., max_items=1000),
-    export_format: str = Query("csv", regex="^(csv|excel|json)$"),
+    export_format: str = Query("csv", pattern="^(csv|excel|json)$"),
     current_user: Dict[str, Any] = Depends(get_current_user_with_permissions),
     db: AsyncSession = Depends(get_db)
 ):

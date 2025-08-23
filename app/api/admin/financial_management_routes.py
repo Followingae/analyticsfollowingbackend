@@ -31,20 +31,20 @@ router = APIRouter(prefix="/admin/financial", tags=["Admin - Financial Managemen
 # Pydantic Models
 class CreditAdjustmentRequest(BaseModel):
     user_id: UUID
-    adjustment_type: str = Field(..., regex="^(grant|deduct|refund|bonus|correction)$")
+    adjustment_type: str = Field(..., pattern="^(grant|deduct|refund|bonus|correction)$")
     amount: int = Field(..., gt=0, description="Amount in credits")
     reason: str = Field(..., min_length=1, max_length=500)
     reference_id: Optional[UUID] = None
 
 class BulkCreditAdjustmentRequest(BaseModel):
     user_ids: List[UUID]
-    adjustment_type: str = Field(..., regex="^(grant|deduct|refund|bonus|correction)$")
+    adjustment_type: str = Field(..., pattern="^(grant|deduct|refund|bonus|correction)$")
     amount: int = Field(..., gt=0)
     reason: str = Field(..., min_length=1, max_length=500)
 
 class SubscriptionChangeRequest(BaseModel):
     user_id: UUID
-    new_tier: str = Field(..., regex="^(brand_free|brand_standard|brand_premium|brand_enterprise)$")
+    new_tier: str = Field(..., pattern="^(brand_free|brand_standard|brand_premium|brand_enterprise)$")
     effective_date: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     reason: str = Field(..., min_length=1, max_length=500)
@@ -615,7 +615,7 @@ async def get_all_transactions(
 @requires_permission("can_view_revenue_reports")
 @audit_action("view_revenue_metrics")
 async def get_revenue_metrics(
-    period: str = Query("monthly", regex="^(daily|weekly|monthly|yearly)$"),
+    period: str = Query("monthly", pattern="^(daily|weekly|monthly|yearly)$"),
     months_back: int = Query(12, ge=1, le=24),
     current_user: Dict[str, Any] = Depends(get_current_user_with_permissions),
     db: AsyncSession = Depends(get_db)
@@ -678,7 +678,7 @@ async def get_revenue_metrics(
 @requires_permission("can_export_platform_data")
 @audit_action("export_financial_report")
 async def export_financial_report(
-    report_type: str = Query("revenue", regex="^(revenue|transactions|subscriptions|credits)$"),
+    report_type: str = Query("revenue", pattern="^(revenue|transactions|subscriptions|credits)$"),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     current_user: Dict[str, Any] = Depends(get_current_user_with_permissions),

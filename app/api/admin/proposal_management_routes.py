@@ -33,7 +33,7 @@ class ProposalCreateRequest(BaseModel):
     proposed_start_date: Optional[datetime] = None
     proposed_end_date: Optional[datetime] = None
     brand_response_due_date: Optional[datetime] = None
-    priority_level: str = Field(default="medium", regex="^(low|medium|high|urgent)$")
+    priority_level: str = Field(default="medium", pattern="^(low|medium|high|urgent)$")
     deliverables: Optional[List[str]] = None
     terms_conditions: Optional[str] = None
     template_id: Optional[UUID] = None
@@ -43,11 +43,11 @@ class ProposalUpdateRequest(BaseModel):
     proposal_description: Optional[str] = Field(None, min_length=1, max_length=2000)
     service_type: Optional[str] = None
     proposed_budget_usd: Optional[float] = Field(None, gt=0)
-    status: Optional[str] = Field(None, regex="^(draft|sent|viewed|under_review|accepted|rejected|revised)$")
+    status: Optional[str] = Field(None, pattern="^(draft|sent|viewed|under_review|accepted|rejected|revised)$")
     proposed_start_date: Optional[datetime] = None
     proposed_end_date: Optional[datetime] = None
     brand_response_due_date: Optional[datetime] = None
-    priority_level: Optional[str] = Field(None, regex="^(low|medium|high|urgent)$")
+    priority_level: Optional[str] = Field(None, pattern="^(low|medium|high|urgent)$")
     admin_notes: Optional[str] = None
 
 class TemplateCreateRequest(BaseModel):
