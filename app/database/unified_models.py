@@ -129,6 +129,7 @@ class User(Base):
     credits_used_this_month = Column(Integer, nullable=False, default=0)
     subscription_tier = Column(Text, default='free')  # free, basic, premium, enterprise
     subscription_expires_at = Column(DateTime(timezone=True))
+    stripe_customer_id = Column(Text, unique=True, nullable=True, index=True)  # Stripe customer ID
     
     # Profile customization
     avatar_config = Column(JSONB)  # BoringAvatars configuration (variant, colorScheme, colors, seed)
@@ -1882,4 +1883,222 @@ class ProposalTemplate(Base):
         Index('idx_proposal_templates_performance', 'success_rate_percentage', 'usage_count'),
         Index('idx_proposal_templates_version', 'parent_template_id', 'version'),
         Index('idx_proposal_templates_usage', 'last_used_at', 'usage_count'),
+    )
+
+# =============================================================================
+# TEAM MANAGEMENT SYSTEM - B2B SaaS Team Collaboration
+# =============================================================================
+
+class Team(Base):
+    """
+    Team entity for B2B SaaS collaboration
+    Each team has a subscription and pooled usage limits
+    """
+    __tablename__ = 'teams'
+    
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Team information
+    name = Column(String(255), nullable=False)
+    company_name = Column(String(255), nullable=True)
+    
+    # Subscription information
+    subscription_tier = Column(String(20), nullable=False, default='free')  # free, standard, premium
+    subscription_status = Column(String(20), nullable=False, default='active')  # active, trial, suspended, cancelled, past_due
+    subscription_expires_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Team limits based on subscription
+    max_team_members = Column(Integer, nullable=False, default=1)
+    monthly_profile_limit = Column(Integer, nullable=False, default=5)
+    monthly_email_limit = Column(Integer, nullable=False, default=0)
+    monthly_posts_limit = Column(Integer, nullable=False, default=0)
+    
+    # Current month usage (pooled across all team members)
+    profiles_used_this_month = Column(Integer, nullable=False, default=0)
+    emails_used_this_month = Column(Integer, nullable=False, default=0)
+    posts_used_this_month = Column(Integer, nullable=False, default=0)
+    
+    # Team settings
+    settings = Column(JSONB, default='{}')
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    members = relationship("TeamMember", back_populates="team", cascade="all, delete-orphan")
+    invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
+    profile_access = relationship("TeamProfileAccess", back_populates="team", cascade="all, delete-orphan")
+    
+    # Database constraints and indexes
+    __table_args__ = (
+        CheckConstraint("max_team_members > 0", name='teams_max_members_positive'),
+        CheckConstraint("monthly_profile_limit >= 0", name='teams_profile_limit_non_negative'),
+        CheckConstraint("monthly_email_limit >= 0", name='teams_email_limit_non_negative'),
+        CheckConstraint("monthly_posts_limit >= 0", name='teams_posts_limit_non_negative'),
+        CheckConstraint("profiles_used_this_month >= 0", name='teams_profiles_used_non_negative'),
+        CheckConstraint("emails_used_this_month >= 0", name='teams_emails_used_non_negative'),
+        CheckConstraint("posts_used_this_month >= 0", name='teams_posts_used_non_negative'),
+        Index('idx_teams_subscription', 'subscription_tier', 'subscription_status'),
+        Index('idx_teams_usage', 'profiles_used_this_month', 'emails_used_this_month'),
+    )
+
+class TeamMember(Base):
+    """
+    Team membership with roles and permissions
+    Links users to teams with specific roles (owner/member)
+    """
+    __tablename__ = 'team_members'
+    
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Foreign keys
+    team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False)
+    
+    # Role and permissions
+    role = Column(String(20), nullable=False, default='member')  # owner, member
+    permissions = Column(JSONB, default='{}')
+    status = Column(String(20), nullable=False, default='active')  # active, inactive, suspended, removed
+    
+    # Activity tracking
+    joined_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_active_at = Column(DateTime(timezone=True), nullable=True)
+    
+    # Removal tracking
+    removed_at = Column(DateTime(timezone=True), nullable=True)
+    removed_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    team = relationship("Team", back_populates="members")
+    
+    # Database constraints and indexes
+    __table_args__ = (
+        UniqueConstraint('team_id', 'user_id', name='unique_team_user_membership'),
+        Index('idx_team_members_team_role', 'team_id', 'role', 'status'),
+        Index('idx_team_members_user', 'user_id', 'status'),
+        Index('idx_team_members_activity', 'last_active_at', 'status'),
+    )
+
+class TeamInvitation(Base):
+    """
+    Team invitation system for inviting new members
+    Secure token-based invitations with expiration
+    """
+    __tablename__ = 'team_invitations'
+    
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Foreign keys
+    team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
+    invited_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False)
+    
+    # Invitation details
+    email = Column(String(255), nullable=False)
+    role = Column(String(20), nullable=False, default='member')  # owner, member
+    invitation_token = Column(String(255), nullable=False, unique=True)
+    
+    # Status and expiration
+    status = Column(String(20), nullable=False, default='pending')  # pending, accepted, expired, cancelled
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    
+    # Optional personal message
+    personal_message = Column(Text, nullable=True)
+    
+    # Acceptance tracking
+    accepted_at = Column(DateTime(timezone=True), nullable=True)
+    accepted_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    
+    # Cancellation tracking
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    team = relationship("Team", back_populates="invitations")
+    
+    # Database constraints and indexes
+    __table_args__ = (
+        Index('idx_team_invitations_token', 'invitation_token'),
+        Index('idx_team_invitations_email_status', 'email', 'status'),
+        Index('idx_team_invitations_team_status', 'team_id', 'status'),
+        Index('idx_team_invitations_expiry', 'expires_at', 'status'),
+    )
+
+class TeamProfileAccess(Base):
+    """
+    Team-based profile access tracking
+    Records which teams have access to which Instagram profiles
+    """
+    __tablename__ = 'team_profile_access'
+    
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Foreign keys
+    team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False)
+    granted_by_user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='SET NULL'), nullable=True)
+    
+    # Access tracking
+    accessed_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Relationships
+    team = relationship("Team", back_populates="profile_access")
+    
+    # Database constraints and indexes
+    __table_args__ = (
+        UniqueConstraint('team_id', 'profile_id', name='unique_team_profile_access'),
+        Index('idx_team_profile_access_team', 'team_id', 'accessed_at'),
+        Index('idx_team_profile_access_profile', 'profile_id', 'accessed_at'),
+    )
+
+class MonthlyUsageTracking(Base):
+    """
+    Monthly usage tracking per team member
+    Tracks individual member usage within team pooled limits
+    """
+    __tablename__ = 'monthly_usage_tracking'
+    
+    # Primary key
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Foreign keys
+    team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False)
+    
+    # Usage tracking period
+    billing_month = Column(Date, nullable=False)  # First day of the billing month
+    
+    # Usage counters
+    profiles_analyzed = Column(Integer, nullable=False, default=0)
+    emails_unlocked = Column(Integer, nullable=False, default=0)
+    posts_analyzed = Column(Integer, nullable=False, default=0)
+    
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    
+    # Database constraints and indexes
+    __table_args__ = (
+        UniqueConstraint('team_id', 'user_id', 'billing_month', name='unique_team_user_month_usage'),
+        CheckConstraint("profiles_analyzed >= 0", name='monthly_usage_profiles_non_negative'),
+        CheckConstraint("emails_unlocked >= 0", name='monthly_usage_emails_non_negative'),
+        CheckConstraint("posts_analyzed >= 0", name='monthly_usage_posts_non_negative'),
+        Index('idx_monthly_usage_team_month', 'team_id', 'billing_month'),
+        Index('idx_monthly_usage_user_month', 'user_id', 'billing_month'),
     )

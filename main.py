@@ -203,10 +203,18 @@ app.include_router(health_router, prefix="/api")
 # Include Brand Proposals routes
 from app.api.brand_proposals_routes import router as brand_proposals_router
 from app.api.team_instagram_routes import router as team_router
+from app.api.team_management_routes import router as team_management_router
+from app.api.stripe_subscription_routes import router as stripe_router
 app.include_router(brand_proposals_router, prefix="/api")
 
 # Include Team Instagram routes - B2B SaaS team collaboration
 app.include_router(team_router, prefix="/api/v1")
+
+# Include Team Management routes - Team member management
+app.include_router(team_management_router, prefix="/api/v1")
+
+# Include Stripe Subscription routes - Billing and subscription management
+app.include_router(stripe_router, prefix="/api/v1")
 
 # Include Comprehensive Admin Routes - TEMPORARILY DISABLED
 # from app.api.admin import admin_router
