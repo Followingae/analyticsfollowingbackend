@@ -1443,6 +1443,16 @@ class ComprehensiveDataService:
             except (ValueError, TypeError) as e:
                 logger.error(f"Invalid user_id format: {user_id}, error: {e}")
                 return False
+                
+            # Map auth.users.id to public.users.id for foreign key constraint
+            public_user_result = await db.execute(
+                select(User.id).where(User.supabase_user_id == str(user_uuid))
+            )
+            public_user_id = public_user_result.scalar_one_or_none()
+            
+            if not public_user_id:
+                logger.error(f"Cannot find public.users record for auth user {user_id}")
+                return False
             
             # Find profile by username
             result = await db.execute(
@@ -1532,7 +1542,7 @@ class ComprehensiveDataService:
                     id=uuid4(),
                     team_id=team_id,
                     profile_id=profile.id,
-                    granted_by_user_id=user_id,
+                    granted_by_user_id=public_user_id,
                     accessed_at=datetime.now(timezone.utc)
                 )
                 db.add(new_access)
