@@ -38,7 +38,7 @@ class UserProfile(Base):
     __tablename__ = "user_profiles"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.auth_users.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
     
     # Profile information
     full_name = Column(Text)
