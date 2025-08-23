@@ -1,0 +1,1 @@
+# Admin Secure Routes - Clean implementation

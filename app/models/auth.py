@@ -10,8 +10,11 @@ from enum import Enum
 class UserRole(str, Enum):
     """User roles for role-based access control"""
     FREE = "free"
-    PREMIUM = "premium"
+    PREMIUM = "premium" 
+    BRAND_PREMIUM = "brand_premium"
     ADMIN = "admin"
+    SUPERADMIN = "superadmin"
+    SUPER_ADMIN = "super_admin"  # Match Supabase role naming
 
 
 class UserStatus(str, Enum):

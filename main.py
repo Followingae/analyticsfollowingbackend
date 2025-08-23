@@ -192,8 +192,8 @@ app.include_router(lists_router, prefix="/api/v1")
 from app.api.discovery_routes import router as discovery_router
 app.include_router(discovery_router, prefix="/api/v1")
 
-# Include Campaigns routes
-from app.api.campaigns_routes import router as campaigns_router
+# Include Campaigns routes - WORKING VERSION (No auth until dependency issue resolved)
+from app.api.campaigns_routes_final import router as campaigns_router
 app.include_router(campaigns_router, prefix="/api/v1")
 
 # Include Health and Metrics endpoints
@@ -216,9 +216,9 @@ app.include_router(team_management_router, prefix="/api/v1")
 # Include Stripe Subscription routes - Billing and subscription management
 app.include_router(stripe_router, prefix="/api/v1")
 
-# Include Comprehensive Admin Routes - TEMPORARILY DISABLED
-# from app.api.admin import admin_router
-# app.include_router(admin_router, prefix="/api")
+# Include Admin Proposals Routes - SECURITY ENABLED
+from app.api.admin_secure.proposals_routes import router as admin_proposals_router
+app.include_router(admin_proposals_router, prefix="/api")
 
 # TEMPORARY FIX: Add credit routes with double prefix to fix frontend calling wrong URL
 # This should be removed once frontend is updated to use correct /api/v1/credits/* paths
