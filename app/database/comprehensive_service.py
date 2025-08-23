@@ -1652,7 +1652,7 @@ class ComprehensiveDataService:
                     "profile_pic_url_hd": profile.profile_pic_url_hd,
                     "external_url": profile.external_url,
                     "engagement_rate": engagement_metrics["overall_engagement_rate"],
-                    "business_category_name": profile.business_category_name,
+                    "business_category_name": profile.category or profile.instagram_business_category or '',
                     "avg_likes": engagement_metrics["avg_likes"],
                     "avg_comments": engagement_metrics["avg_comments"],
                     "influence_score": profile.influence_score or 0,
