@@ -24,6 +24,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/lists", tags=["My Lists"])
 
 # =============================================================================
+# LIST TEMPLATES ENDPOINTS
+# =============================================================================
+
+@router.get("/templates")
+async def get_list_templates(
+    current_user: UserInDB = Depends(get_current_active_user)
+):
+    """Get available list templates"""
+    # Return empty array for now - templates feature not yet implemented
+    return []
+
+# =============================================================================
 # LISTS MANAGEMENT ENDPOINTS
 # =============================================================================
 
