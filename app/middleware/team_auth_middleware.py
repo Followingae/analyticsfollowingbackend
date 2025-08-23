@@ -7,8 +7,8 @@ from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import HTTPException, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
-from datetime import date, datetime
+from sqlalchemy import select, and_, join
+from datetime import date, datetime, timezone
 
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
@@ -34,7 +34,8 @@ class TeamContext:
         monthly_limits: Dict[str, int],
         current_usage: Dict[str, int],
         user_id: UUID,
-        user_permissions: Dict[str, bool]
+        user_permissions: Dict[str, bool],
+        subscription_expires_at: Optional[datetime] = None
     ):
         self.team_id = team_id
         self.team_name = team_name
@@ -45,8 +46,20 @@ class TeamContext:
         self.current_usage = current_usage
         self.user_id = user_id
         self.user_permissions = user_permissions
+        self.subscription_expires_at = subscription_expires_at
     
     def to_dict(self) -> Dict[str, Any]:
+        # Calculate billing cycle (assume monthly billing starting from 1st of current month)
+        from datetime import date
+        current_date = date.today()
+        billing_start = current_date.replace(day=1)
+        
+        # Calculate next month's start date for billing end
+        if current_date.month == 12:
+            billing_end = date(current_date.year + 1, 1, 1)
+        else:
+            billing_end = date(current_date.year, current_date.month + 1, 1)
+        
         return {
             "team_id": str(self.team_id),
             "team_name": self.team_name,
@@ -55,8 +68,10 @@ class TeamContext:
             "subscription_status": self.subscription_status,
             "monthly_limits": self.monthly_limits,
             "current_usage": self.current_usage,
-            "user_id": str(self.user_id),
             "user_permissions": self.user_permissions,
+            "subscription_expires_at": self.subscription_expires_at,
+            "billing_cycle_start": billing_start,
+            "billing_cycle_end": billing_end,
             "remaining_capacity": {
                 "profiles": max(0, self.monthly_limits.get("profiles", 0) - self.current_usage.get("profiles", 0)),
                 "emails": max(0, self.monthly_limits.get("emails", 0) - self.current_usage.get("emails", 0)),
@@ -107,7 +122,7 @@ async def get_team_context(
             Team.posts_used_this_month,
             Team.subscription_expires_at
         ).select_from(
-            TeamMember.join(Team, TeamMember.team_id == Team.id)
+            join(TeamMember, Team, TeamMember.team_id == Team.id)
         ).where(
             and_(
                 TeamMember.user_id == user_id,
@@ -126,7 +141,7 @@ async def get_team_context(
             raise TeamAuthenticationError(f"Team subscription is {team_data.subscription_status}")
         
         # Check subscription expiration
-        if team_data.subscription_expires_at and team_data.subscription_expires_at < datetime.now():
+        if team_data.subscription_expires_at and team_data.subscription_expires_at < datetime.now(timezone.utc):
             raise TeamAuthenticationError("Team subscription has expired")
         
         # Build team context
@@ -147,7 +162,8 @@ async def get_team_context(
                 "posts": team_data.posts_used_this_month
             },
             user_id=user_id,
-            user_permissions=team_data.permissions or {}
+            user_permissions=team_data.permissions or {},
+            subscription_expires_at=team_data.subscription_expires_at
         )
         
         logger.debug(f"Team context loaded for user {user_id}: {team_context.team_name} ({team_context.subscription_tier})")

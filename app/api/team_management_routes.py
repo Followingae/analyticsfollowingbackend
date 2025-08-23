@@ -4,7 +4,7 @@ Handles team member management, invitations, and role-based access
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Query, Path, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, func, delete, update
+from sqlalchemy import select, and_, or_, func, delete, update, join
 from typing import Optional, List, Dict, Any
 from uuid import UUID, uuid4
 from datetime import datetime, timezone, timedelta
@@ -58,7 +58,7 @@ async def get_team_members(
             User.email.label("user_email"),
             User.full_name.label("user_name")
         ).select_from(
-            TeamMember.join(User, TeamMember.user_id == User.id)
+            join(TeamMember, User, TeamMember.user_id == User.id)
         ).where(
             and_(
                 TeamMember.team_id == team_context.team_id,

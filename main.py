@@ -194,7 +194,7 @@ app.include_router(discovery_router, prefix="/api/v1")
 
 # Include Campaigns routes
 from app.api.campaigns_routes import router as campaigns_router
-app.include_router(campaigns_router, prefix="/api")
+app.include_router(campaigns_router, prefix="/api/v1")
 
 # Include Health and Metrics endpoints
 from app.api.endpoints.health import router as health_router

@@ -40,7 +40,7 @@ class CreditPackage(CreditPackageBase):
     updated_at: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # =============================================================================
@@ -80,7 +80,7 @@ class CreditWallet(CreditWalletBase):
     updated_at: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class CreditWalletSummary(BaseModel):
@@ -130,7 +130,7 @@ class CreditPricingRule(CreditPricingRuleBase):
     updated_at: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # =============================================================================
@@ -175,7 +175,7 @@ class CreditTransaction(CreditTransactionBase):
     created_at: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class CreditTransactionSummary(BaseModel):
@@ -210,7 +210,7 @@ class UnlockedInfluencer(UnlockedInfluencerBase):
     transaction_id: Optional[int] = None
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # =============================================================================
@@ -241,7 +241,7 @@ class CreditUsageTracking(CreditUsageTrackingBase):
     last_updated: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # =============================================================================
@@ -289,7 +289,7 @@ class CreditTopUpOrder(CreditTopUpOrderBase):
     updated_at: datetime
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 # =============================================================================
@@ -335,7 +335,7 @@ class CreditDashboard(BaseModel):
     unlocked_influencers_count: int
     
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class MonthlyUsageSummary(BaseModel):
@@ -387,4 +387,4 @@ class TotalPlanCredits(BaseModel):
     current_balance: int = Field(..., description="Current spendable balance")
     
     class Config:
-        orm_mode = True
+        from_attributes = True

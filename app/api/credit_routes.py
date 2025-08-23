@@ -121,9 +121,9 @@ async def get_credit_dashboard(
         dashboard = CreditDashboard(
             wallet=wallet_summary,
             recent_transactions=recent_transactions,
-            monthly_usage=monthly_usage.dict(),
-            pricing_rules=pricing_rules,
-            unlocked_influencers_count=unlocked_count
+            monthly_usage=monthly_usage.dict() if monthly_usage else {},
+            pricing_rules=pricing_rules or [],
+            unlocked_influencers_count=unlocked_count or 0
         )
         
         return dashboard
@@ -235,6 +235,10 @@ async def get_monthly_usage(
         usage_summary = await credit_transaction_service.get_monthly_usage_summary(
             user_id, target_month
         )
+        
+        if not usage_summary:
+            # Return empty usage summary if none found
+            return {"user_id": str(user_id), "month": str(target_month or date.today().replace(day=1)), "actions": []}
         
         return usage_summary
         
@@ -380,6 +384,11 @@ async def get_allowance_status(
                 raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM")
         
         status = await credit_pricing_service.get_user_allowance_status(user_id, target_month)
+        
+        if not status:
+            # Return empty allowance status if none found
+            return {"user_id": str(user_id), "month": str(target_month or date.today().replace(day=1)), "allowances": []}
+        
         return status
         
     except HTTPException:
