@@ -125,7 +125,7 @@ async def get_discovery_page(
 # ============================================================================
 
 @router.post("/unlock", response_model=ProfileUnlockApiResponse)
-@requires_credits("profile_analysis", credits_required=25)
+@requires_credits("profile_analysis", credits_required=25, check_unlock_status=True, return_detailed_response=True)
 async def unlock_profile(
     unlock_request: ProfileUnlockRequest,
     current_user: UserInDB = Depends(get_current_active_user)

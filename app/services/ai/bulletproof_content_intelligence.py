@@ -47,10 +47,10 @@ class BulletproofContentIntelligence:
                 return_exceptions=True
             )
             
-            # Check initialization results
-            sentiment_ok = init_results[0] is True
-            language_ok = init_results[1] is True
-            category_ok = init_results[2] is True
+            # Check initialization results (None = success, Exception = failure)
+            sentiment_ok = init_results[0] is None
+            language_ok = init_results[1] is None
+            category_ok = init_results[2] is None
             
             self.components_health = {
                 "sentiment_analyzer": {"initialized": sentiment_ok, "error": None if sentiment_ok else str(init_results[0])},

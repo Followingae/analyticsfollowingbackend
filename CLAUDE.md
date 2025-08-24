@@ -18,8 +18,7 @@ Instagram analytics platform backend built with FastAPI, providing comprehensive
 ## Current Database Schema Status
 **✅ PRODUCTION READY & SECURITY HARDENED**: Database schema optimized with 80+ performance indexes, comprehensive AI integration, and enterprise-grade security (RLS enabled on all tables)
 
-**Total Tables: 62** (Updated August 2025)
-**API Endpoints: 128** (Complete documentation August 22, 2025)
+**Total Tables: 62+ | API Endpoints: 128**
 
 ### AUTH SCHEMA (Supabase Authentication)
 ```
@@ -41,98 +40,19 @@ auth.sso_domains - Domain-based SSO mapping
 auth.schema_migrations - Schema version tracking
 ```
 
-### PUBLIC SCHEMA (Application Data - 62 Tables)
+### PUBLIC SCHEMA (Application Data)
 
-#### Core Instagram Analytics (7 Tables)
-```
-- profiles - Instagram profile data and analytics (+ AI insights)
-- posts - Individual post content and metrics (+ AI analysis)
-- audience_demographics - Profile audience analysis
-- creator_metadata - Enhanced profile analytics
-- comment_sentiment - Post comment sentiment analysis
-- mentions - Profile mention tracking
-- related_profiles - Similar profile suggestions
-```
-
-#### User Management & Authentication (8 Tables)
-```
-- users - Application user data and preferences
-- auth_users - Bridge to Supabase auth system
-- user_profiles - Extended user profile information
-- user_profile_access - 30-day profile access tracking
-- user_favorites - User saved/favorited profiles
-- user_searches - Search activity tracking
-- search_history - Additional search history
-- user_avatars - User profile avatar management
-```
-
-#### Credits & Monetization System (7 Tables)
-```
-- credit_packages - Subscription tiers and credit allowances
-- credit_wallets - User wallets with balance and billing cycle management
-- credit_pricing_rules - Configurable pricing for platform actions
-- credit_transactions - Complete audit trail of credit movements
-- credit_usage_tracking - Monthly usage analytics and reporting
-- credit_top_up_orders - Credit purchase orders and payment processing
-- unlocked_influencers - Permanently unlocked influencer tracking
-```
-
-#### Campaign Management System (13 Tables)
-```
-- campaigns - User campaign creation and tracking
-- campaign_posts - Posts associated with campaigns
-- campaign_profiles - Profiles tracked in campaigns
-- campaign_activity_log - Campaign activity and change tracking
-- campaign_budget_tracking - Campaign budget management and spending
-- campaign_collaborators - Multi-user campaign collaboration
-- campaign_deliverables - Campaign milestone and deliverable tracking
-- campaign_milestones - Project milestone management
-- campaign_performance_metrics - Campaign ROI and performance analytics
-```
-
-#### Advanced Features & Management (27 Tables)
-```
-User Lists & Organization:
-- user_lists - Custom user-created lists
-- user_list_items - Items within user lists
-- list_activity_logs - List modification history
-- list_collaborations - Shared list management
-- list_export_jobs - List data export functionality
-- list_performance_metrics - List performance analytics
-- list_templates - Predefined list templates
-
-Discovery & Search:
-- discovery_analytics - Discovery feature usage analytics
-- discovery_filters - Saved discovery search filters
-- discovery_sessions - Discovery session tracking
-- unlocked_profiles - User-unlocked profile access
-
-Proposal System (Brand Partnerships):
-- brand_proposals - User-created partnership proposals
-- admin_brand_proposals - Admin-managed brand proposals
-- proposal_analytics - Proposal performance metrics
-- proposal_applications - Proposal application tracking
-- proposal_collaborations - Multi-party proposal collaboration
-- proposal_communications - Proposal messaging system
-- proposal_deliverables - Proposal milestone tracking
-- proposal_invitations - Proposal invitation management
-- proposal_templates - Reusable proposal templates
-- proposal_versions - Proposal version control
-
-AI & Background Processing:
-- ai_analysis_jobs - AI processing job management
-- ai_analysis_job_logs - AI processing detailed logging
-
-Admin & System Management:
-- admin_users - Administrative user management
-- admin_user_actions - Admin action audit trail
-- admin_notifications - System notification management
-- feature_flags - Feature toggle management
-- system_analytics - System-wide analytics
-- system_audit_logs - Comprehensive system audit trail
-- system_configurations - Dynamic system configuration
-- system_maintenance_jobs - System maintenance task tracking
-```
+#### Core Systems
+- **Instagram Analytics** (7 tables): profiles, posts, audience_demographics, creator_metadata, comment_sentiment, mentions, related_profiles
+- **User Management** (8 tables): users, auth_users, user_profiles, user_profile_access, user_favorites, user_searches, search_history, user_avatars
+- **Credits & Monetization** (7 tables): credit_packages, credit_wallets, credit_pricing_rules, credit_transactions, credit_usage_tracking, credit_top_up_orders, unlocked_influencers
+- **Campaign Management** (9 tables): campaigns, campaign_posts, campaign_profiles, campaign_activity_log, campaign_budget_tracking, campaign_collaborators, campaign_deliverables, campaign_milestones, campaign_performance_metrics
+- **Team Management** (7 tables): teams, team_members, team_invitations, email_unlocks, monthly_usage_tracking, topup_orders, proposal_access_grants
+- **User Lists & Organization** (7 tables): user_lists, user_list_items, list_activity_logs, list_collaborations, list_export_jobs, list_performance_metrics, list_templates
+- **Discovery & Search** (4 tables): discovery_analytics, discovery_filters, discovery_sessions, unlocked_profiles
+- **Proposal System** (10 tables): brand_proposals, admin_brand_proposals, proposal_analytics, proposal_applications, proposal_collaborations, proposal_communications, proposal_deliverables, proposal_invitations, proposal_templates, proposal_versions
+- **AI Processing** (2 tables): ai_analysis_jobs, ai_analysis_job_logs
+- **Admin & System** (8 tables): admin_users, admin_user_actions, admin_notifications, feature_flags, system_analytics, system_audit_logs, system_configurations, system_maintenance_jobs
 
 ### Key Table Structures
 
@@ -259,17 +179,8 @@ brand_proposals.id → proposal_applications.proposal_id
 brand_proposals.id → proposal_communications.proposal_id
 ```
 
-### Critical Schema Fixes Applied (August 2025)
-```
-✅ Fixed schema mismatches between application models and database
-✅ Resolved missing foreign key constraints
-✅ Added comprehensive RLS policies on all 62 tables
-✅ Optimized all database queries with proper indexing
-✅ Integrated AI analysis fields directly into core tables
-✅ Added complete credit system with transaction tracking
-✅ Implemented comprehensive proposal and campaign management
-✅ Enhanced security with proper user data isolation
-```
+### Schema Status
+✅ Production ready with comprehensive RLS policies, optimized queries, AI integration, and complete audit trails
 
 ## Technology Stack
 
@@ -290,13 +201,12 @@ brand_proposals.id → proposal_communications.proposal_id
 - **Model Management**: Singleton pattern with global model caching
 - **Processing**: Background analysis with Celery workers
 
-### Frontend Technologies
-- **Core Framework**: Next.js 15.4.4 with React 19.1.0 and TypeScript 5
-- **UI Components**: shadcn/ui (new-york style) + Radix UI + Lucide React
-- **Styling**: Tailwind CSS v4 + CSS Variables + next-themes
-- **State Management**: TanStack Query v5 + Zod validation
-- **Visualization**: Recharts + Chart.js + ApexCharts
-- **Interactive**: DND Kit + TanStack Table v8 + Sonner notifications
+### Frontend Stack
+- **Framework**: Next.js 15.4.4 + React 19.1.0 + TypeScript 5
+- **UI**: shadcn/ui + Radix UI + Tailwind CSS v4
+- **State**: TanStack Query v5 + Zod validation
+- **Charts**: Recharts + Chart.js + ApexCharts
+- **Interactive**: DND Kit + TanStack Table v8
 
 ## 🏗️ System Architecture
 
@@ -360,26 +270,10 @@ GET /api/streaming/metrics
 ## 🧠 AI Content Intelligence System
 
 ### AI Models & Performance
-```
-Sentiment Analysis:
-├── Model: cardiffnlp/twitter-roberta-base-sentiment-latest
-├── Accuracy: ~90% on Instagram content
-├── Processing: 3 seconds per post (batched for efficiency)
-└── Output: positive/negative/neutral + confidence scores
-
-Content Classification:
-├── Model: facebook/bart-large-mnli (zero-shot)
-├── Categories: 20+ (Fashion, Food, Travel, Tech, etc.)
-├── Accuracy: ~85% for major categories
-├── Method: Hybrid (AI + keyword matching)
-└── Fallback: Rule-based classification
-
-Language Detection:
-├── Model: papluca/xlm-roberta-base-language-detection
-├── Languages: 20+ (en, ar, fr, de, es, etc.)
-├── Output: ISO language codes + confidence
-└── Processing: Real-time with caching
-```
+- **Sentiment Analysis**: cardiffnlp/twitter-roberta-base-sentiment-latest (~90% accuracy)
+- **Content Classification**: facebook/bart-large-mnli (85% accuracy, 20+ categories)
+- **Language Detection**: papluca/xlm-roberta-base-language-detection (20+ languages)
+- **Processing**: Background analysis with Celery workers, 3-5 seconds per post
 
 ### AI Database Schema
 ```sql
@@ -477,39 +371,15 @@ System Operations:
 ## 📊 Monitoring & Observability
 
 ### System Health Dashboard
-```
-Real-time Monitoring:
-├── Overall Health Score (0-100)
-├── Service Component Status (7 services)
-├── Performance Metrics (response times, success rates)
-├── Resource Usage (CPU, memory, connections)
-├── AI Processing Status (queue depth, success rates)
-└── Cache Performance (hit rates, utilization)
-
-Alert Thresholds:
-├── Response time > 5 seconds (Critical)
-├── Error rate > 5% (Critical)
-├── System resources > 85% (Warning)
-├── AI processing failures > 10% (Warning)
-└── Cache hit rate < 80% (Monitor)
-```
+- **Real-time Monitoring**: Health score, service status, performance metrics, resource usage
+- **Alert Thresholds**: Response time >5s (Critical), Error rate >5% (Critical), Resources >85% (Warning)
+- **Proactive Recovery**: Auto-recovery actions with progressive testing
 
 ### Performance Benchmarks
-```
-Response Times:
-├── Profile Search (Cached): <100ms
-├── Profile Search (Fresh): <2 seconds
-├── AI Analysis: 3-5 seconds per post (background)
-├── System Health Check: <50ms
-└── Streaming First Chunk: <200ms
-
-Scalability:
-├── Concurrent Users: 1000+
-├── Requests per Second: 500+
-├── Cache Hit Rate: >90%
-├── System Uptime: 99.9%
-└── AI Processing: 1200 posts/hour
-```
+- **Response Times**: <100ms (cached), <2s (fresh), <50ms (health check)
+- **Scalability**: 1000+ concurrent users, 500+ RPS, >90% cache hit rate
+- **Uptime**: 99.9% with comprehensive monitoring and auto-recovery
+- **AI Processing**: 1200 posts/hour background processing
 
 ## 🔐 Security Implementation
 
@@ -620,38 +490,20 @@ The Creator Search System delivers:
 - ✅ **Production-Ready Security** with complete multi-tenant isolation
 - ✅ **Enterprise Security Compliance** with comprehensive RLS policies and optimized performance
 
-## Current Implementation Status
-**✅ BULLETPROOF SYSTEM COMPLETE + SECURITY HARDENED**: All components implemented and production-ready
-- **Phase 1 Complete**: AI system fixes and optimization
-- **Phase 2 Complete**: Performance optimization with caching and database indexes
-- **Phase 3 Complete**: Comprehensive error handling and resilience patterns
-- **Phase 4 Complete**: Real-time monitoring and alerting system
-- **Phase 5 Complete**: Async processing and streaming responses
-- **Phase 6 Complete**: Security hardening and Supabase advisor compliance (January 2025)
+## 🎆 System Status
+**✅ PRODUCTION READY**: Enterprise-grade Instagram analytics platform with bulletproof reliability, AI intelligence, comprehensive security, and B2B SaaS features fully implemented.
 
-## 🔒 Security Status (Updated January 2025)
-**✅ ENTERPRISE SECURITY COMPLETE**: All Supabase Advisor warnings resolved
-- **Critical Security Fixes**:
-  - ✅ RLS enabled on ai_analysis_job_logs and ai_analysis_jobs tables
-  - ✅ Comprehensive RLS policies for all tables with user access control
-  - ✅ Function security hardening with SECURITY DEFINER and search_path protection
-- **Performance Optimizations**:
-  - ✅ All RLS policies optimized using (SELECT auth.<function>()) pattern for better performance
-  - ✅ Duplicate indexes removed (7 duplicates cleaned up)
-  - ✅ Missing foreign key index added for search_history table
-  - ✅ Index analysis completed - confirmed all critical indexes are properly utilized
-- **Remaining Manual Steps**:
-  - ⚠️ Auth OTP expiry configuration (reduce to ≤1 hour via Supabase dashboard)
-  - ⚠️ Enable leaked password protection (HaveIBeenPwned integration via dashboard)
-
-The system is now ready for high-traffic production deployment with enterprise-grade reliability, performance, and security.
+### Security & Compliance
+- ✅ Comprehensive RLS policies on all tables with optimized performance
+- ✅ Function security hardening with SECURITY DEFINER protection
+- ✅ Index optimization with 7 duplicates removed and missing indexes added
+- ⚠️ Manual dashboard steps: Auth OTP expiry (≤1 hour) and leaked password protection
 
 ---
 
-# 💳 COMPREHENSIVE CREDITS SYSTEM - PRODUCTION READY (August 2025)
+# 💳 Credits System
 
-## System Status
-**✅ COMPLETE IMPLEMENTATION**: Enterprise-grade credits-based monetization layer with bulletproof reliability
+**✅ COMPLETE IMPLEMENTATION**: Enterprise-grade credits-based monetization with comprehensive tracking
 
 ### Core Capabilities
 - **Credit Wallets**: Individual user wallets with balance management and billing cycles
@@ -786,111 +638,16 @@ Usage Analytics Cache: 1 hour TTL
 ```
 
 ### Database Performance
-- **25+ Strategic Indexes**: Optimized for all credit operations
-- **Database Functions**: Safe balance updates with row-level locking
-- **Efficient Queries**: Sub-100ms response times for all operations
-- **Bulk Operations**: Optimized for high-volume transaction processing
+- **25+ Strategic Indexes**: Optimized for all credit operations with sub-100ms queries
+- **Safe Operations**: Database functions with row-level locking and bulk processing
 
 ## Security & Reliability
 
-### Enterprise Security
-- **Row Level Security**: All credit tables protected with RLS policies
-- **Multi-tenant Isolation**: Users can only access their own credit data
-- **Audit Trail**: Complete transaction history for compliance
-- **Input Validation**: Comprehensive validation on all credit operations
+### Security & Reliability
+- **Enterprise Security**: RLS policies, multi-tenant isolation, complete audit trails
+- **Bulletproof Operations**: Atomic transactions, double-spending prevention, graceful error handling
 
-### Bulletproof Reliability
-- **Atomic Transactions**: Database-level transaction safety
-- **Double-spending Prevention**: Row-level locking prevents race conditions
-- **Error Handling**: Graceful degradation with detailed error messages
-- **Cache Consistency**: Intelligent cache invalidation on updates
-
-# 💳 FINAL SUBSCRIPTION TIERS - B2B SaaS PLATFORM (August 2025)
-
-## Updated Subscription Structure:
-
-### **FREE TIER** 
-- **Price**: Free
-- **Team Members**: 1 (individual only)
-- **Profile Analysis**: 5 profiles/month
-- **Email Unlocks**: Not available
-- **Post Analytics**: Not included
-- **Campaigns**: Not available
-- **Lists**: Not available
-- **Proposals**: 🔒 Locked (superadmin unlock only)
-- **Export**: Not available
-- **Support**: Standard support
-- **Topups**: Not available
-
-### **STANDARD TIER - $199/month**
-- **Price**: $199 per month
-- **Team Members**: Up to 2 team members (full professional industry-standard team management)
-- **Profile Analysis**: 500 profiles/month
-- **Email Unlocks**: 250 emails (if available from profiles)
-- **Post Analytics**: 125 post analyses/month
-- **Campaigns**: ✅ Create and manage campaigns
-- **Lists**: ✅ Create and manage lists
-- **Proposals**: 🔒 Locked (superadmin unlock only - for agency clients)
-- **Export**: ✅ Export all unlocked creators, posts, and campaigns
-- **Support**: ✅ Priority Support
-- **Topups**: ✅ Available at standard rates
-
-### **PREMIUM TIER - $499/month**
-- **Price**: $499 per month  
-- **Team Members**: Up to 5 team members (full professional industry-standard team management)
-- **Profile Analysis**: 2,000 profiles/month
-- **Email Unlocks**: 800 emails (if available from profiles)
-- **Post Analytics**: 300 post analyses/month
-- **Campaigns**: ✅ Create and manage campaigns
-- **Lists**: ✅ Create and manage lists
-- **Proposals**: 🔒 Locked (superadmin unlock only - for agency clients)
-- **Export**: ✅ Export all unlocked creators, posts, and campaigns
-- **Support**: ✅ Priority Support
-- **Topups**: ✅ Available at 20% discount from Standard rates
-
-## Key Features:
-
-### 🏢 **Team Management System** (Industry Standard)
-- **Professional team collaboration capabilities**
-- **Role-based permissions within teams (Owner, Admin, Manager, Member)**
-- **Shared access to unlocked profiles and campaigns**
-- **Team member invitation and management**
-- **Usage tracking per team member**
-
-### 📧 **Email Unlock System**
-- **Track email unlocks separately from profile analysis**
-- **Email availability depends on profile data quality**
-- **Monthly limits per subscription tier**
-- **Email unlock history and tracking**
-
-### 💰 **Topup System**
-- **Standard Tier**: Standard topup rates
-- **Premium Tier**: 20% discount on all topups
-- **Flexible topup packages for additional profile analyses, emails, and post analytics**
-
-### 🔒 **Proposals System**
-- **Locked by default for all subscription tiers**
-- **Only superadmin can unlock proposals for specific teams**
-- **Designed for agency clients who work directly with your team**
-
-### 📤 **Universal Export**
-- **All paid tiers get export capabilities**
-- **Export unlocked creators, posts, and campaign data**
-- **No tier-based export restrictions**
-- **Same comprehensive analytics delivered to all subscription tiers**
-
-## Monthly Limit Actions:
-
-| Action | Standard Tier | Premium Tier | Available To |
-|--------|---------------|--------------|-------------|
-| Profile Analysis | 500/month | 2,000/month | Standard, Premium |
-| Email Unlock | 250/month | 800/month | Standard, Premium |
-| Post Analytics | 125/month | 300/month | Standard, Premium |
-| Additional Capacity (Topup) | Standard rate | 20% discount | Standard, Premium |
-| Export | Unlimited | Unlimited | Standard, Premium |
-| Team Members | Up to 2 | Up to 5 | Standard, Premium |
-
-## Integration Status
+### Integration Status
 
 ### ✅ Complete Integrations
 - **Database Layer**: All tables created with proper relationships
@@ -907,151 +664,52 @@ Usage Analytics Cache: 1 hour TTL
 
 ## Monitoring & Analytics
 
-### Real-time Metrics
-- **Credit System Health**: All operations monitored and logged
-- **Performance Metrics**: Sub-100ms response times maintained
-- **Usage Analytics**: Comprehensive tracking of all credit actions
-- **Error Monitoring**: Failed transactions and system issues tracked
-
-### Business Analytics
-- **Revenue Tracking**: Subscription revenue and topup conversion rates
-- **User Behavior**: Team usage patterns and feature adoption
-- **Pricing Optimization**: Data-driven tier and topup pricing
-- **Team Utilization**: Team collaboration and member activity analysis
+### Analytics & Monitoring
+- **Real-time Metrics**: Credit health, performance, usage tracking, error monitoring
+- **Business Intelligence**: Revenue tracking, user behavior analysis, pricing optimization
 
 ## Development & Deployment
 
-### Code Quality
-- **Type Hints**: Comprehensive typing throughout codebase
-- **Error Handling**: Bulletproof exception handling with logging
-- **Documentation**: Detailed docstrings and API documentation
-- **Testing Ready**: Service layer designed for comprehensive unit testing
-
-### Production Readiness
-- **Scalability**: Handles 1000+ concurrent team operations
-- **Performance**: Sub-second response times for all platform actions
-- **Reliability**: Zero data loss with atomic transaction processing
-- **Security**: Enterprise-grade security with complete audit trails and team data isolation
+### Production Quality
+- **Code Standards**: Comprehensive typing, bulletproof error handling, detailed documentation
+- **Enterprise Scale**: 1000+ concurrent operations, sub-second responses, zero data loss
 
 ---
 
-# Recent Security Hardening (January 2025)
+---
 
-## Migration Files Created
-- **`fix_supabase_advisor_warnings.sql`** - ✅ **APPLIED**: Primary security and performance fixes
-- **`unused_indexes_cleanup.sql`** - 📋 **DOCUMENTATION ONLY**: Index analysis (DO NOT RUN)
-- **`SUPABASE_AUTH_CONFIG.md`** - 📋 **MANUAL STEPS**: Dashboard configuration guide
+# 📅 System Updates & Status
 
-## Security Fixes Applied
-1. **RLS Security**: Enabled Row Level Security on all missing tables
-2. **Function Security**: Added SECURITY DEFINER and search_path protection
-3. **Performance**: Optimized all RLS policies with (SELECT auth.<function>()) pattern
-4. **Index Cleanup**: Removed 7 duplicate indexes, added missing foreign key index
-5. **Analysis**: Documented critical indexes that must be preserved
+## Recent Security Hardening (January 2025)
+- ✅ **RLS Security**: Enabled on all tables with optimized policies
+- ✅ **Performance**: Removed 7 duplicate indexes, added missing foreign key indexes
+- ⚠️ **Manual Steps**: Auth OTP expiry configuration and leaked password protection
 
-## Supabase Advisor Status
-- **Errors**: 0 (was 2) - ✅ **RESOLVED**
-- **Warnings**: 2 remaining (auth configuration) - ⚠️ **MANUAL DASHBOARD STEPS REQUIRED**
-- **Info**: All performance issues addressed - ✅ **OPTIMIZED**
+## Critical System Fixes (August 2025)
+- ✅ **User Management**: Fixed authentication mismatches and credit wallet synchronization
+- ✅ **API Documentation**: Generated complete 128-endpoint reference guide
+- ✅ **Route Structure**: Clarified endpoint prefixes (`/auth/`, `/credits/`, `/instagram/`, `/settings/`)
+
+## Current User Accounts
+- **Brand User**: `client@analyticsfollowing.com` (Premium, 5K credits)
+- **Admin User**: `zain@following.ae` (Admin, 100K credits, Password: `Following0925_25`)
 
 ---
 
-# August 22, 2025 - Critical System Updates
-
-## 🚨 Critical User Management Issues Resolved
-
-### Issue Identified
-- **Frontend 404 Errors**: `/api/v1/balance` and `/api/v1/dashboard` returning 404
-- **User Authentication Mismatch**: Zain's account missing `supabase_user_id`
-- **Credit Wallet Inconsistency**: Credit amounts not synchronized between tables
-- **Route Conflicts**: Duplicate dashboard endpoints causing routing issues
-
-### ✅ Fixes Implemented
-
-#### 1. User ID Synchronization
-- **Fixed Zain's Account**: Added missing `supabase_user_id` (`11107e3c-01e1-4f19-bdd9-d0e22b7c3288`)
-- **Verified Client Account**: Confirmed proper ID mapping (`99b1001b-69a0-4d75-9730-3177ba42c642`)
-- **Credit Wallet Sync**: Updated credit_wallets balance from 1,000 to 5,000 credits
-
-#### 2. API Endpoint Documentation
-- **Generated Complete API Reference**: All 128 endpoints documented
-- **Created Frontend Guide**: `FRONTEND_API_REFERENCE.md` with correct URLs
-- **Fixed Route Conflicts**: Identified overlapping `/dashboard` endpoints
-
-#### 3. System Verification
-- **Full End-to-End Testing**: All user relations verified
-- **Authentication Flow**: Login/logout working correctly
-- **Credit System**: Wallet balances synchronized
-- **Database Integrity**: All foreign key relationships validated
-
-## 📊 Current System Status (August 22, 2025)
-
-### ✅ User Accounts Status
-- **Brand User**: `client@analyticsfollowing.com`
-  - Role: `premium` | Tier: `professional` | Credits: `5,000`
-  - Status: `active` | Auth ID: `99b1001b-69a0-4d75-9730-3177ba42c642`
-  - Credit Wallet: ✅ SYNCED
-
-- **Admin User**: `zain@following.ae`
-  - Role: `admin` | Tier: `unlimited` | Credits: `100,000`
-  - Status: `active` | Auth ID: `11107e3c-01e1-4f19-bdd9-d0e22b7c3288`
-  - Password: `Following0925_25`
-
-### 🔧 Technical Fixes
-- **Role-Based Auth Middleware**: Updated to work with current database schema
-- **Import Errors**: Fixed `Users` vs `User` model naming conflicts
-- **Admin Routes**: Temporarily disabled until compatible with current schema
-- **Server Startup**: Successfully starting without errors
-
-## 📋 API Endpoints (128 Total)
-
-### ❌ Frontend Issues Found
-Frontend calling wrong URLs:
-- `/api/v1/balance` → Should be `/api/v1/credits/balance`
-- `/api/v1/dashboard` → Should be `/api/v1/auth/dashboard`
-
-### ✅ Correct Endpoint Structure
-- **Auth Routes**: `/api/v1/auth/` prefix
-- **Credit Routes**: `/api/v1/credits/` prefix  
-- **Instagram Routes**: `/api/v1/instagram/` prefix
-- **Settings Routes**: `/api/v1/settings/` prefix
-
-## 🎯 Next Steps for Frontend Team
-1. Update API calls to use correct prefixes (`/credits/`, `/auth/`)
-2. Reference `FRONTEND_API_REFERENCE.md` for all endpoint URLs
-3. Ensure JWT authentication headers on all requests
-4. Test credit balance and dashboard endpoints with correct paths
-
 ---
 
-# August 23, 2025 - B2B SaaS Transformation Complete
+# 🏢 B2B SaaS Platform Features
 
-## 🚀 Professional Team Management System Implemented
-
-### New B2B Features Added:
-1. **Industry-Standard Team Collaboration** - Professional team management with role-based permissions
-2. **Email Unlock Tracking** - Separate email unlock limits and tracking system  
-3. **Smart Topup System** - Premium tier gets 20% discount on all topups
-4. **Universal Export** - All paid tiers can export their unlocked data
-5. **Superadmin Proposal Control** - Proposals locked by default, superadmin unlock for agency clients
-
-### Database Schema Additions:
-- **`teams`** - Company/Organization level team management
-- **`team_members`** - Individual users within teams with role-based permissions
-- **`team_invitations`** - Team member invitation system with expiration
-- **`email_unlocks`** - Email unlock tracking separate from profile analysis
-- **`monthly_usage_tracking`** - Granular usage tracking per team member
-- **`topup_orders`** - Topup purchases with discount support
-- **`proposal_access_grants`** - Superadmin-controlled proposal access
-
-### Updated Subscription Structure:
+### Subscription Tiers
 - **Free**: 5 profiles/month (individual only)
 - **Standard ($199/month)**: 2 team members, 500 profiles, 250 emails, 125 posts
 - **Premium ($499/month)**: 5 team members, 2000 profiles, 800 emails, 300 posts, 20% topup discount
 
-**Key Achievement**: Platform now delivers identical comprehensive analytics to all users, with tiers differentiated only by capacity limits and team collaboration features.
+### Team Management System
+- Professional team collaboration with role-based permissions
+- Shared access to unlocked profiles and campaigns
+- Email unlock tracking separate from profile analysis
+- Smart topup system with Premium tier discount
+- Proposals locked by default (superadmin unlock for agency clients)
+- Universal export for all paid tiers
 
----
-
-# Complete System Documentation
-For comprehensive implementation details, see: [CREATOR_SEARCH_SYSTEM.md](./CREATOR_SEARCH_SYSTEM.md)

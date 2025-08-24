@@ -154,3 +154,90 @@ async def system_metrics(db: AsyncSession = Depends(get_db)):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get metrics: {str(e)}")
+
+
+@router.get("/database/schema-check", response_model=Dict[str, Any])
+async def database_schema_check(db: AsyncSession = Depends(get_db)):
+    """
+    TEMPORARY: Check database schema for missing columns and fix if needed
+    """
+    try:
+        results = {
+            "status": "checking",
+            "tables_checked": [],
+            "issues_found": [],
+            "fixes_applied": [],
+            "timestamp": int(time.time())
+        }
+        
+        # Check monthly_usage_tracking table structure
+        table_check = await db.execute(text("""
+            SELECT column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns 
+            WHERE table_name = 'monthly_usage_tracking' 
+            ORDER BY ordinal_position;
+        """))
+        columns = [dict(row._mapping) for row in table_check]
+        
+        results["tables_checked"].append({
+            "table": "monthly_usage_tracking",
+            "columns": columns
+        })
+        
+        # Check for missing timestamp columns
+        has_created_at = any(col['column_name'] == 'created_at' for col in columns)
+        has_updated_at = any(col['column_name'] == 'updated_at' for col in columns)
+        
+        if not has_created_at:
+            results["issues_found"].append("monthly_usage_tracking missing created_at column")
+            # Attempt to fix
+            try:
+                await db.execute(text("""
+                    ALTER TABLE monthly_usage_tracking 
+                    ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL;
+                """))
+                results["fixes_applied"].append("Added created_at column to monthly_usage_tracking")
+            except Exception as fix_error:
+                results["issues_found"].append(f"Failed to add created_at: {str(fix_error)}")
+        
+        if not has_updated_at:
+            results["issues_found"].append("monthly_usage_tracking missing updated_at column")
+            # Attempt to fix
+            try:
+                await db.execute(text("""
+                    ALTER TABLE monthly_usage_tracking 
+                    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL;
+                """))
+                results["fixes_applied"].append("Added updated_at column to monthly_usage_tracking")
+            except Exception as fix_error:
+                results["issues_found"].append(f"Failed to add updated_at: {str(fix_error)}")
+        
+        # Try to create trigger if columns were added
+        if results["fixes_applied"]:
+            try:
+                await db.execute(text("""
+                    CREATE OR REPLACE FUNCTION update_updated_at_column()
+                    RETURNS TRIGGER AS $$
+                    BEGIN
+                        NEW.updated_at = NOW();
+                        RETURN NEW;
+                    END;
+                    $$ language 'plpgsql';
+                    
+                    DROP TRIGGER IF EXISTS update_monthly_usage_tracking_updated_at ON monthly_usage_tracking;
+                    CREATE TRIGGER update_monthly_usage_tracking_updated_at
+                        BEFORE UPDATE ON monthly_usage_tracking
+                        FOR EACH ROW
+                        EXECUTE FUNCTION update_updated_at_column();
+                """))
+                results["fixes_applied"].append("Created updated_at trigger for monthly_usage_tracking")
+            except Exception as trigger_error:
+                results["issues_found"].append(f"Failed to create trigger: {str(trigger_error)}")
+        
+        await db.commit()
+        
+        results["status"] = "completed" if not results["issues_found"] or results["fixes_applied"] else "issues_found"
+        return results
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Schema check failed: {str(e)}")

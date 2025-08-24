@@ -696,6 +696,49 @@ class CreditWalletService:
         balance = await self.get_wallet_balance(user_id)
         logger.debug(f"Warmed cache for user {user_id}")
 
+    async def is_profile_unlocked(self, user_id: UUID, profile_identifier: str, identifier_type: str = "username") -> bool:
+        """
+        Check if a user has unlocked a specific profile
+        
+        Args:
+            user_id: User UUID
+            profile_identifier: Profile username or UUID
+            identifier_type: Either "username" or "profile_id"
+            
+        Returns:
+            True if profile is unlocked, False otherwise
+        """
+        try:
+            from app.database.unified_models import UnlockedProfile, Profile
+            from sqlalchemy import select, and_
+            
+            async with get_session() as session:
+                if identifier_type == "username":
+                    # Check by username (join with profiles table)
+                    query = select(UnlockedProfile).join(Profile).where(
+                        and_(
+                            UnlockedProfile.user_id == user_id,
+                            Profile.username == profile_identifier
+                        )
+                    )
+                else:
+                    # Check by profile_id directly  
+                    query = select(UnlockedProfile).where(
+                        and_(
+                            UnlockedProfile.user_id == user_id,
+                            UnlockedProfile.profile_id == UUID(str(profile_identifier))
+                        )
+                    )
+                
+                result = await session.execute(query)
+                unlock_record = result.scalar_one_or_none()
+                
+                return unlock_record is not None
+                
+        except Exception as e:
+            logger.error(f"Error checking if profile {profile_identifier} is unlocked for user {user_id}: {e}")
+            return False
+
 
 # Global service instance
 credit_wallet_service = CreditWalletService()
