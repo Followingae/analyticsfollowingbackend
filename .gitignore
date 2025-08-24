@@ -221,6 +221,12 @@ docker-compose.override.yml
 # Claude Code specific (optional)
 .claude/settings.local.jsonnul
 redis-server/
+
+# Database development files
+*.sql
+database_schema_audit.md
+*test*.py
+NUL
 redis-windows.zip
 *.exe
 *.dll
