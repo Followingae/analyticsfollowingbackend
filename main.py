@@ -13,6 +13,11 @@ import os
 # Suppress TensorFlow verbose startup messages
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+# Suppress PyTorch/Transformers deprecation warnings
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch")
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*encoder_attention_mask.*")
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.api.cleaned_routes import router
@@ -38,7 +43,7 @@ async def lifespan(app: FastAPI):
     try:
         print("Initializing database connection...")
         await init_database()
-        await create_tables()
+        # await create_tables()  # Temporary: Skip table creation during startup
         print("Connected to Supabase - Database ready")
     except Exception as e:
         print(f"CRITICAL: Database initialization failed: {e}")

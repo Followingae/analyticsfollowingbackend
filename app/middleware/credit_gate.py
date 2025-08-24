@@ -28,7 +28,9 @@ def requires_credits(
     action_type: str,
     credits_required: Optional[int] = None,
     create_wallet_if_missing: bool = True,
-    return_detailed_response: bool = False
+    return_detailed_response: bool = False,
+    check_unlock_status: bool = False,
+    unlock_key_param: str = "username"
 ):
     """
     Decorator to protect endpoints with credit requirements
@@ -38,11 +40,13 @@ def requires_credits(
         credits_required: Override default action cost
         create_wallet_if_missing: Auto-create wallet for new users
         return_detailed_response: Return detailed credit info in response
+        check_unlock_status: For profile actions, check if already unlocked (skips credit check)
+        unlock_key_param: Parameter name containing username/identifier for unlock check
     
     Usage:
-        @requires_credits("influencer_unlock", credits_required=25)
-        async def unlock_influencer(username: str, current_user = Depends(get_current_user)):
-            # Endpoint logic here
+        @requires_credits("profile_analysis", credits_required=25, check_unlock_status=True)
+        async def analyze_profile(username: str, current_user = Depends(get_current_user)):
+            # Endpoint logic here - will skip credit check if profile already unlocked
     """
     def decorator(endpoint_func: Callable) -> Callable:
         @wraps(endpoint_func)
@@ -61,6 +65,68 @@ def requires_credits(
                 )
             
             user_id = UUID(str(current_user.id))
+            
+            # CRITICAL OPTIMIZATION: Check if profile is already unlocked (skip credit check)
+            if check_unlock_status:
+                try:
+                    from app.database.connection import get_session
+                    from app.database.unified_models import UnlockedProfile, Profile
+                    from sqlalchemy import select, and_
+                    
+                    profile_identifier = None
+                    lookup_type = None
+                    
+                    # Handle different parameter types
+                    if unlock_key_param in kwargs:
+                        profile_identifier = kwargs.get(unlock_key_param)
+                        lookup_type = "username" if unlock_key_param == "username" else "profile_id"
+                    # Handle request body with profile_id
+                    elif "unlock_request" in kwargs and hasattr(kwargs["unlock_request"], "profile_id"):
+                        profile_identifier = kwargs["unlock_request"].profile_id
+                        lookup_type = "profile_id"
+                    
+                    if profile_identifier:
+                        async with get_session() as session:
+                            # Check if user has already unlocked this profile
+                            if lookup_type == "username":
+                                unlock_check_query = select(UnlockedProfile).join(Profile).where(
+                                    and_(
+                                        UnlockedProfile.user_id == user_id,
+                                        Profile.username == profile_identifier
+                                    )
+                                )
+                            else:  # profile_id
+                                unlock_check_query = select(UnlockedProfile).where(
+                                    and_(
+                                        UnlockedProfile.user_id == user_id,
+                                        UnlockedProfile.profile_id == profile_identifier
+                                    )
+                                )
+                                
+                            unlock_result = await session.execute(unlock_check_query)
+                            existing_unlock = unlock_result.scalar_one_or_none()
+                            
+                            if existing_unlock:
+                                logger.info(f"Profile {profile_identifier} ({lookup_type}) already unlocked for user {user_id}, skipping credit check")
+                                
+                                # Execute endpoint directly without credit validation
+                                result = await endpoint_func(*args, **kwargs)
+                                
+                                # Add unlock info to response if requested
+                                if return_detailed_response and isinstance(result, dict):
+                                    result["credit_info"] = {
+                                        "credits_spent": 0,
+                                        "used_free_allowance": False,
+                                        "already_unlocked": True,
+                                        "unlock_date": existing_unlock.unlocked_at.isoformat(),
+                                        "reason": "Profile already unlocked"
+                                    }
+                                
+                                return result
+                                
+                except Exception as e:
+                    logger.warning(f"Failed to check unlock status for {unlock_key_param}={kwargs.get(unlock_key_param)}: {e}")
+                    # Continue with normal credit check if unlock check fails
             
             try:
                 # Get or create wallet

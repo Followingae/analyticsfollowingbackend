@@ -38,15 +38,10 @@ class AIBackgroundTaskManager:
         Returns:
             Task information including task_id
         """
-        # Development fallback when Celery is not available
+        # CRITICAL: Use synchronous AI processing when Celery is not available
         if not CELERY_AVAILABLE:
-            logger.error("Celery not available - AI background processing disabled")
-            return {
-                "success": False,
-                "error": "Background processing not available",
-                "message": f"AI analysis requires Celery worker. Use direct analysis endpoint: POST /api/v1/ai/analyze/direct/{profile_username}",
-                "recommendation": "Use direct AI analysis for immediate results"
-            }
+            logger.warning("Celery not available - using SYNCHRONOUS AI processing")
+            return self._run_synchronous_ai_analysis(profile_id, profile_username)
             
         try:
             # Check if analysis is already running for this profile
@@ -345,6 +340,137 @@ class AIBackgroundTaskManager:
                 
         except Exception as e:
             logger.error(f"Failed to cleanup old tasks: {e}")
+
+    def _run_synchronous_ai_analysis(self, profile_id: str, profile_username: str) -> Dict[str, Any]:
+        """
+        CRITICAL: Run AI analysis synchronously when Celery is not available
+        This ensures profiles are NEVER stored without AI data
+        """
+        import asyncio
+        from uuid import uuid4
+        
+        task_id = str(uuid4())
+        logger.info(f"SYNC AI: Starting synchronous AI analysis for {profile_username} (task: {task_id})")
+        
+        try:
+            # Import the async AI analysis function directly
+            from app.workers.ai_background_worker import _async_analyze_profile_posts
+            
+            # Run the AI analysis synchronously
+            result = asyncio.run(_async_analyze_profile_posts(profile_id, profile_username, task_id))
+            
+            logger.info(f"SYNC AI: Successfully completed AI analysis for {profile_username}")
+            return {
+                "success": True,
+                "task_id": task_id,
+                "status": "completed",
+                "profile_id": profile_id,
+                "profile_username": profile_username,
+                "processing_type": "synchronous",
+                "result": result
+            }
+            
+        except Exception as e:
+            logger.error(f"SYNC AI: Failed AI analysis for {profile_username}: {e}")
+            
+            # RETRY MECHANISM: Try alternative AI processing
+            try:
+                logger.info(f"SYNC AI: Attempting alternative AI processing for {profile_username}")
+                result = self._run_alternative_ai_analysis(profile_id, profile_username)
+                return result
+            except Exception as retry_e:
+                logger.error(f"SYNC AI: Alternative AI processing also failed for {profile_username}: {retry_e}")
+                
+                return {
+                    "success": False,
+                    "task_id": task_id,
+                    "error": str(e),
+                    "profile_id": profile_id,
+                    "profile_username": profile_username,
+                    "processing_type": "synchronous_failed",
+                    "retry_available": True
+                }
+
+    def _run_alternative_ai_analysis(self, profile_id: str, profile_username: str) -> Dict[str, Any]:
+        """
+        Alternative AI processing using direct AI manager
+        """
+        import asyncio
+        from uuid import uuid4
+        from datetime import datetime, timezone
+        from app.services.ai.ai_manager_singleton import ai_manager
+        from app.database.connection import get_session
+        from app.database.unified_models import Profile, Post
+        from sqlalchemy import select
+        
+        task_id = str(uuid4())
+        logger.info(f"ALT AI: Starting alternative AI analysis for {profile_username}")
+        
+        async def _run_alt_analysis():
+            async with get_session() as session:
+                # Get profile
+                profile_query = select(Profile).where(Profile.id == profile_id)
+                profile_result = await session.execute(profile_query)
+                profile = profile_result.scalar_one_or_none()
+                
+                if not profile:
+                    raise Exception(f"Profile {profile_id} not found")
+                
+                # Get posts
+                posts_query = select(Post).where(Post.profile_id == profile_id).limit(20)
+                posts_result = await session.execute(posts_query)
+                posts = posts_result.scalars().all()
+                
+                posts_analyzed = 0
+                
+                # Analyze each post
+                for post in posts:
+                    if post.caption:
+                        try:
+                            # Run AI analysis
+                            analysis = await ai_manager.analyze_content_comprehensive(post.caption)
+                            
+                            # Update post with AI results
+                            post.ai_content_category = analysis.get("category")
+                            post.ai_sentiment = analysis.get("sentiment")
+                            post.ai_sentiment_score = analysis.get("sentiment_score")
+                            post.ai_language_code = analysis.get("language")
+                            post.ai_analyzed_at = datetime.now(timezone.utc)
+                            
+                            posts_analyzed += 1
+                            
+                        except Exception as e:
+                            logger.warning(f"Failed to analyze post {post.id}: {e}")
+                
+                # Update profile AI summary
+                if posts_analyzed > 0:
+                    profile.ai_profile_analyzed_at = datetime.now(timezone.utc)
+                    profile.ai_primary_content_type = "general"  # Basic fallback
+                
+                await session.commit()
+                
+                return {
+                    "posts_analyzed": posts_analyzed,
+                    "profile_updated": True
+                }
+        
+        try:
+            result = asyncio.run(_run_alt_analysis())
+            logger.info(f"ALT AI: Successfully completed alternative AI analysis for {profile_username}")
+            
+            return {
+                "success": True,
+                "task_id": task_id,
+                "status": "completed",
+                "profile_id": profile_id,
+                "profile_username": profile_username,
+                "processing_type": "alternative_sync",
+                "result": result
+            }
+            
+        except Exception as e:
+            logger.error(f"ALT AI: Alternative analysis failed for {profile_username}: {e}")
+            raise
 
 # Global instance
 ai_background_task_manager = AIBackgroundTaskManager()

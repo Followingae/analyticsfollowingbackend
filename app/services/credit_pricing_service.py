@@ -42,8 +42,20 @@ class CreditPricingService:
         """Get all pricing rules with caching"""
         cache_key = f"{self.cache_prefix}:all_rules:{include_inactive}"
         
-        # Try cache first
-        cached_data = await cache_manager.redis_client.get(cache_key)
+        # Try cache first (with graceful Redis fallback)
+        cached_data = None
+        try:
+            if cache_manager.redis_client:
+                cached_data = await cache_manager.redis_client.get(cache_key)
+            else:
+                # Initialize cache manager if not already done
+                await cache_manager.initialize()
+                if cache_manager.redis_client:
+                    cached_data = await cache_manager.redis_client.get(cache_key)
+        except Exception as e:
+            logger.warning(f"Cache unavailable for all pricing rules: {e}")
+            cached_data = None
+            
         if cached_data:
             import json
             cached_rules = json.loads(cached_data)
@@ -77,14 +89,18 @@ class CreditPricingService:
                     for rule in rules
                 ]
                 
-                # Cache the results
-                import json
-                cache_data = [rule.dict() for rule in rule_models]
-                await cache_manager.redis_client.setex(
-                    cache_key, 
-                    self.rules_cache_ttl, 
-                    json.dumps(cache_data, default=str)
-                )
+                # Cache the results (with graceful Redis fallback)
+                try:
+                    if cache_manager.redis_client:
+                        import json
+                        cache_data = [rule.dict() for rule in rule_models]
+                        await cache_manager.redis_client.setex(
+                            cache_key, 
+                            self.rules_cache_ttl, 
+                            json.dumps(cache_data, default=str)
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to cache all pricing rules: {e}")
                 
                 return rule_models
                 
@@ -96,8 +112,20 @@ class CreditPricingService:
         """Get pricing rule for specific action type"""
         cache_key = f"{self.cache_prefix}:rule:{action_type}"
         
-        # Try cache first
-        cached_data = await cache_manager.redis_client.get(cache_key)
+        # Try cache first (with graceful Redis fallback)
+        cached_data = None
+        try:
+            if cache_manager.redis_client:
+                cached_data = await cache_manager.redis_client.get(cache_key)
+            else:
+                # Initialize cache manager if not already done
+                await cache_manager.initialize()
+                if cache_manager.redis_client:
+                    cached_data = await cache_manager.redis_client.get(cache_key)
+        except Exception as e:
+            logger.warning(f"Cache unavailable for pricing rule {action_type}: {e}")
+            cached_data = None
+        
         if cached_data:
             import json
             cached_rule = json.loads(cached_data)
@@ -131,13 +159,17 @@ class CreditPricingService:
                     updated_at=rule.updated_at
                 )
                 
-                # Cache the rule
-                import json
-                await cache_manager.redis_client.setex(
-                    cache_key, 
-                    self.rules_cache_ttl, 
-                    json.dumps(rule_model.dict(), default=str)
-                )
+                # Cache the rule (with graceful Redis fallback)
+                try:
+                    if cache_manager.redis_client:
+                        import json
+                        await cache_manager.redis_client.setex(
+                            cache_key, 
+                            self.rules_cache_ttl, 
+                            json.dumps(rule_model.dict(), default=str)
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to cache pricing rule {action_type}: {e}")
                 
                 return rule_model
                 
@@ -381,8 +413,19 @@ class CreditPricingService:
         
         cache_key = f"{self.cache_prefix}:allowance_used:{user_id}:{action_type}:{month_year}"
         
-        # Try cache first
-        cached_data = await cache_manager.redis_client.get(cache_key)
+        # Try cache first (with graceful Redis fallback)
+        cached_data = None
+        try:
+            if cache_manager.redis_client:
+                cached_data = await cache_manager.redis_client.get(cache_key)
+            else:
+                await cache_manager.initialize()
+                if cache_manager.redis_client:
+                    cached_data = await cache_manager.redis_client.get(cache_key)
+        except Exception as e:
+            logger.warning(f"Cache unavailable for allowance used {user_id}:{action_type}: {e}")
+            cached_data = None
+            
         if cached_data is not None:
             import json
             cached_count = json.loads(cached_data)
@@ -403,13 +446,17 @@ class CreditPricingService:
                 
                 free_used = result.scalar() or 0
                 
-                # Cache the result
-                import json
-                await cache_manager.redis_client.setex(
-                    cache_key, 
-                    self.allowance_cache_ttl, 
-                    json.dumps(free_used, default=str)
-                )
+                # Cache the result (with graceful Redis fallback)
+                try:
+                    if cache_manager.redis_client:
+                        import json
+                        await cache_manager.redis_client.setex(
+                            cache_key, 
+                            self.allowance_cache_ttl, 
+                            json.dumps(free_used, default=str)
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to cache allowance used for {user_id}:{action_type}: {e}")
                 
                 return free_used
                 
@@ -437,8 +484,19 @@ class CreditPricingService:
         
         cache_key = f"{self.cache_prefix}:user_allowances:{user_id}:{month_year}"
         
-        # Try cache first
-        cached_data = await cache_manager.redis_client.get(cache_key)
+        # Try cache first (with graceful Redis fallback)
+        cached_data = None
+        try:
+            if cache_manager.redis_client:
+                cached_data = await cache_manager.redis_client.get(cache_key)
+            else:
+                await cache_manager.initialize()
+                if cache_manager.redis_client:
+                    cached_data = await cache_manager.redis_client.get(cache_key)
+        except Exception as e:
+            logger.warning(f"Cache unavailable for user allowances {user_id}: {e}")
+            cached_data = None
+            
         if cached_data:
             import json
             cached_status = json.loads(cached_data)
@@ -498,13 +556,17 @@ class CreditPricingService:
                 }
             }
             
-            # Cache the status
-            import json
-            await cache_manager.redis_client.setex(
-                cache_key, 
-                self.allowance_cache_ttl, 
-                json.dumps(status, default=str)
-            )
+            # Cache the status (with graceful Redis fallback)
+            try:
+                if cache_manager.redis_client:
+                    import json
+                    await cache_manager.redis_client.setex(
+                        cache_key, 
+                        self.allowance_cache_ttl, 
+                        json.dumps(status, default=str)
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to cache user allowance status for {user_id}: {e}")
             
             return status
             
@@ -524,8 +586,19 @@ class CreditPricingService:
         """Get system-wide pricing analytics"""
         cache_key = f"{self.cache_prefix}:analytics"
         
-        # Try cache first
-        cached_data = await cache_manager.redis_client.get(cache_key)
+        # Try cache first (with graceful Redis fallback)
+        cached_data = None
+        try:
+            if cache_manager.redis_client:
+                cached_data = await cache_manager.redis_client.get(cache_key)
+            else:
+                await cache_manager.initialize()
+                if cache_manager.redis_client:
+                    cached_data = await cache_manager.redis_client.get(cache_key)
+        except Exception as e:
+            logger.warning(f"Cache unavailable for pricing analytics: {e}")
+            cached_data = None
+            
         if cached_data:
             import json
             cached_analytics = json.loads(cached_data)
@@ -603,13 +676,17 @@ class CreditPricingService:
                     )[:5]
                 }
                 
-                # Cache analytics
-                import json
-                await cache_manager.redis_client.setex(
-                    cache_key, 
-                    self.rules_cache_ttl, 
-                    json.dumps(analytics, default=str)
-                )
+                # Cache analytics (with graceful Redis fallback)
+                try:
+                    if cache_manager.redis_client:
+                        import json
+                        await cache_manager.redis_client.setex(
+                            cache_key, 
+                            self.rules_cache_ttl, 
+                            json.dumps(analytics, default=str)
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to cache pricing analytics: {e}")
                 
                 return analytics
                 

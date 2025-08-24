@@ -70,9 +70,9 @@ class TeamContext:
             "monthly_limits": self.monthly_limits,
             "current_usage": self.current_usage,
             "user_permissions": self.user_permissions,
-            "subscription_expires_at": self.subscription_expires_at,
-            "billing_cycle_start": billing_start,
-            "billing_cycle_end": billing_end,
+            "subscription_expires_at": self.subscription_expires_at.isoformat() if self.subscription_expires_at else None,
+            "billing_cycle_start": billing_start.isoformat(),
+            "billing_cycle_end": billing_end.isoformat(),
             "remaining_capacity": {
                 "profiles": max(0, self.monthly_limits.get("profiles", 0) - self.current_usage.get("profiles", 0)),
                 "emails": max(0, self.monthly_limits.get("emails", 0) - self.current_usage.get("emails", 0)),
@@ -104,9 +104,62 @@ async def get_team_context(
     This is the main dependency for team-based authentication
     """
     try:
-        user_id = UUID(str(current_user.id))
+        logger.info(f"Team auth check for user: {current_user.email} (role: {getattr(current_user, 'role', 'UNKNOWN')})")
         
-        # Get user's team membership
+        # ADMIN BYPASS: Admins get unlimited access without team restrictions
+        if hasattr(current_user, 'role') and current_user.role == 'admin':
+            logger.info(f"Admin user {current_user.email} bypassing team restrictions")
+            return TeamContext(
+                team_id=UUID('00000000-0000-0000-0000-000000000000'),  # Special admin team ID
+                team_name='Admin Access',
+                user_role='admin',
+                subscription_tier='unlimited',
+                subscription_status='active',
+                monthly_limits={
+                    "profiles": 999999,
+                    "emails": 999999,
+                    "posts": 999999
+                },
+                current_usage={
+                    "profiles": 0,
+                    "emails": 0,
+                    "posts": 0
+                },
+                user_id=UUID(str(current_user.id)),
+                user_permissions={
+                    "can_manage_team": True,
+                    "can_view_billing": True,
+                    "can_invite_members": True,
+                    "is_admin": True,
+                    "unlimited_access": True
+                },
+                subscription_expires_at=None
+            )
+        
+        # For regular users, use Supabase User ID to find team membership
+        # current_user.id might be the Supabase ID, let's try both approaches
+        from app.database.unified_models import User as AppUser
+        
+        # First, check if current_user has supabase_user_id attribute
+        if hasattr(current_user, 'supabase_user_id') and current_user.supabase_user_id:
+            supabase_user_id = UUID(current_user.supabase_user_id)
+            logger.info(f"Using direct Supabase ID {supabase_user_id} from user object for {current_user.email}")
+        else:
+            # Fallback: Try to find user by application ID
+            user_query = select(AppUser.supabase_user_id).where(AppUser.id == UUID(str(current_user.id)))
+            user_result = await db.execute(user_query)
+            user_record = user_result.scalar_one_or_none()
+            
+            if not user_record:
+                # Last resort: Try using current_user.id as Supabase ID directly
+                logger.warning(f"User {current_user.email} not found by app ID, trying current_user.id as Supabase ID")
+                supabase_user_id = UUID(str(current_user.id))
+            else:
+                supabase_user_id = UUID(user_record)
+            
+            logger.info(f"Using resolved Supabase ID {supabase_user_id} for team lookup for {current_user.email}")
+        
+        # Get user's team membership using Supabase User ID
         team_member_query = select(
             TeamMember.team_id,
             TeamMember.role,
@@ -126,7 +179,7 @@ async def get_team_context(
             join(TeamMember, Team, TeamMember.team_id == Team.id)
         ).where(
             and_(
-                TeamMember.user_id == user_id,
+                TeamMember.user_id == supabase_user_id,
                 TeamMember.status == "active"
             )
         )
@@ -135,6 +188,7 @@ async def get_team_context(
         team_data = result.first()
         
         if not team_data:
+            logger.error(f"User {current_user.email} with Supabase ID {supabase_user_id} has no team membership")
             raise TeamAuthenticationError("User is not a member of any active team")
         
         # Check subscription status
@@ -162,12 +216,12 @@ async def get_team_context(
                 "emails": team_data.emails_used_this_month,
                 "posts": team_data.posts_used_this_month
             },
-            user_id=user_id,
+            user_id=supabase_user_id,  # Use Supabase User ID for consistency
             user_permissions=team_data.permissions or {},
             subscription_expires_at=team_data.subscription_expires_at
         )
         
-        logger.debug(f"Team context loaded for user {user_id}: {team_context.team_name} ({team_context.subscription_tier})")
+        logger.info(f"Team context loaded for user {current_user.email}: {team_context.team_name} ({team_context.subscription_tier})")
         return team_context
         
     except TeamAuthenticationError:
@@ -294,20 +348,24 @@ async def record_team_usage(
         current_month = date.today().replace(day=1)
         
         # Update team-level usage counters
+        from sqlalchemy import text
         if action_type == "profiles":
             await db.execute(
-                f"UPDATE teams SET profiles_used_this_month = profiles_used_this_month + {quantity}, "
-                f"updated_at = now() WHERE id = '{team_context.team_id}'"
+                text("UPDATE teams SET profiles_used_this_month = profiles_used_this_month + :quantity, "
+                     "updated_at = now() WHERE id = :team_id"),
+                {"quantity": quantity, "team_id": str(team_context.team_id)}
             )
         elif action_type == "emails":
             await db.execute(
-                f"UPDATE teams SET emails_used_this_month = emails_used_this_month + {quantity}, "
-                f"updated_at = now() WHERE id = '{team_context.team_id}'"
+                text("UPDATE teams SET emails_used_this_month = emails_used_this_month + :quantity, "
+                     "updated_at = now() WHERE id = :team_id"),
+                {"quantity": quantity, "team_id": str(team_context.team_id)}
             )
         elif action_type == "posts":
             await db.execute(
-                f"UPDATE teams SET posts_used_this_month = posts_used_this_month + {quantity}, "
-                f"updated_at = now() WHERE id = '{team_context.team_id}'"
+                text("UPDATE teams SET posts_used_this_month = posts_used_this_month + :quantity, "
+                     "updated_at = now() WHERE id = :team_id"),
+                {"quantity": quantity, "team_id": str(team_context.team_id)}
             )
         
         # Update individual usage tracking
