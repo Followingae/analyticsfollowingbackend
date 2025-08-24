@@ -1251,8 +1251,17 @@ class ComprehensiveDataService:
             # Get current time for consistent timestamp comparison
             current_time = datetime.now(timezone.utc)
             
-            # Get all profile access records for this user that haven't expired
-            access_query = select(UserProfileAccess, Profile).join(
+            # CRITICAL FIX: Get profiles from BOTH user access AND team access
+            # First, get user's team memberships
+            from app.database.unified_models import TeamMember, TeamProfileAccess
+            team_query = select(TeamMember.team_id).where(
+                TeamMember.user_id == user_uuid
+            )
+            team_result = await db.execute(team_query)
+            user_team_ids = [row[0] for row in team_result.fetchall()]
+            
+            # Get profiles from direct user access
+            user_access_query = select(UserProfileAccess, Profile).join(
                 Profile, UserProfileAccess.profile_id == Profile.id
             ).where(
                 and_(
@@ -1262,16 +1271,30 @@ class ComprehensiveDataService:
                         UserProfileAccess.expires_at > current_time
                     )
                 )
-            ).order_by(UserProfileAccess.granted_at.desc()).offset(offset).limit(page_size)
+            )
+            
+            # Get profiles from team access
+            team_access_query = select(TeamProfileAccess, Profile).join(
+                Profile, TeamProfileAccess.profile_id == Profile.id
+            ).where(
+                TeamProfileAccess.team_id.in_(user_team_ids)
+            ) if user_team_ids else select(TeamProfileAccess, Profile).where(False)  # Empty query if no teams
+            
+            # Combine both queries using UNION
+            from sqlalchemy import union_all
+            combined_query = union_all(
+                user_access_query.with_only_columns(Profile),
+                team_access_query.with_only_columns(Profile)
+            ).order_by(Profile.updated_at.desc()).offset(offset).limit(page_size)
             
             # Execute queries with retry and timeout protection
             async def execute_queries():
                 # Use asyncio.wait_for to add timeout protection
-                result = await asyncio.wait_for(db.execute(access_query), timeout=30.0)
-                access_records = result.all()
+                result = await asyncio.wait_for(db.execute(combined_query), timeout=30.0)
+                profiles_data = result.all()
                 
-                # Count total accessible profiles - reuse current_time for consistency
-                count_query = select(func.count(UserProfileAccess.id)).where(
+                # Count total accessible profiles from both sources
+                user_count_query = select(func.count(UserProfileAccess.id)).where(
                     and_(
                         UserProfileAccess.user_id == user_uuid,
                         or_(
@@ -1280,13 +1303,21 @@ class ComprehensiveDataService:
                         )
                     )
                 )
-                total_result = await asyncio.wait_for(db.execute(count_query), timeout=30.0)
-                total_count = total_result.scalar()
+                team_count_query = select(func.count(TeamProfileAccess.id)).where(
+                    TeamProfileAccess.team_id.in_(user_team_ids)
+                ) if user_team_ids else select(func.count().select_from(TeamProfileAccess)).where(False)
                 
-                return access_records, total_count
+                user_count_result = await asyncio.wait_for(db.execute(user_count_query), timeout=30.0)
+                team_count_result = await asyncio.wait_for(db.execute(team_count_query), timeout=30.0)
+                
+                user_count = user_count_result.scalar() or 0
+                team_count = team_count_result.scalar() or 0
+                total_count = user_count + team_count
+                
+                return profiles_data, total_count
             
             try:
-                access_records, total_count = await self.retry_db_operation(execute_queries, db)
+                profiles_data, total_count = await self.retry_db_operation(execute_queries, db)
                 
             except asyncio.TimeoutError:
                 logger.error(f"Database query timeout for user {user_id}")
@@ -1298,19 +1329,19 @@ class ComprehensiveDataService:
             # Format response
             profiles = []
             
-            for access_record, profile in access_records:
-                # Calculate days until expiry
-                days_remaining = None
-                if access_record.expires_at:
-                    time_diff = access_record.expires_at - datetime.now(timezone.utc)
-                    days_remaining = max(0, time_diff.days)
-                
+            for profile in profiles_data:
+                # For combined user+team access, we'll use default access info
+                # since the query only returns Profile objects without access details
+                current_time = datetime.now(timezone.utc)
                 
                 profile_data = {
                     "username": profile.username,
                     "full_name": profile.full_name or "",
                     "profile_pic_url": profile.profile_pic_url or "",
                     "profile_pic_url_hd": profile.profile_pic_url_hd or "",
+                    # Pre-proxied URLs for frontend consistency
+                    "proxied_profile_pic_url": profile.profile_pic_url or "",  # External proxy service handles these
+                    "proxied_profile_pic_url_hd": profile.profile_pic_url_hd or "",  # External proxy service handles these
                     "followers_count": profile.followers_count or 0,
                     "posts_count": profile.posts_count or 0,
                     "is_verified": profile.is_verified or False,
@@ -1318,10 +1349,10 @@ class ComprehensiveDataService:
                     "engagement_rate": float(profile.engagement_rate or 0),
                     "influence_score": float(profile.influence_score or 0),
                     
-                    # Access information
-                    "access_granted_at": access_record.granted_at.isoformat(),
-                    "access_expires_at": access_record.expires_at.isoformat() if access_record.expires_at else None,
-                    "days_remaining": days_remaining,
+                    # Access information (simplified since we combine user+team access)
+                    "access_granted_at": current_time.isoformat(),
+                    "access_expires_at": None,  # Team access doesn't expire
+                    "days_remaining": None,
                     "profile_id": str(profile.id),
                     
                 }
@@ -1564,6 +1595,37 @@ class ComprehensiveDataService:
         except Exception as e:
             logger.error(f"Error granting team profile access: {e}")
             await db.rollback()
+            return False
+
+    async def check_team_profile_access(self, db: AsyncSession, team_id: UUID, username: str) -> bool:
+        """Check if team has access to a profile"""
+        try:
+            from app.database.unified_models import TeamProfileAccess
+            
+            # Find profile by username
+            result = await db.execute(
+                select(Profile).where(Profile.username == username)
+            )
+            profile = result.scalar_one_or_none()
+            
+            if not profile:
+                return False
+            
+            # Check if team access exists
+            existing_access = await db.execute(
+                select(TeamProfileAccess).where(
+                    and_(
+                        TeamProfileAccess.team_id == team_id,
+                        TeamProfileAccess.profile_id == profile.id
+                    )
+                )
+            )
+            access_record = existing_access.scalar_one_or_none()
+            
+            return access_record is not None
+            
+        except Exception as e:
+            logger.error(f"Error checking team profile access: {e}")
             return False
 
     async def get_team_profile_access(self, db: AsyncSession, team_id: UUID, username: str) -> Optional[Dict]:

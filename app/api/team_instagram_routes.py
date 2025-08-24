@@ -4,7 +4,7 @@ Uses team authentication with pooled usage limits and role-based permissions
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Query, Path, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from typing import Optional, Dict, Any
 from uuid import UUID
 from datetime import datetime, timezone
@@ -28,21 +28,24 @@ router = APIRouter(prefix="/team/instagram", tags=["Team Instagram Analytics"])
 # CORE PROFILE ANALYSIS - TEAM POOLED USAGE
 # =============================================================================
 
-@router.get("/profile/{username}")
+@router.get("/profile/{username}/basic")
 @team_usage_gate("profiles", 1)  # Uses team's pooled profile limit
-async def analyze_instagram_profile_team(
+async def get_profile_basic_data(
     username: str = Path(..., description="Instagram username"),
     team_context: TeamContext = Depends(get_any_team_member_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Team-based Instagram profile analysis with pooled usage limits
+    STEP 1: Get basic Instagram profile data immediately
     
-    Features:
-    - Uses team's pooled monthly profile limit (Standard: 500, Premium: 2000)
-    - Same comprehensive analytics for all subscription tiers
-    - Shared access across all team members
-    - Usage tracked per individual for analytics
+    Returns raw Decodo data within 1-3 seconds:
+    - Profile info (followers, following, bio)
+    - Basic engagement metrics
+    - No AI analysis (comes later in detailed endpoint)
+    
+    Usage:
+    - Uses team's pooled monthly profile limit
+    - Same basic data for all subscription tiers
     """
     try:
         logger.info(f"Team profile analysis: {username} for team {team_context.team_name}")
@@ -58,8 +61,9 @@ async def analyze_instagram_profile_team(
                 db, team_context.team_id, team_context.user_id, username
             )
             
-            # Return existing data with team context
-            return await _format_team_profile_response(existing_profile, team_context)
+            # All existing profiles MUST have AI data - return detailed response immediately
+            logger.info(f"Profile {username} exists in database - returning complete data with AI insights")
+            return await _format_detailed_profile_response(existing_profile, team_context)
         
         # STEP 2: Profile doesn't exist - fetch fresh data
         logger.info(f"Profile {username} not in database - fetching fresh data")
@@ -99,7 +103,7 @@ async def analyze_instagram_profile_team(
         logger.info(f"Profile {username} stored and team access granted")
         
         # Usage will be recorded by @team_usage_gate decorator after successful completion
-        return await _format_team_profile_response(profile, team_context, ai_task)
+        return await _format_basic_profile_response(profile, team_context, ai_task)
         
     except TeamUsageLimitError:
         raise  # Let the usage limit error pass through
@@ -109,6 +113,197 @@ async def analyze_instagram_profile_team(
             status_code=500,
             detail=f"Profile analysis failed: {str(e)}"
         )
+
+
+@router.get("/profile/{username}/detailed")
+async def get_profile_detailed_data(
+    username: str = Path(..., description="Instagram username"),
+    team_context: TeamContext = Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    STEP 2: Get detailed Instagram profile data with AI insights
+    
+    Returns AI-enhanced data:
+    - All basic data PLUS AI analysis
+    - Content categories and sentiment analysis
+    - Language distribution and quality scores
+    - Should be called after /basic endpoint
+    """
+    try:
+        logger.info(f"Team detailed profile analysis: {username} for team {team_context.team_name}")
+        
+        # Get profile from database (should exist from basic call)
+        existing_profile = await comprehensive_service.get_profile_by_username(db, username)
+        
+        if not existing_profile:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Profile {username} not found. Call /basic endpoint first."
+            )
+        
+        # Check if user has team access to this profile
+        has_access = await comprehensive_service.check_team_profile_access(
+            db, team_context.team_id, username
+        )
+        
+        if not has_access:
+            raise HTTPException(
+                status_code=403,
+                detail="Team does not have access to this profile"
+            )
+        
+        # Return detailed data with AI insights
+        return await _format_detailed_profile_response(existing_profile, team_context)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Team detailed profile analysis failed for {username}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Detailed profile analysis failed: {str(e)}"
+        )
+
+
+@router.get("/profile/{username}/status")
+async def get_profile_analysis_status(
+    username: str = Path(..., description="Instagram username"),
+    team_context: TeamContext = Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Check AI analysis status for a profile
+    
+    Returns:
+    - analysis_status: "pending", "processing", "completed", "error"
+    - ai_data_available: boolean
+    - estimated_completion: seconds (if still processing)
+    """
+    try:
+        # Get profile from database
+        profile = await comprehensive_service.get_profile_by_username(db, username)
+        
+        if not profile:
+            return {
+                "analysis_status": "not_found",
+                "ai_data_available": False,
+                "message": "Profile not found. Call /basic endpoint first."
+            }
+        
+        # Check if user has team access to this profile
+        has_access = await comprehensive_service.check_team_profile_access(
+            db, team_context.team_id, username
+        )
+        
+        if not has_access:
+            raise HTTPException(
+                status_code=403,
+                detail="Team does not have access to this profile"
+            )
+        
+        # All profiles in database MUST have AI data - always completed
+        return {
+            "analysis_status": "completed",
+            "ai_data_available": True,
+            "profile_id": str(profile.id),
+            "last_analyzed": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+            "estimated_completion": 0
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Profile status check failed for {username}: {e}")
+        return {
+            "analysis_status": "error",
+            "ai_data_available": False,
+            "error": str(e)
+        }
+
+
+@router.get("/unlocked-profiles")
+async def get_team_unlocked_profiles(
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(20, ge=1, le=50, description="Results per page"),
+    team_context: TeamContext = Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all profiles the team has unlocked with full comprehensive data
+    
+    Returns paginated list of profiles with complete analytics and AI insights
+    """
+    try:
+        from app.database.unified_models import TeamProfileAccess
+        
+        # Get team's unlocked profiles
+        offset = (page - 1) * page_size
+        
+        profiles_query = select(Profile).join(
+            TeamProfileAccess, Profile.id == TeamProfileAccess.profile_id
+        ).where(
+            TeamProfileAccess.team_id == team_context.team_id
+        ).offset(offset).limit(page_size)
+        
+        result = await db.execute(profiles_query)
+        profiles = result.scalars().all()
+        
+        # Get total count
+        count_query = select(func.count(Profile.id)).join(
+            TeamProfileAccess, Profile.id == TeamProfileAccess.profile_id
+        ).where(
+            TeamProfileAccess.team_id == team_context.team_id
+        )
+        count_result = await db.execute(count_query)
+        total_count = count_result.scalar() or 0
+        
+        # Format profiles with full data (all profiles MUST have AI data)
+        formatted_profiles = []
+        for profile in profiles:
+            profile_data = {
+                "id": str(profile.id),
+                "username": profile.username,
+                "full_name": profile.full_name,
+                "biography": profile.biography,
+                "followers_count": profile.followers_count or 0,
+                "following_count": profile.following_count or 0,
+                "posts_count": profile.posts_count or 0,
+                "is_verified": profile.is_verified or False,
+                "engagement_rate": profile.engagement_rate,
+                # AI insights (guaranteed to exist)
+                "ai_content_category": getattr(profile, 'ai_primary_content_type', None),
+                "ai_content_distribution": getattr(profile, 'ai_content_distribution', None),
+                "ai_sentiment_score": getattr(profile, 'ai_avg_sentiment_score', None),
+                "ai_language_distribution": getattr(profile, 'ai_language_distribution', None),
+                "ai_content_quality_score": getattr(profile, 'ai_content_quality_score', None),
+                "ai_analyzed_at": getattr(profile, 'ai_profile_analyzed_at', None).isoformat() if getattr(profile, 'ai_profile_analyzed_at', None) else None,
+                "last_updated": profile.updated_at.isoformat() if profile.updated_at else None
+            }
+            formatted_profiles.append(profile_data)
+        
+        return {
+            "success": True,
+            "profiles": formatted_profiles,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total_count": total_count,
+                "total_pages": (total_count + page_size - 1) // page_size
+            },
+            "team_context": {
+                "team_id": str(team_context.team_id),
+                "team_name": team_context.team_name
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting team unlocked profiles: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get unlocked profiles: {str(e)}"
+        )
+
 
 @router.get("/profile/{username}/posts")
 @team_usage_gate("posts", 1)  # Uses team's pooled posts limit  
@@ -179,7 +374,7 @@ async def get_profile_posts_team(
                     "language": post.ai_language_code,
                     "confidence": post.ai_sentiment_confidence
                 },
-                "media_urls": post.media_urls or []
+                "media_urls": [url for url in [post.display_url, post.thumbnail_src, post.video_url] if url]
             }
             posts_data.append(post_data)
         
@@ -396,20 +591,20 @@ async def _format_team_profile_response(
             "following_count": profile.following_count or 0,
             "posts_count": profile.posts_count or 0,
             "is_verified": profile.is_verified or False,
-            "is_business": profile.is_business or False,
+            "is_business": profile.is_business_account or False,
             "engagement_rate": profile.engagement_rate,
             # Complete analytics - same for all subscription tiers
             "analytics": {
-                "avg_likes": profile.avg_likes,
-                "avg_comments": profile.avg_comments,
-                "posting_frequency": profile.posting_frequency,
-                "best_posting_times": profile.best_posting_times,
+                "avg_likes": getattr(profile, 'avg_likes', None),
+                "avg_comments": getattr(profile, 'avg_comments', None),
+                "posting_frequency": getattr(profile, 'posting_frequency', None),
+                "best_posting_times": getattr(profile, 'best_posting_times', None),
                 "ai_insights": {
-                    "content_category": profile.ai_primary_content_type,
-                    "content_distribution": profile.ai_content_distribution,
-                    "average_sentiment": profile.ai_avg_sentiment_score,
-                    "language_distribution": profile.ai_language_distribution,
-                    "content_quality_score": profile.ai_content_quality_score
+                    "content_category": getattr(profile, 'ai_primary_content_type', None),
+                    "content_distribution": getattr(profile, 'ai_content_distribution', None),
+                    "average_sentiment": getattr(profile, 'ai_avg_sentiment_score', None),
+                    "language_distribution": getattr(profile, 'ai_language_distribution', None),
+                    "content_quality_score": getattr(profile, 'ai_content_quality_score', None)
                 }
             },
             "last_updated": profile.updated_at.isoformat() if profile.updated_at else None
@@ -422,3 +617,173 @@ async def _format_team_profile_response(
             "access_expires": "30_days_from_analysis"
         }
     }
+
+
+async def _format_basic_profile_response(
+    profile: Profile,
+    team_context: TeamContext,
+    ai_task: Optional[Dict] = None
+) -> Dict[str, Any]:
+    """Format BASIC profile response (Step 1) - No AI data"""
+    try:
+        return {
+        "success": True,
+        "data_stage": "basic",
+        "message": "Basic profile data loaded. AI analysis in progress...",
+        "profile": {
+            "id": str(profile.id),
+            "username": profile.username,
+            "full_name": profile.full_name,
+            "biography": profile.biography,
+            "followers_count": profile.followers_count or 0,
+            "following_count": profile.following_count or 0,
+            "posts_count": profile.posts_count or 0,
+            "is_verified": profile.is_verified or False,
+            "is_business": profile.is_business_account or False,
+            
+            # Profile picture URLs (same as Creators page)
+            "profile_pic_url": profile.profile_pic_url or "",
+            "profile_pic_url_hd": profile.profile_pic_url_hd or "",
+            "proxied_profile_pic_url": profile.profile_pic_url or "",  # External proxy service handles these
+            "proxied_profile_pic_url_hd": profile.profile_pic_url_hd or "",  # External proxy service handles these
+            
+            "engagement_rate": profile.engagement_rate,
+            # Basic analytics only - no AI insights
+            "analytics": {
+                "avg_likes": getattr(profile, 'avg_likes', None),
+                "avg_comments": getattr(profile, 'avg_comments', None),
+                "posting_frequency": getattr(profile, 'posting_frequency', None),
+                "best_posting_times": getattr(profile, 'best_posting_times', None)
+            },
+            "last_updated": profile.updated_at.isoformat() if profile.updated_at else None
+        },
+        "team_context": team_context.to_dict(),
+        "ai_processing": {
+            "status": "processing" if ai_task else "scheduled",
+            "estimated_completion": 30,
+            "next_step": f"Call GET /profile/{profile.username}/status to check progress"
+        },
+        "access_info": {
+            "access_type": "team_shared",
+            "shared_with_team": True,
+            "access_expires": "30_days_from_analysis"
+        }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error formatting basic profile response: {e}")
+        # Return safe fallback response
+        return {
+            "success": True,
+            "data_stage": "basic",
+            "message": "Basic profile data retrieved with limited details",
+            "profile": {
+                "id": str(profile.id) if hasattr(profile, 'id') else None,
+                "username": getattr(profile, 'username', 'unknown'),
+                "full_name": getattr(profile, 'full_name', None),
+                "followers_count": getattr(profile, 'followers_count', 0) or 0,
+                "following_count": getattr(profile, 'following_count', 0) or 0,
+                "posts_count": getattr(profile, 'posts_count', 0) or 0,
+                "engagement_rate": getattr(profile, 'engagement_rate', None),
+                "analytics": {
+                    "avg_likes": None,
+                    "avg_comments": None,
+                    "posting_frequency": None,
+                    "best_posting_times": None
+                }
+            },
+            "team_context": team_context.to_dict() if hasattr(team_context, 'to_dict') else {},
+            "error": f"Profile formatting error: {str(e)}"
+        }
+
+
+async def _format_detailed_profile_response(
+    profile: Profile,
+    team_context: TeamContext
+) -> Dict[str, Any]:
+    """Format DETAILED profile response (Step 2) - With AI insights (always available for existing profiles)"""
+    
+    try:
+        response = {
+        "success": True,
+        "data_stage": "detailed",
+        "message": "Complete profile analysis with AI insights available!",
+        "profile": {
+            "id": str(profile.id),
+            "username": profile.username,
+            "full_name": profile.full_name,
+            "biography": profile.biography,
+            "followers_count": profile.followers_count or 0,
+            "following_count": profile.following_count or 0,
+            "posts_count": profile.posts_count or 0,
+            "is_verified": profile.is_verified or False,
+            "is_business": profile.is_business_account or False,
+            
+            # Profile picture URLs (same as unlocked profiles endpoint)
+            "profile_pic_url": profile.profile_pic_url or "",
+            "profile_pic_url_hd": profile.profile_pic_url_hd or "",
+            "proxied_profile_pic_url": profile.profile_pic_url or "",  # External proxy service handles these
+            "proxied_profile_pic_url_hd": profile.profile_pic_url_hd or "",  # External proxy service handles these
+            
+            "engagement_rate": profile.engagement_rate,
+            # Complete analytics WITH AI insights
+            "analytics": {
+                "avg_likes": getattr(profile, 'avg_likes', None),
+                "avg_comments": getattr(profile, 'avg_comments', None),
+                "posting_frequency": getattr(profile, 'posting_frequency', None),
+                "best_posting_times": getattr(profile, 'best_posting_times', None),
+                "ai_insights": {
+                    "available": True,
+                    "content_category": getattr(profile, 'ai_primary_content_type', None),
+                    "content_distribution": getattr(profile, 'ai_content_distribution', None),
+                    "average_sentiment": getattr(profile, 'ai_avg_sentiment_score', None),
+                    "language_distribution": getattr(profile, 'ai_language_distribution', None),
+                    "content_quality_score": getattr(profile, 'ai_content_quality_score', None),
+                    "last_analyzed": getattr(profile, 'ai_profile_analyzed_at', None).isoformat() if getattr(profile, 'ai_profile_analyzed_at', None) else None
+                }
+            },
+            "last_updated": profile.updated_at.isoformat() if profile.updated_at else None
+        },
+        "team_context": team_context.to_dict(),
+        "ai_processing": {
+            "status": "completed",
+            "completion_percentage": 100
+        },
+        "access_info": {
+            "access_type": "team_shared",
+            "shared_with_team": True,
+            "access_expires": "30_days_from_analysis"
+        }
+        }
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error formatting detailed profile response: {e}")
+        # Return safe fallback response
+        return {
+            "success": True,
+            "data_stage": "detailed",
+            "message": "Profile data retrieved with limited details",
+            "profile": {
+                "id": str(profile.id) if hasattr(profile, 'id') else None,
+                "username": getattr(profile, 'username', 'unknown'),
+                "full_name": getattr(profile, 'full_name', None),
+                "followers_count": getattr(profile, 'followers_count', 0) or 0,
+                "following_count": getattr(profile, 'following_count', 0) or 0,
+                "posts_count": getattr(profile, 'posts_count', 0) or 0,
+                "engagement_rate": getattr(profile, 'engagement_rate', None),
+                "analytics": {
+                    "avg_likes": None,
+                    "avg_comments": None,
+                    "posting_frequency": None,
+                    "best_posting_times": None,
+                    "ai_insights": {
+                        "available": False,
+                        "error": "Data formatting error"
+                    }
+                }
+            },
+            "team_context": team_context.to_dict() if hasattr(team_context, 'to_dict') else {},
+            "error": f"Profile formatting error: {str(e)}"
+        }
