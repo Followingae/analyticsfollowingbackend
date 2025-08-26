@@ -362,7 +362,7 @@ class AIManagerSingleton:
             success = await self.initialize_models(all_models)
             
             if not success:
-                raise RuntimeError("❌ AI model initialization FAILED during startup")
+                raise RuntimeError("ERROR: AI model initialization FAILED during startup")
             
             # Verify ALL models are loaded
             missing_models = []
@@ -372,7 +372,7 @@ class AIManagerSingleton:
             
             if missing_models:
                 raise RuntimeError(
-                    f"❌ CRITICAL: Models failed to load: {missing_models}. "
+                    f"CRITICAL ERROR: Models failed to load: {missing_models}. "
                     f"System cannot start without AI models."
                 )
             

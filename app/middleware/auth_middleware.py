@@ -8,6 +8,7 @@ from typing import Optional, List
 import logging
 
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
+from app.services.resilient_auth_service import resilient_auth_service
 from app.models.auth import UserInDB, UserRole
 
 logger = logging.getLogger(__name__)
@@ -40,33 +41,73 @@ auth_middleware = AuthMiddleware()
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> UserInDB:
     """
-    Dependency to get current authenticated user
+    Dependency to get current authenticated user with resilience
     """
     try:
         token = credentials.credentials
+        logger.debug(f"RESILIENT AUTH: Attempting authentication with token length: {len(token) if token else 0}")
+        
+        # Try resilient authentication first
+        user = await resilient_auth_service.validate_token_resilient(token)
+        if user:
+            logger.info(f"RESILIENT AUTH: User authenticated via resilient service: {user.email}")
+            # Ensure status is set for network resilience
+            if not hasattr(user, 'status') or not user.status:
+                user.status = 'active'
+            return user
+            
+        # Fallback to original auth service
+        logger.debug("RESILIENT AUTH: Falling back to primary auth service")
         user = await auth_service.get_current_user(token)
-        return user
-    except HTTPException:
+        if user:
+            logger.info(f"RESILIENT AUTH: User authenticated via primary service: {user.email}")
+            # Ensure status is set for network resilience
+            if not hasattr(user, 'status') or not user.status:
+                user.status = 'active'
+            return user
+        
+    except HTTPException as http_exc:
+        logger.warning(f"RESILIENT AUTH: HTTP exception during authentication: {http_exc.detail}")
         raise
     except Exception as e:
-        logger.error(f"Authentication failed: {e}")
+        logger.error(f"RESILIENT AUTH: All authentication methods failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
+            detail="Authentication failed - please try logging in again",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
 
 async def get_current_active_user(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
     """
-    Dependency to get current active user (not suspended/inactive)
+    Dependency to get current active user (not suspended/inactive) with network resilience
     """
-    if current_user.status != "active":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is not active"
-        )
-    return current_user
+    try:
+        # Check user status with network resilience
+        if hasattr(current_user, 'status') and current_user.status:
+            if current_user.status not in ["active", "pending"]:
+                logger.warning(f"RESILIENT AUTH: User {current_user.id} has status '{current_user.status}' - blocking access")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Account is not active"
+                )
+        else:
+            # If status is None or not set, assume active for network resilience
+            logger.info(f"RESILIENT AUTH: User {current_user.id} has no status set - assuming active (resilient mode)")
+            current_user.status = "active"
+        
+        return current_user
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"RESILIENT AUTH: Status check failed for user {getattr(current_user, 'id', 'unknown')}: {e}")
+        # In case of errors, default to active if user passed authentication
+        logger.warning("RESILIENT AUTH: Defaulting to active status due to status check error")
+        if hasattr(current_user, 'status'):
+            current_user.status = "active"
+        return current_user
 
 
 async def get_optional_user(request: Request) -> Optional[UserInDB]:

@@ -71,7 +71,8 @@
       "Bash(git gc:*)",
       "Bash(TASKKILL /F /IM python.exe)",
       "Bash(git pull:*)",
-      "Bash(could not find table 'auth.users' with which to generate a foreign key\"\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")"
+      "Bash(could not find table 'auth.users' with which to generate a foreign key\"\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(npm i:*)"
     ],
     "deny": [],
     "additionalDirectories": [

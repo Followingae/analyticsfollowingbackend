@@ -18,6 +18,7 @@ from app.models.auth import (
     UserDashboardStats, UserSearchHistoryResponse
 )
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
+from app.services.resilient_auth_service import resilient_auth_service
 from app.middleware.auth_middleware import (
     get_current_user, get_current_active_user, require_admin, security
 )
@@ -106,6 +107,8 @@ async def login_user(login_data: LoginRequest):
         # Ensure auth service is ready (cached after first initialization)
         await auth_service.ensure_initialized()
         
+        # Use standard auth service directly (resilient auth handles token validation)
+        # Note: Resilient auth handles the token validation phase, not login phase
         response = await auth_service.login_user(login_data)
         
         logger.info(f"User logged in successfully: {login_data.email}")
@@ -142,6 +145,16 @@ async def login_user(login_data: LoginRequest):
                 detail={
                     "error": "invalid_credentials",
                     "message": "Invalid email or password."
+                }
+            )
+        elif "getaddrinfo failed" in error_msg or "network" in error_msg.lower():
+            # Network connectivity issue
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "error": "network_connectivity", 
+                    "message": "Authentication service is temporarily unavailable due to network issues. Please try again in a few moments.",
+                    "retry_after": 30
                 }
             )
         else:
@@ -295,7 +308,7 @@ async def get_current_user_profile(
             except (json.JSONDecodeError, TypeError):
                 avatar_config = None
             
-            return UserResponse(
+            user_response = UserResponse(
                 id=current_user.id,
                 email=user_row.email,
                 full_name=user_row.full_name,
@@ -314,6 +327,12 @@ async def get_current_user_profile(
                 language=user_row.language or "en",
                 updated_at=user_row.updated_at
             )
+            
+            # DEBUG LOGGING: Track user data being returned
+            logger.info(f"AUTH-ME-RESPONSE: Returning user data for {current_user.email}")
+            logger.info(f"AUTH-ME-RESPONSE: full_name='{user_response.full_name}', company='{user_response.company}'")
+            
+            return user_response
         
     except HTTPException:
         raise

@@ -7,6 +7,9 @@ from typing import Dict, Any
 
 from app.database.connection import get_db
 from app.cache.redis_cache_manager import redis_cache_manager as cache_manager
+from app.monitoring.network_health_monitor import network_health_monitor
+from app.resilience.database_resilience import database_resilience
+from app.services.resilient_auth_service import resilient_auth_service
 
 router = APIRouter()
 
@@ -25,18 +28,33 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         "performance": {}
     }
     
-    # Database health check
+    # Database health check with resilience
     try:
-        await db.execute(text("SELECT 1"))
-        health_data["components"]["database"] = {
-            "status": "healthy",
-            "message": "Database connection successful"
-        }
+        if not database_resilience.should_circuit_break():
+            await db.execute(text("SELECT 1"))
+            database_resilience.record_success()
+            health_data["components"]["database"] = {
+                "status": "healthy",
+                "message": "Database connection successful",
+                "circuit_breaker_open": False,
+                "failures": database_resilience.connection_failures
+            }
+        else:
+            health_data["status"] = "degraded"
+            health_data["components"]["database"] = {
+                "status": "circuit_breaker_open",
+                "message": "Database circuit breaker is open",
+                "circuit_breaker_open": True,
+                "failures": database_resilience.connection_failures
+            }
     except Exception as e:
+        database_resilience.record_failure()
         health_data["status"] = "unhealthy"
         health_data["components"]["database"] = {
             "status": "unhealthy", 
-            "message": f"Database connection failed: {str(e)}"
+            "message": f"Database connection failed: {str(e)}",
+            "circuit_breaker_open": database_resilience.circuit_breaker_open,
+            "failures": database_resilience.connection_failures
         }
     
     # Redis/Cache health check
@@ -76,11 +94,30 @@ async def health_check(db: AsyncSession = Depends(get_db)):
             "message": f"System metrics unavailable: {str(e)}"
         }
     
+    # Network health check
+    network_status = network_health_monitor.get_current_status()
+    health_data["components"]["network"] = {
+        "status": "healthy" if network_status['overall_healthy'] else "degraded",
+        "dns_working": network_status['dns_working'],
+        "database_reachable": network_status['database_reachable'],
+        "supabase_reachable": network_status['supabase_reachable'],
+        "errors": network_status['errors']
+    }
+    
+    # Authentication service health
+    auth_stats = resilient_auth_service.get_cache_stats()
+    health_data["components"]["authentication"] = {
+        "status": "healthy" if auth_stats['network_available'] else "degraded",
+        "network_available": auth_stats['network_available'],
+        "cached_tokens": auth_stats['cached_tokens'],
+        "failed_tokens": auth_stats['failed_tokens']
+    }
+    
     # Calculate overall health
     component_statuses = [comp["status"] for comp in health_data["components"].values()]
     if "unhealthy" in component_statuses:
         health_data["status"] = "unhealthy"
-    elif "warning" in component_statuses:
+    elif "warning" in component_statuses or "degraded" in component_statuses or "circuit_breaker_open" in component_statuses:
         health_data["status"] = "degraded"
     
     # Performance metrics

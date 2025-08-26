@@ -17,6 +17,7 @@ from sqlalchemy import select, update, delete, and_, or_, func, text
 from sqlalchemy.orm import selectinload, joinedload
 
 from app.core.config import settings
+from app.resilience.database_resilience import database_resilience
 from .unified_models import (
     User, Profile, Post, UserProfileAccess, UserSearch, UserFavorite,
     AudienceDemographics, CreatorMetadata, CommentSentiment,
@@ -1044,26 +1045,35 @@ class ComprehensiveDataService:
     # USER OPERATION FUNCTIONS - CRITICAL FOR SESSION MANAGEMENT
     # ==========================================================================
     
-    async def grant_profile_access(self, db: AsyncSession, user_id: str, profile_id: UUID) -> bool:
+    async def grant_profile_access(self, db: AsyncSession, user_id, profile_id) -> bool:
         """Grant user 30-day access to a profile - FIXED for actual schema"""
         try:
+            logger.info(f"ACCESS GRANT: Starting grant for user_id={user_id} (type: {type(user_id)}) to profile_id={profile_id} (type: {type(profile_id)})")
+            
             # CRITICAL FIX: Convert Supabase user ID to database user ID
             db_user_id = await self._get_database_user_id(db, user_id)
             if not db_user_id:
-                logger.error(f"Failed to find database user ID for Supabase ID: {user_id}")
+                logger.error(f"ACCESS GRANT ERROR: Failed to find database user ID for Supabase ID: {user_id}")
                 # Still attempt the operation with Supabase ID as fallback
                 try:
                     # Convert string to UUID if needed
                     fallback_user_id = UUID(user_id) if isinstance(user_id, str) else user_id
                     db_user_id = fallback_user_id
-                    logger.warning(f"Using Supabase ID as fallback: {db_user_id}")
+                    logger.warning(f"ACCESS GRANT FALLBACK: Using Supabase ID as fallback: {db_user_id}")
                 except (ValueError, TypeError) as uuid_error:
-                    logger.error(f"Cannot convert user_id to UUID: {uuid_error}")
+                    logger.error(f"ACCESS GRANT FALLBACK ERROR: Cannot convert user_id to UUID: {uuid_error}")
                     return False
             
-            # Validate profile_id
-            if not isinstance(profile_id, UUID):
-                logger.error(f"Invalid profile_id type: {type(profile_id)}")
+            # Validate and convert profile_id to UUID if needed
+            if isinstance(profile_id, str):
+                try:
+                    profile_id = UUID(profile_id)
+                    logger.info(f"ACCESS GRANT: Converted profile_id string to UUID: {profile_id}")
+                except (ValueError, TypeError) as conv_error:
+                    logger.error(f"ACCESS GRANT ERROR: Cannot convert profile_id string to UUID: {conv_error}")
+                    return False
+            elif not isinstance(profile_id, UUID):
+                logger.error(f"ACCESS GRANT ERROR: Invalid profile_id type: {type(profile_id)}")
                 return False
             
             expires_at = datetime.now(timezone.utc) + timedelta(days=30)
@@ -1119,12 +1129,18 @@ class ComprehensiveDataService:
             
             # Commit with error handling
             try:
+                logger.info(f"ACCESS GRANT: Committing transaction for user {db_user_id} -> profile {profile_id}")
                 await db.commit()
-                logger.debug(f"Successfully committed profile access for user {db_user_id}")
+                logger.info(f"ACCESS GRANT SUCCESS: Successfully committed profile access for user {db_user_id}")
                 return True
             except Exception as commit_error:
-                logger.error(f"Error committing profile access: {commit_error}")
-                await db.rollback()
+                logger.error(f"ACCESS GRANT COMMIT ERROR: Error committing profile access: {commit_error}")
+                logger.error(f"ACCESS GRANT COMMIT ERROR TYPE: {type(commit_error).__name__}")
+                try:
+                    await db.rollback()
+                    logger.info("ACCESS GRANT: Transaction rolled back successfully")
+                except Exception as rollback_error:
+                    logger.error(f"ACCESS GRANT ROLLBACK ERROR: {rollback_error}")
                 return False
             
         except Exception as e:
@@ -1137,7 +1153,7 @@ class ComprehensiveDataService:
                 logger.error(f"Error during rollback: {rollback_error}")
             return False
     
-    async def record_user_search_fixed(self, db: AsyncSession, user_id: str, username: str, 
+    async def record_user_search_fixed(self, db: AsyncSession, user_id, username: str, 
                                 analysis_type: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Record user search in database - FIXED for actual schema"""
         try:
@@ -1211,28 +1227,39 @@ class ComprehensiveDataService:
                 logger.error(f"Error during search rollback: {rollback_error}")
             return False
     
-    async def _get_database_user_id(self, db: AsyncSession, supabase_user_id: str) -> Optional[UUID]:
+    async def _get_database_user_id(self, db: AsyncSession, supabase_user_id) -> Optional[UUID]:
         """Convert Supabase user ID to database user ID - CRITICAL MAPPING FUNCTION"""
         try:
+            # Convert UUID to string if needed - supabase_user_id column is TEXT
+            if isinstance(supabase_user_id, UUID):
+                supabase_user_id_str = str(supabase_user_id)
+                logger.debug(f"MAPPING: Converted UUID to string: {supabase_user_id_str}")
+            else:
+                supabase_user_id_str = str(supabase_user_id)
+            
+            logger.debug(f"MAPPING: Looking for user with Supabase ID: {supabase_user_id_str} (type: {type(supabase_user_id_str)})")
+            
             result = await db.execute(
-                select(User.id).where(User.supabase_user_id == supabase_user_id)
+                select(User.id).where(User.supabase_user_id == supabase_user_id_str)
             )
             db_user = result.scalar_one_or_none()
             
             if db_user:
-                logger.debug(f"Mapped Supabase ID {supabase_user_id} to database ID {db_user}")
+                logger.info(f"MAPPING SUCCESS: Supabase ID {supabase_user_id_str} -> database ID {db_user} (type: {type(db_user)})")
                 return db_user
             else:
-                logger.warning(f"No database user found for Supabase ID: {supabase_user_id}")
+                logger.warning(f"MAPPING FAILED: No database user found for Supabase ID: {supabase_user_id_str}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error mapping user IDs: {str(e)}")
+            logger.error(f"MAPPING ERROR: Error mapping user IDs: {str(e)}")
             return None
     
     async def get_user_unlocked_profiles(self, db: AsyncSession, user_id: str, page: int = 1, page_size: int = 20) -> Dict[str, Any]:
-        """Get all profiles that user has access to (for creators page)"""
-        try:
+        """Get all profiles that user has access to (for creators page) - WITH RESILIENCE"""
+        
+        async def _execute_operation(db_session, user_id, page, page_size):
+            """Inner function for resilient execution"""
             from datetime import datetime, timezone
             from uuid import UUID
             
@@ -1257,7 +1284,7 @@ class ComprehensiveDataService:
             team_query = select(TeamMember.team_id).where(
                 TeamMember.user_id == user_uuid
             )
-            team_result = await db.execute(team_query)
+            team_result = await db_session.execute(team_query)
             user_team_ids = [row[0] for row in team_result.fetchall()]
             
             # Get profiles from direct user access
@@ -1375,14 +1402,37 @@ class ComprehensiveDataService:
                     "note": "All image URLs are pre-proxied to eliminate CORS issues",
                 }
             }
-            
+        
+        # Use resilience layer for database operations
+        try:
+            return await database_resilience.execute_with_resilience(
+                db, _execute_operation, "get_user_unlocked_profiles", user_id, page, page_size
+            )
         except Exception as e:
             import traceback
             error_details = str(e) if str(e) else repr(e)
-            logger.error(f"Failed to get unlocked profiles for user {user_id}: {error_details}")
+            logger.error(f"RESILIENT DB: Failed to get unlocked profiles for user {user_id}: {error_details}")
             logger.error(f"Exception type: {type(e).__name__}")
             logger.error(f"Full traceback: {traceback.format_exc()}")
-            raise ValueError(f"Failed to retrieve unlocked profiles: {error_details}")
+            
+            # Return empty result for graceful degradation
+            return {
+                "profiles": [],
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total_count": 0,
+                    "total_pages": 0,
+                    "has_next": False,
+                    "has_previous": False
+                },
+                "meta": {
+                    "user_id": user_id,
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                    "error": "Service temporarily unavailable - please try again",
+                    "network_issue": True
+                }
+            }
 
     async def get_user_profile_access(self, db: AsyncSession, user_id: str, username: str) -> Optional[Dict]:
         """Check if user has access to profile and return cached data if available"""

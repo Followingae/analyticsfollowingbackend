@@ -431,7 +431,8 @@ async def get_notification_preferences(
 @router.put("/notifications", response_model=NotificationPreferencesResponse)
 async def update_notification_preferences(
     notification_data: NotificationPreferencesRequest,
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """
     Update notification preferences
@@ -480,7 +481,8 @@ async def update_notification_preferences(
 
 @router.get("/preferences", response_model=UserPreferencesResponse)
 async def get_user_preferences(
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """Get current user preferences and app settings"""
     try:
@@ -503,7 +505,8 @@ async def get_user_preferences(
 @router.put("/preferences", response_model=UserPreferencesResponse)
 async def update_user_preferences(
     preferences_data: UserPreferencesRequest,
-    current_user: UserInDB = Depends(get_current_active_user)
+    current_user: UserInDB = Depends(get_current_active_user),
+    db_session = Depends(get_db)
 ):
     """
     Update user preferences and app settings

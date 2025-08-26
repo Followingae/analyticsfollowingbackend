@@ -287,29 +287,64 @@ class ProductionSupabaseAuthService:
                         logger.warning(f"Failed to parse created_at: {e}, using current time")
                         created_at = datetime.now(timezone.utc)
                     
-                    return UserResponse(
+                    # Parse avatar_config from JSON string to dict
+                    avatar_config = None
+                    try:
+                        import json
+                        avatar_config = json.loads(db_user.avatar_config) if db_user.avatar_config else None
+                    except (json.JSONDecodeError, TypeError):
+                        avatar_config = None
+                    
+                    user_response = UserResponse(
                         id=supabase_user.id,
                         email=supabase_user.email,
-                        full_name=user_metadata.get("full_name", ""),
+                        full_name=db_user.full_name or user_metadata.get("full_name", ""),  # Prioritize database
                         role=user_role,
                         status=UserStatus.ACTIVE,
                         created_at=created_at,
                         last_login=datetime.now(),
-                        profile_picture_url=user_metadata.get("avatar_url")
+                        avatar_config=avatar_config,
+                        # CONSISTENT SCHEMA: Add all profile fields
+                        first_name=getattr(db_user, 'first_name', None),
+                        last_name=getattr(db_user, 'last_name', None),
+                        company=getattr(db_user, 'company', None),  # THIS ENSURES CONSISTENT COMPANY
+                        job_title=getattr(db_user, 'job_title', None),
+                        phone_number=getattr(db_user, 'phone_number', None),
+                        bio=getattr(db_user, 'bio', None),
+                        timezone=getattr(db_user, 'timezone', 'UTC'),
+                        language=getattr(db_user, 'language', 'en'),
+                        updated_at=getattr(db_user, 'updated_at', None)
                     )
+                    
+                    # DEBUG LOGGING: Track user data being returned
+                    logger.info(f"LOGIN-RESPONSE: Returning user data for {supabase_user.email}")
+                    logger.info(f"LOGIN-RESPONSE: full_name='{user_response.full_name}', company='{user_response.company}'")
+                    
+                    return user_response
                     
         except Exception as e:
             logger.error(f"LOGIN-FRESH: Failed to fetch fresh user data for {supabase_user.email}: {e}")
             # Fallback to basic Supabase data if database fetch fails
+            logger.warning("LOGIN-FALLBACK: Using basic Supabase data - database fetch failed")
             return UserResponse(
                 id=supabase_user.id,
                 email=supabase_user.email,
-                full_name=user_metadata.get("full_name", ""),
+                full_name=user_metadata.get("full_name", supabase_user.email.split("@")[0]),  # Better fallback
                 role=user_role,
                 status=UserStatus.ACTIVE,
                 created_at=datetime.now(timezone.utc),
                 last_login=datetime.now(),
-                profile_picture_url=user_metadata.get("avatar_url")
+                # CONSISTENT SCHEMA: Add empty fields for consistency
+                avatar_config=None,
+                first_name=None,
+                last_name=None, 
+                company=None,  # Ensures company is always present (even if null)
+                job_title=None,
+                phone_number=None,
+                bio=None,
+                timezone="UTC",
+                language="en",
+                updated_at=None
             )
 
     async def _ensure_user_in_database(self, supabase_user, user_metadata: dict):
