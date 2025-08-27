@@ -28,6 +28,7 @@ from app.database.unified_models import Profile, Post
 from app.database.comprehensive_service import comprehensive_service
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
+from app.services.cdn_image_service import cdn_image_service
 from app.services.ai.ai_manager_singleton import ai_manager
 from app.core.config import settings
 
@@ -139,6 +140,11 @@ class RobustCreatorSearchService:
                 
                 # Grant user access
                 await comprehensive_service.grant_profile_access(db, user_id, profile.id)
+                
+                # TRIGGER CDN PROCESSING - NEW!
+                logger.info(f"🔧 DEBUG: About to trigger CDN processing for {profile.username}")
+                await self._trigger_cdn_processing(profile, raw_instagram_data)
+                logger.info(f"🔧 DEBUG: CDN processing call completed for {profile.username}")
                 
                 # Schedule comprehensive AI analysis
                 ai_task = await self._schedule_ai_analysis(profile, db)
@@ -436,6 +442,29 @@ class RobustCreatorSearchService:
             profile.ai_profile_analyzed_at is not None and
             profile.ai_primary_content_type is not None
         )
+    
+    async def _trigger_cdn_processing(self, profile: Profile, instagram_data: Dict[str, Any]) -> None:
+        """Trigger CDN processing for profile avatar and recent posts"""
+        try:
+            logger.info(f"🖼️ Triggering CDN processing for profile: {profile.username}")
+            
+            # Use the proper CDN service interface from the implementation plan
+            enqueue_result = await cdn_image_service.enqueue_profile_assets(
+                profile_id=profile.id,
+                decodo_data=instagram_data
+            )
+            
+            logger.info(f"✅ CDN processing queued for {profile.username}:")
+            logger.info(f"   - Success: {enqueue_result.success}")
+            logger.info(f"   - Jobs created: {enqueue_result.jobs_created}")
+            logger.info(f"   - Message: {enqueue_result.message}")
+            if not enqueue_result.success:
+                logger.warning(f"   - Error: {enqueue_result.error}")
+            
+        except Exception as e:
+            # Don't fail the entire creator search if CDN processing fails
+            logger.error(f"❌ CDN processing trigger failed for {profile.username}: {e}")
+            logger.error(f"   This is non-critical - profile search will continue")
     
     async def _format_basic_profile_data(self, profile: Profile) -> Dict[str, Any]:
         """Format basic profile data without AI insights"""

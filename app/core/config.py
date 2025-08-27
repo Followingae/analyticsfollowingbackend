@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     ENABLE_AI_ANALYSIS: bool = os.getenv("ENABLE_AI_ANALYSIS", "true").lower() == "true"
     AI_ANALYSIS_QUEUE_SIZE: int = int(os.getenv("AI_ANALYSIS_QUEUE_SIZE", "100"))
     
+    # CDN Configuration
+    INGEST_CONCURRENCY: int = int(os.getenv("INGEST_CONCURRENCY", "4"))
+    INGEST_RETRY_LIMIT: int = int(os.getenv("INGEST_RETRY_LIMIT", "3"))
+    CF_ACCOUNT_ID: str = os.getenv("CF_ACCOUNT_ID", "")
+    R2_ACCESS_KEY_ID: str = os.getenv("R2_ACCESS_KEY_ID", "")
+    R2_SECRET_ACCESS_KEY: str = os.getenv("R2_SECRET_ACCESS_KEY", "")
+    R2_BUCKET_NAME: str = os.getenv("R2_BUCKET_NAME", "")
+    
     class Config:
         case_sensitive = True
 

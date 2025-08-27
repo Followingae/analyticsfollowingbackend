@@ -201,7 +201,7 @@ from app.api.discovery_routes import router as discovery_router
 app.include_router(discovery_router, prefix="/api/v1")
 
 # Include Campaigns routes - WORKING VERSION (No auth until dependency issue resolved)
-from app.api.campaigns_routes_final import router as campaigns_router
+from app.api.campaigns_routes import router as campaigns_router
 app.include_router(campaigns_router, prefix="/api/v1")
 
 # Include Health and Metrics endpoints
@@ -234,6 +234,12 @@ app.include_router(system_status_router, prefix="/api/v1")
 # Include Admin Proposals Routes - SECURITY ENABLED
 from app.api.admin_secure.proposals_routes import router as admin_proposals_router
 app.include_router(admin_proposals_router, prefix="/api")
+
+# Include CDN Media and Health routes
+from app.api.cdn_media_routes import router as cdn_media_router
+from app.api.cdn_health_routes import router as cdn_health_router
+app.include_router(cdn_media_router, prefix="/api/v1")
+app.include_router(cdn_health_router, prefix="/api/v1")
 
 # TEMPORARY FIX: Add credit routes with double prefix to fix frontend calling wrong URL
 # This should be removed once frontend is updated to use correct /api/v1/credits/* paths
