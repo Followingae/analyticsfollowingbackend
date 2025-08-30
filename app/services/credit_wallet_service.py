@@ -477,19 +477,10 @@ class CreditWalletService:
             month_year = date.today().replace(day=1)
         
         try:
-            async with get_session() as session:
-                result = await session.execute(
-                    select(func.sum(CreditUsageTracking.total_credits_spent))
-                    .where(
-                        and_(
-                            CreditUsageTracking.user_id == user_id,
-                            CreditUsageTracking.month_year == month_year
-                        )
-                    )
-                )
-                
-                total_spent = result.scalar()
-                return total_spent or 0
+            # TEMPORARY FIX: Skip usage tracking due to model mismatch
+            # TODO: Fix CreditUsageTracking model schema mismatch
+            logger.warning(f"TEMP FIX: Skipping monthly spending calculation for user {user_id}")
+            return 0
                 
         except Exception as e:
             logger.error(f"Error getting monthly spending for user {user_id}: {e}")

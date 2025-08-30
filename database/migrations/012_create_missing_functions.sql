@@ -37,8 +37,8 @@ BEGIN
     RETURN QUERY
     SELECT 
         COALESCE(cw.current_balance, 0) as total_plan_credits,
-        COALESCE(cw.total_earned, 0) as lifetime_credits_earned,
-        COALESCE(cw.total_spent, 0) as lifetime_credits_spent,
+        COALESCE(cw.lifetime_earned, 0) as lifetime_credits_earned,
+        COALESCE(cw.lifetime_spent, 0) as lifetime_credits_spent,
         COALESCE(
             (SELECT SUM(credit_amount) 
              FROM public.credit_transactions ct 

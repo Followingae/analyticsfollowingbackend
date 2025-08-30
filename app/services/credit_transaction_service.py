@@ -248,27 +248,19 @@ class CreditTransactionService:
             return MonthlyUsageSummary(**cached_summary)
         
         try:
-            async with get_session() as session:
-                # Get usage tracking data
-                usage_result = await session.execute(
-                    select(CreditUsageTracking)
-                    .where(
-                        and_(
-                            CreditUsageTracking.user_id == user_id,
-                            CreditUsageTracking.month_year == month_year
-                        )
-                    )
-                )
+            # TEMPORARY FIX: Skip usage tracking due to model mismatch
+            # TODO: Fix CreditUsageTracking model schema mismatch
+            logger.warning(f"TEMP FIX: Skipping usage tracking for user {user_id} due to model mismatch")
+            usage_records = []
                 
-                usage_records = usage_result.scalars().all()
+            # Calculate totals and breakdown
+            total_spent = 0  # sum(record.total_credits_spent for record in usage_records)
+            actions_breakdown = {}
                 
-                # Calculate totals and breakdown
-                total_spent = sum(record.total_credits_spent for record in usage_records)
-                actions_breakdown = {}
-                
-                for record in usage_records:
-                    actions_breakdown[record.action_type] = {
-                        "free_used": record.free_actions_used,
+            # TEMP: Skip processing since usage_records is empty
+            for record in usage_records:
+                actions_breakdown[record.action_type] = {
+                    "free_used": record.free_actions_used,
                         "paid_used": record.paid_actions_used,
                         "credits_spent": record.total_credits_spent
                     }

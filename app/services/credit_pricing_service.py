@@ -432,33 +432,24 @@ class CreditPricingService:
             return cached_count
         
         try:
-            async with get_session() as session:
-                result = await session.execute(
-                    select(CreditUsageTracking.free_actions_used)
-                    .where(
-                        and_(
-                            CreditUsageTracking.user_id == user_id,
-                            CreditUsageTracking.action_type == action_type,
-                            CreditUsageTracking.month_year == month_year
-                        )
+            # TEMPORARY FIX: Skip usage tracking due to model mismatch
+            # TODO: Fix CreditUsageTracking model schema mismatch
+            logger.warning(f"TEMP FIX: Skipping free allowance check for user {user_id}, action {action_type}")
+            free_used = 0
+                
+            # Cache the result (with graceful Redis fallback)
+            try:
+                if cache_manager.redis_client:
+                    import json
+                    await cache_manager.redis_client.setex(
+                        cache_key, 
+                        self.allowance_cache_ttl, 
+                        json.dumps(free_used, default=str)
                     )
-                )
+            except Exception as e:
+                logger.warning(f"Failed to cache allowance used for {user_id}:{action_type}: {e}")
                 
-                free_used = result.scalar() or 0
-                
-                # Cache the result (with graceful Redis fallback)
-                try:
-                    if cache_manager.redis_client:
-                        import json
-                        await cache_manager.redis_client.setex(
-                            cache_key, 
-                            self.allowance_cache_ttl, 
-                            json.dumps(free_used, default=str)
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to cache allowance used for {user_id}:{action_type}: {e}")
-                
-                return free_used
+            return free_used
                 
         except Exception as e:
             logger.error(f"Error getting free allowance used for user {user_id}: {e}")
@@ -506,19 +497,10 @@ class CreditPricingService:
             # Get all active pricing rules
             rules = await self.get_all_pricing_rules()
             
-            # Get user's usage for the month
-            async with get_session() as session:
-                result = await session.execute(
-                    select(CreditUsageTracking)
-                    .where(
-                        and_(
-                            CreditUsageTracking.user_id == user_id,
-                            CreditUsageTracking.month_year == month_year
-                        )
-                    )
-                )
-                
-                usage_records = {record.action_type: record for record in result.scalars().all()}
+            # TEMPORARY FIX: Skip usage tracking due to model mismatch
+            # TODO: Fix CreditUsageTracking model schema mismatch
+            logger.warning(f"TEMP FIX: Skipping allowance status for user {user_id}")
+            usage_records = {}
             
             # Build allowance status
             allowance_status = {}
