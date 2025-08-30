@@ -52,6 +52,23 @@ class FrontendHeadersMiddleware(BaseHTTPMiddleware):
         # Log request headers for CORS debugging
         origin = request.headers.get("origin", "none")
         user_agent = request.headers.get("user-agent", "unknown")[:100]
+        auth_header = request.headers.get("authorization", "none")
+        
+        # Enhanced auth header debugging for malformed token issues
+        if auth_header != "none":
+            if auth_header.startswith("Bearer "):
+                token_part = auth_header[7:].strip()  # Remove "Bearer " prefix
+                if token_part:
+                    token_segments = len(token_part.split('.'))
+                    logger.debug(f"   Auth: Bearer token present (segments: {token_segments}, length: {len(token_part)})")
+                    if token_segments != 3:
+                        logger.warning(f"   AUTH WARNING: Malformed token detected - {token_segments} segments instead of 3")
+                        logger.warning(f"   AUTH WARNING: Token preview: '{token_part[:30]}...'")
+                else:
+                    logger.warning("   AUTH WARNING: Bearer header present but token is empty")
+            else:
+                logger.warning(f"   AUTH WARNING: Authorization header doesn't start with 'Bearer ': '{auth_header[:50]}...'")
+        
         logger.debug(f"   Origin: {origin}, User-Agent: {user_agent}")
         
         # Process request with error handling

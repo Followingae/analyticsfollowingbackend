@@ -44,8 +44,61 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     Dependency to get current authenticated user with resilience
     """
     try:
-        token = credentials.credentials
-        logger.debug(f"RESILIENT AUTH: Attempting authentication with token length: {len(token) if token else 0}")
+        token = credentials.credentials if credentials else None
+        
+        # BULLETPROOF TOKEN VALIDATION
+        if not token:
+            logger.warning("RESILIENT AUTH: No token provided")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Access token required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Basic token validation with debugging
+        token = token.strip()
+        if not token:
+            logger.warning("RESILIENT AUTH: Empty token after stripping")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Access token required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Validate token format (JWT should have 3 parts) 
+        token_parts = token.split('.')
+        if len(token_parts) != 3:
+            logger.warning(f"RESILIENT AUTH: Malformed token - has {len(token_parts)} segments instead of 3")
+            logger.warning(f"RESILIENT AUTH: Frontend is sending: '{token}' (length: {len(token)})")
+            
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "error": "malformed_token",
+                    "message": f"Invalid JWT token: expected 3 segments, got {len(token_parts)}",
+                    "frontend_issue": f"Frontend sending '{token}' instead of valid JWT",
+                    "fix_required": "Check frontend token storage and retrieval logic"
+                },
+                headers={
+                    "WWW-Authenticate": "Bearer",
+                    "X-Token-Issue": f"segments_{len(token_parts)}_length_{len(token)}"
+                },
+            )
+        
+        # Check token length (reasonable bounds)
+        if len(token) < 100 or len(token) > 2000:
+            logger.warning(f"RESILIENT AUTH: Token length suspicious: {len(token)} characters")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "error": "invalid_token_length", 
+                    "message": "Token appears corrupted",
+                    "frontend_issue": f"Token length is {len(token)} characters"
+                },
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        logger.debug(f"RESILIENT AUTH: Token validated, attempting authentication (length: {len(token)})")
         
         # Try resilient authentication first
         user = await resilient_auth_service.validate_token_resilient(token)
@@ -73,7 +126,10 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         logger.error(f"RESILIENT AUTH: All authentication methods failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed - please try logging in again",
+            detail={
+                "error": "authentication_failed", 
+                "message": "Authentication failed - please try logging in again"
+            },
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -120,10 +176,31 @@ async def get_optional_user(request: Request) -> Optional[UserInDB]:
         if not auth_header or not auth_header.startswith("Bearer "):
             return None
         
-        token = auth_header.split(" ")[1]
+        # Extract and validate token using centralized validator
+        from app.utils.token_validator import token_validator
+        
+        token, extract_error = token_validator.extract_token_from_header(auth_header)
+        if extract_error:
+            logger.debug(f"OPTIONAL AUTH: Token extraction failed - {extract_error}")
+            return None
+        
+        validation_result = token_validator.validate_token(token, "optional_auth")
+        if not validation_result.is_valid:
+            logger.debug(f"OPTIONAL AUTH: Token validation failed - {validation_result.error_message}")
+            return None
+        
+        token = validation_result.token
+        
+        # Try resilient authentication first
+        user = await resilient_auth_service.validate_token_resilient(token)
+        if user and user.status in ["active", "pending"]:
+            return user
+        
+        # Fallback to original auth service
         user = await auth_service.get_current_user(token)
-        return user if user.status == "active" else None
-    except:
+        return user if user and user.status in ["active", "pending"] else None
+    except Exception as e:
+        logger.debug(f"OPTIONAL AUTH: Authentication failed (expected): {e}")
         return None
 
 

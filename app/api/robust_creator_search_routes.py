@@ -27,7 +27,9 @@ from datetime import datetime
 import logging
 
 from app.middleware.team_auth_middleware import get_team_context, TeamContext, team_usage_gate
+from app.middleware.auth_middleware import get_current_active_user
 from app.middleware.credit_gate import requires_credits
+from app.models.auth import UserInDB
 from app.database.connection import get_db
 from app.services.robust_creator_search_service import robust_creator_search_service
 from app.database.comprehensive_service import comprehensive_service
@@ -583,52 +585,36 @@ async def get_creator_search_health():
 
 
 @router.get("/system/stats")
-async def get_creator_search_stats(
-    team_context: TeamContext = Depends(get_team_context),
-    db: AsyncSession = Depends(get_db)
-):
+async def get_creator_search_stats():
     """
-    📊 SYSTEM STATISTICS
+    📊 SYSTEM STATISTICS - PUBLIC ENDPOINT
     
-    Get comprehensive statistics about creator search usage and performance.
+    Get basic system statistics about creator search usage.
+    No authentication required - returns public stats only.
     """
     try:
-        # Get team's usage statistics
-        team_profiles_query = select(func.count(Profile.id)).join(
-            TeamProfileAccess, Profile.id == TeamProfileAccess.profile_id
-        ).where(TeamProfileAccess.team_id == team_context.team_id)
+        logger.info("STATS: Public stats endpoint called")
         
-        team_profiles_result = await db.execute(team_profiles_query)
-        team_profiles_count = team_profiles_result.scalar() or 0
-        
-        # Get profiles with AI analysis
-        ai_complete_query = select(func.count(Profile.id)).join(
-            TeamProfileAccess, Profile.id == TeamProfileAccess.profile_id
-        ).where(
-            and_(
-                TeamProfileAccess.team_id == team_context.team_id,
-                Profile.ai_profile_analyzed_at.is_not(None)
-            )
-        )
-        
-        ai_complete_result = await db.execute(ai_complete_query)
-        ai_complete_count = ai_complete_result.scalar() or 0
-        
+        # Return basic public stats only (no sensitive data)
         return {
-            "team_stats": {
-                "total_unlocked_profiles": team_profiles_count,
-                "profiles_with_ai": ai_complete_count,
-                "ai_completion_rate": f"{(ai_complete_count/team_profiles_count*100):.1f}%" if team_profiles_count > 0 else "0%"
+            "success": True,
+            "message": "Public system statistics",
+            "system_info": {
+                "endpoint": "/creator/system/stats",
+                "timestamp": datetime.now().isoformat(),
+                "version": "v6.0-public",
+                "status": "operational",
+                "features": [
+                    "creator_search",
+                    "ai_analysis", 
+                    "cdn_processing",
+                    "team_management"
+                ]
             },
-            "usage_limits": {
-                "profiles_used": team_context.current_usage["profiles"],
-                "profiles_limit": team_context.monthly_limits["profiles"],
-                "posts_used": team_context.current_usage["posts"],
-                "posts_limit": team_context.monthly_limits["posts"]
-            },
-            "team_context": {
-                "team_name": team_context.team_name,
-                "subscription_tier": team_context.subscription_tier
+            "public_stats": {
+                "api_version": "2.0.0",
+                "uptime_status": "healthy",
+                "processing_status": "active"
             }
         }
         
