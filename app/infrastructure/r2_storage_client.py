@@ -56,14 +56,15 @@ class R2StorageClient:
         }
         
         logger.info(f"R2 client initialized for bucket: {bucket_name}")
-        self._test_connection()
+        # Test connection will be done on first use to avoid blocking initialization
     
-    def _test_connection(self):
+    def test_connection(self):
         """Test R2 connection and bucket access"""
         try:
             # Test bucket access
             self.s3_client.head_bucket(Bucket=self.bucket_name)
             logger.info(f"✅ R2 bucket '{self.bucket_name}' is accessible")
+            return True
         except ClientError as e:
             error_code = e.response['Error']['Code']
             if error_code == '404':
@@ -72,7 +73,7 @@ class R2StorageClient:
                 logger.error(f"❌ Access denied to R2 bucket '{self.bucket_name}'")
             else:
                 logger.error(f"❌ R2 connection test failed: {e}")
-            raise
+            return False
     
     async def upload_object(self, key: str, content: bytes, content_type: str, 
                           cache_control: str = None, metadata: Dict[str, str] = None) -> bool:

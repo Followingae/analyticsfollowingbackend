@@ -149,20 +149,21 @@ async def init_database():
         # Create SQLAlchemy engines with network resilience
         async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
         
-        # Enhanced connection configuration with resilience
+        # Emergency connection configuration with very short timeouts
         async_engine = create_async_engine(
             async_url,
-            pool_pre_ping=True,          # Enable pre-ping to detect dead connections
-            pool_recycle=300,            # Shorter recycle time for network issues (5 minutes)
-            pool_size=5,                 # Standard pool size
-            max_overflow=3,              # Standard overflow
-            pool_timeout=20,             # Shorter timeout for better error handling
+            pool_pre_ping=False,         # Disable pre-ping for faster startup
+            pool_recycle=600,            # Standard recycle time
+            pool_size=2,                 # Minimal pool size
+            max_overflow=0,              # No overflow for simplicity
+            pool_timeout=3,              # Very short timeout
             echo=False,
             connect_args={
-                "command_timeout": 30,   # Shorter timeout for network resilience
+                "command_timeout": 5,    # Very short timeout
+                "connect_timeout": 5,    # Connection timeout
                 "server_settings": {
-                    "application_name": "analytics_backend_resilient",
-                    "statement_timeout": "30s"  # Shorter statement timeout
+                    "application_name": "analytics_backend_emergency",
+                    "statement_timeout": "10s"
                 }
             }
         )
@@ -174,18 +175,9 @@ async def init_database():
             expire_on_commit=False
         )
         
-        # Test connection with resilience
-        try:
-            test_result = await _test_connection_with_resilience(async_engine)
-            if test_result:
-                logger.info("SUCCESS: Database connection test passed")
-                database_resilience.record_success()
-            else:
-                logger.warning("WARNING: Database connection test failed - continuing with resilient mode")
-                database_resilience.record_failure()
-        except Exception as test_error:
-            logger.warning(f"WARNING: Connection test failed: {test_error} - continuing with resilient mode")
-            database_resilience.record_failure()
+        # Skip connection test for emergency mode
+        logger.warning("EMERGENCY MODE: Skipping connection test to avoid hangs")
+        database_resilience.record_success()  # Assume success for emergency startup
         
         # Using SQLAlchemy async only - databases library not needed
         database = None

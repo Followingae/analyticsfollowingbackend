@@ -112,16 +112,26 @@ class RobustCreatorSearchService:
                 # Grant user access to existing profile
                 await comprehensive_service.grant_profile_access(db, user_id, existing_profile.id)
                 
-                # Check if AI analysis is complete
-                ai_complete = await self._check_ai_analysis_status(existing_profile)
+                # Check if AI analysis is complete (comprehensive check with posts)
+                ai_complete = await self._check_ai_analysis_status(existing_profile, db)
                 
                 if ai_complete:
-                    logger.info(f"CREATOR SEARCH AI COMPLETE: AI analysis complete for {username}")
-                    return await self._format_complete_response(existing_profile, "database_complete")
+                    logger.info(f"CREATOR SEARCH AI COMPLETE: AI analysis complete for {username} - serving from database")
+                    return await self._format_complete_response(existing_profile, "database_complete", db)
                 else:
-                    logger.info(f"CREATOR SEARCH AI PENDING: Scheduling AI analysis for existing profile {username}")
+                    logger.info(f"CREATOR SEARCH AI INCOMPLETE: AI analysis needed for existing profile {username}")
+                    # Run AI analysis but return immediately for better UX
                     ai_task = await self._schedule_ai_analysis(existing_profile, db)
-                    return await self._format_basic_response(existing_profile, "database_processing", ai_task)
+                    
+                    # If analysis was successful, return complete response
+                    if ai_task.get("status") == "completed" and ai_task.get("posts_analyzed", 0) > 0:
+                        logger.info(f"CREATOR SEARCH AI COMPLETED: Fresh AI analysis completed for {username}")
+                        # Refresh profile from DB to get updated AI data
+                        refreshed_profile = await comprehensive_service.get_profile_by_username(db, username)
+                        return await self._format_complete_response(refreshed_profile, "database_fresh_ai", db)
+                    else:
+                        # Return basic response if AI analysis is still ongoing or already complete
+                        return await self._format_basic_response(existing_profile, "database_processing", ai_task, db)
             
             # PHASE 2: Profile doesn't exist or force refresh - fetch from Instagram
             logger.info(f"CREATOR SEARCH FETCH: Fetching fresh Instagram data for {username}")
@@ -143,7 +153,7 @@ class RobustCreatorSearchService:
                 
                 # TRIGGER CDN PROCESSING - NEW!
                 logger.info(f"🔧 DEBUG: About to trigger CDN processing for {profile.username}")
-                await self._trigger_cdn_processing(profile, raw_instagram_data)
+                await self._trigger_cdn_processing(profile, raw_instagram_data, db)
                 logger.info(f"🔧 DEBUG: CDN processing call completed for {profile.username}")
                 
                 # Schedule comprehensive AI analysis
@@ -156,6 +166,7 @@ class RobustCreatorSearchService:
                     profile, 
                     "instagram_fresh", 
                     ai_task,
+                    db,
                     processing_time
                 )
                 
@@ -200,14 +211,14 @@ class RobustCreatorSearchService:
                 )
             
             # Check user access
-            has_access = await comprehensive_service.check_profile_access(db, user_id, username)
+            has_access = await comprehensive_service.check_profile_access(db, user_id, profile.id)
             if not has_access:
                 return self._create_error_response(
                     f"User does not have access to profile {username}"
                 )
             
-            # Check AI analysis status
-            ai_complete = await self._check_ai_analysis_status(profile)
+            # Check AI analysis status (comprehensive check with posts)
+            ai_complete = await self._check_ai_analysis_status(profile, db)
             
             if not ai_complete:
                 # AI analysis still in progress
@@ -223,7 +234,7 @@ class RobustCreatorSearchService:
                 }
             
             # Return complete analysis
-            return await self._format_complete_response(profile, "detailed_complete")
+            return await self._format_complete_response(profile, "detailed_complete", db)
             
         except Exception as e:
             logger.error(f"❌ Detailed analysis failed for {username}: {e}")
@@ -250,14 +261,14 @@ class RobustCreatorSearchService:
                 }
             
             # Check user access
-            has_access = await comprehensive_service.check_profile_access(db, user_id, username)
+            has_access = await comprehensive_service.check_profile_access(db, user_id, profile.id)
             if not has_access:
                 return {
                     "status": "no_access",
                     "message": "User does not have access to this profile"
                 }
             
-            ai_complete = await self._check_ai_analysis_status(profile)
+            ai_complete = await self._check_ai_analysis_status(profile, db)
             
             if ai_complete:
                 return {
@@ -303,18 +314,40 @@ class RobustCreatorSearchService:
             raise
     
     async def _schedule_ai_analysis(self, profile: Profile, db: AsyncSession) -> Dict[str, Any]:
-        """Schedule comprehensive AI analysis for profile posts"""
+        """Schedule comprehensive AI analysis for profile posts - ONLY process unanalyzed posts"""
         try:
-            # Get posts for the profile
-            posts_query = select(Post).where(Post.profile_id == profile.id)
-            posts_result = await db.execute(posts_query)
-            posts = posts_result.scalars().all()
+            # Get ALL posts for the profile
+            all_posts_query = select(Post).where(Post.profile_id == profile.id)
+            all_posts_result = await db.execute(all_posts_query)
+            all_posts = all_posts_result.scalars().all()
             
-            logger.info(f"🧠 Starting AI analysis for {profile.username} ({len(posts)} posts)")
+            # Get posts that need AI analysis (haven't been analyzed yet)
+            unanalyzed_posts_query = select(Post).where(
+                and_(
+                    Post.profile_id == profile.id,
+                    Post.ai_analyzed_at.is_(None)
+                )
+            )
+            unanalyzed_posts_result = await db.execute(unanalyzed_posts_query)
+            unanalyzed_posts = unanalyzed_posts_result.scalars().all()
             
-            # Prepare posts data for AI analysis
+            logger.info(f"🧠 AI Analysis for {profile.username}: {len(all_posts)} total posts, {len(unanalyzed_posts)} need analysis")
+            
+            # If no posts need analysis, skip processing but update profile aggregates
+            if len(unanalyzed_posts) == 0:
+                logger.info(f"✅ All posts already analyzed for {profile.username}, updating aggregates only")
+                await self._update_profile_ai_aggregate(db, profile.id)
+                return {
+                    "status": "completed",
+                    "posts_analyzed": 0,
+                    "total_posts": len(all_posts),
+                    "success_rate": "100%",
+                    "message": "All posts already analyzed"
+                }
+            
+            # Prepare unanalyzed posts data for AI analysis
             posts_data = []
-            for post in posts:
+            for post in unanalyzed_posts:
                 post_data = {
                     "id": str(post.id),
                     "caption": post.caption or "",
@@ -325,7 +358,8 @@ class RobustCreatorSearchService:
                 }
                 posts_data.append(post_data)
             
-            # Run batch AI analysis
+            # Run batch AI analysis ONLY on unanalyzed posts
+            logger.info(f"🧠 Processing {len(posts_data)} unanalyzed posts for {profile.username}")
             analysis_results = await bulletproof_content_intelligence.batch_analyze_posts(
                 posts_data, batch_size=5
             )
@@ -345,16 +379,29 @@ class RobustCreatorSearchService:
                     if success:
                         successful_analyses += 1
             
-            # Update profile with aggregate AI analysis
-            await self._update_profile_ai_aggregate(db, profile.id, posts_data)
+            # Update profile with aggregate AI analysis (includes all posts, analyzed and new)
+            await self._update_profile_ai_aggregate(db, profile.id)
             
-            logger.info(f"✅ AI analysis completed for {profile.username}: {successful_analyses}/{len(posts)} posts analyzed")
+            # Get total analyzed posts count after processing
+            total_analyzed_query = select(func.count(Post.id)).where(
+                and_(
+                    Post.profile_id == profile.id,
+                    Post.ai_analyzed_at.is_not(None)
+                )
+            )
+            total_analyzed_result = await db.execute(total_analyzed_query)
+            total_analyzed = total_analyzed_result.scalar() or 0
+            
+            success_rate = (total_analyzed / len(all_posts) * 100) if all_posts else 100
+            
+            logger.info(f"✅ AI analysis completed for {profile.username}: {successful_analyses} new analyses, {total_analyzed}/{len(all_posts)} total analyzed ({success_rate:.1f}%)")
             
             return {
                 "status": "completed",
                 "posts_analyzed": successful_analyses,
-                "total_posts": len(posts),
-                "success_rate": f"{(successful_analyses/len(posts)*100):.1f}%" if posts else "100%"
+                "total_posts": len(all_posts),
+                "total_analyzed": total_analyzed,
+                "success_rate": f"{success_rate:.1f}%"
             }
             
         except Exception as e:
@@ -364,7 +411,7 @@ class RobustCreatorSearchService:
                 "error": str(e)
             }
     
-    async def _update_profile_ai_aggregate(self, db: AsyncSession, profile_id: UUID, posts_data: List[Dict]) -> None:
+    async def _update_profile_ai_aggregate(self, db: AsyncSession, profile_id: UUID, posts_data: List[Dict] = None) -> None:
         """Update profile with aggregate AI analysis data"""
         try:
             # Calculate aggregate statistics
@@ -436,23 +483,102 @@ class RobustCreatorSearchService:
             logger.error(f"❌ Failed to update profile AI aggregates: {e}")
             await db.rollback()
     
-    async def _check_ai_analysis_status(self, profile: Profile) -> bool:
-        """Check if AI analysis is complete for a profile"""
-        return (
-            profile.ai_profile_analyzed_at is not None and
-            profile.ai_primary_content_type is not None
-        )
+    async def _check_ai_analysis_status(self, profile: Profile, db: AsyncSession = None) -> bool:
+        """Check if AI analysis is complete for a profile AND its posts"""
+        # First check if profile-level AI data exists
+        if not profile.ai_profile_analyzed_at or not profile.ai_primary_content_type:
+            return False
+        
+        # If db session provided, check individual posts analysis status
+        if db:
+            try:
+                # Get total posts count
+                total_posts_query = select(func.count(Post.id)).where(Post.profile_id == profile.id)
+                total_posts_result = await db.execute(total_posts_query)
+                total_posts = total_posts_result.scalar() or 0
+                
+                # If no posts, consider complete
+                if total_posts == 0:
+                    return True
+                
+                # Get analyzed posts count
+                analyzed_posts_query = select(func.count(Post.id)).where(
+                    and_(
+                        Post.profile_id == profile.id,
+                        Post.ai_analyzed_at.is_not(None)
+                    )
+                )
+                analyzed_posts_result = await db.execute(analyzed_posts_query)
+                analyzed_posts = analyzed_posts_result.scalar() or 0
+                
+                # Consider complete if 80% or more posts are analyzed (allows for some failures)
+                completion_threshold = 0.8
+                is_complete = analyzed_posts >= (total_posts * completion_threshold)
+                
+                logger.debug(f"🔍 AI Status for {profile.username}: {analyzed_posts}/{total_posts} posts analyzed ({analyzed_posts/total_posts*100:.1f}%) - {'Complete' if is_complete else 'Incomplete'}")
+                
+                return is_complete
+                
+            except Exception as e:
+                logger.error(f"❌ Error checking AI analysis status for {profile.username}: {e}")
+                # Fall back to profile-level check only
+                return True
+        
+        # If no db session, can only check profile-level data
+        return True
     
-    async def _trigger_cdn_processing(self, profile: Profile, instagram_data: Dict[str, Any]) -> None:
+    async def _trigger_cdn_processing(self, profile: Profile, instagram_data: Dict[str, Any], db: AsyncSession = None) -> None:
         """Trigger CDN processing for profile avatar and recent posts"""
         try:
             logger.info(f"🖼️ Triggering CDN processing for profile: {profile.username}")
+            logger.info(f"🔍 DEBUG: Profile ID = {profile.id}")
+            logger.info(f"🔍 DEBUG: Profile has {profile.posts_count} posts")
+            
+            # Check how many posts are in database with display URLs
+            from sqlalchemy import func, select
+            from app.database.unified_models import Post
+            
+            posts_count_query = select(func.count(Post.id)).where(Post.profile_id == profile.id)
+            posts_count_result = await db.execute(posts_count_query)
+            posts_in_db = posts_count_result.scalar() or 0
+            
+            posts_with_urls_query = select(func.count(Post.id)).where(
+                Post.profile_id == profile.id, 
+                Post.display_url.is_not(None)
+            )
+            posts_with_urls_result = await db.execute(posts_with_urls_query)
+            posts_with_urls = posts_with_urls_result.scalar() or 0
+            
+            logger.info(f"🔍 DEBUG: {posts_in_db} posts in database, {posts_with_urls} with display URLs")
             
             # Use the proper CDN service interface from the implementation plan
             enqueue_result = await cdn_image_service.enqueue_profile_assets(
                 profile_id=profile.id,
-                decodo_data=instagram_data
+                decodo_data=instagram_data,
+                db=db
             )
+            
+            logger.info(f"🔍 DEBUG: CDN enqueue result - Success: {enqueue_result.success}, Jobs: {enqueue_result.jobs_created}")
+            if not enqueue_result.success:
+                logger.error(f"🔍 DEBUG: CDN enqueue error: {enqueue_result.error}")
+            
+            # Show what CDN jobs exist after enqueuing
+            if enqueue_result.success and db:
+                from sqlalchemy import text
+                jobs_query = text('''
+                    SELECT cia.source_type, COUNT(*), cij.status
+                    FROM cdn_image_jobs cij
+                    JOIN cdn_image_assets cia ON cij.asset_id = cia.id
+                    WHERE cia.source_id = :profile_id
+                    GROUP BY cia.source_type, cij.status
+                    ORDER BY cia.source_type
+                ''')
+                jobs_result = await db.execute(jobs_query, {'profile_id': str(profile.id)})
+                jobs = jobs_result.fetchall()
+                
+                logger.info(f"🔍 DEBUG: CDN jobs after enqueue:")
+                for job in jobs:
+                    logger.info(f"🔍 DEBUG:   {job[0]}: {job[1]} jobs ({job[2]})")
             
             logger.info(f"✅ CDN processing queued for {profile.username}:")
             logger.info(f"   - Success: {enqueue_result.success}")
@@ -461,13 +587,99 @@ class RobustCreatorSearchService:
             if not enqueue_result.success:
                 logger.warning(f"   - Error: {enqueue_result.error}")
             
+            # IMMEDIATELY PROCESS CDN JOBS - NO PENDING JOBS ALLOWED
+            if enqueue_result.success and enqueue_result.jobs_created > 0:
+                logger.info(f"🚀 PROCESSING {enqueue_result.jobs_created} CDN jobs IMMEDIATELY...")
+                
+                try:
+                    from app.tasks.cdn_processing_tasks import _process_cdn_image_job_async
+                    from sqlalchemy import text
+                    
+                    # Get all queued jobs for this profile
+                    jobs_query = text('''
+                        SELECT cij.id, cia.source_type
+                        FROM cdn_image_jobs cij
+                        JOIN cdn_image_assets cia ON cij.asset_id = cia.id
+                        WHERE cia.source_id = :profile_id
+                        AND cij.status = 'queued'
+                        ORDER BY cij.priority ASC
+                    ''')
+                    jobs_result = await db.execute(jobs_query, {'profile_id': str(profile.id)})
+                    jobs_to_process = jobs_result.fetchall()
+                    
+                    logger.info(f"🎯 Queueing {len(jobs_to_process)} jobs for professional processing")
+                    
+                    # Use industry-standard CDN queue manager
+                    from app.services.cdn_queue_manager import cdn_queue_manager, JobPriority
+                    
+                    queued_count = 0
+                    for job in jobs_to_process:
+                        try:
+                            job_id, source_type = str(job[0]), job[1]
+                            
+                            # Determine priority: Avatar = CRITICAL, Posts = HIGH  
+                            priority = JobPriority.CRITICAL if source_type == 'profile_avatar' else JobPriority.HIGH
+                            
+                            # Enqueue with proper job data structure
+                            success = await cdn_queue_manager.enqueue_job(
+                                job_id=job_id,
+                                asset_data={'job_id': job_id, 'source_type': source_type},
+                                priority=priority
+                            )
+                            
+                            if success:
+                                queued_count += 1
+                                logger.info(f"📥 Queued {source_type} job with {priority.name} priority")
+                            else:
+                                logger.warning(f"⚠️ Failed to queue {source_type} job")
+                                
+                        except Exception as e:
+                            logger.error(f"❌ Exception queueing {job[1]} job: {e}")
+                    
+                    # Process queue with industry-standard approach
+                    logger.info(f"🚀 Starting professional CDN processing for {queued_count} jobs...")
+                    queue_result = await cdn_queue_manager.process_queue()
+                    
+                    if queue_result.get('success'):
+                        success_count = queue_result.get('jobs_processed', 0)
+                        success_rate = queue_result.get('success_rate', 0)
+                        processing_time = queue_result.get('processing_time', 0)
+                        
+                        logger.info(f"🏆 PROFESSIONAL PROCESSING COMPLETE: {success_count}/{queued_count} jobs successful ({success_rate:.1f}% rate) in {processing_time:.2f}s")
+                    else:
+                        logger.error(f"❌ Queue processing error: {queue_result.get('error', 'Unknown error')}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Failed to process CDN jobs immediately: {e}")
+            
         except Exception as e:
             # Don't fail the entire creator search if CDN processing fails
             logger.error(f"❌ CDN processing trigger failed for {profile.username}: {e}")
             logger.error(f"   This is non-critical - profile search will continue")
     
     async def _format_basic_profile_data(self, profile: Profile) -> Dict[str, Any]:
-        """Format basic profile data without AI insights"""
+        """Format basic profile data without AI insights - with comprehensive image handling"""
+        
+        # Enhanced image handling with fallbacks
+        profile_images = {
+            "profile_pic_url": profile.profile_pic_url,
+            "profile_pic_url_hd": profile.profile_pic_url_hd,
+            "avatar_urls": {
+                "original": profile.profile_pic_url_hd or profile.profile_pic_url,
+                "hd": profile.profile_pic_url_hd,
+                "standard": profile.profile_pic_url,
+                "cdn_256": None,  # Will be populated by CDN if available
+                "cdn_512": None,  # Will be populated by CDN if available
+                "fallback_256": "https://cdn.following.ae/placeholders/avatar-256.webp",
+                "fallback_512": "https://cdn.following.ae/placeholders/avatar-512.webp"
+            }
+        }
+        
+        # Log image availability for debugging
+        logger.debug(f"🖼️ Profile images for {profile.username}:")
+        logger.debug(f"   - Original: {'✅' if profile.profile_pic_url else '❌'}")
+        logger.debug(f"   - HD: {'✅' if profile.profile_pic_url_hd else '❌'}")
+        
         return {
             "id": str(profile.id),
             "username": profile.username,
@@ -479,27 +691,96 @@ class RobustCreatorSearchService:
             "is_verified": profile.is_verified or False,
             "is_business": profile.is_business_account or False,
             "engagement_rate": profile.engagement_rate,
+            
+            # Legacy fields for backward compatibility
             "profile_pic_url": profile.profile_pic_url,
             "profile_pic_url_hd": profile.profile_pic_url_hd,
+            
+            # Enhanced image structure
+            "images": profile_images,
+            
             "external_url": profile.external_url,
             "created_at": profile.created_at.isoformat(),
             "updated_at": profile.updated_at.isoformat() if profile.updated_at else None
         }
+    
+    async def _get_media_urls_for_response(self, profile_id: UUID, db: AsyncSession = None) -> Dict[str, Any]:
+        """Get CDN media URLs for frontend response"""
+        try:
+            from app.services.cdn_image_service import cdn_image_service
+            
+            # Inject database session if provided
+            if db:
+                cdn_image_service.set_db_session(db)
+            
+            # Get media URLs from CDN service
+            media_response = await cdn_image_service.get_profile_media_urls(profile_id)
+            
+            # Build frontend-compatible response
+            cdn_base_url = "https://cdn.following.ae"
+            
+            return {
+                "avatar": {
+                    "256": media_response.avatar_256 or f"{cdn_base_url}/placeholders/avatar-256.webp",
+                    "512": media_response.avatar_512 or f"{cdn_base_url}/placeholders/avatar-512.webp",
+                    "available": bool(media_response.avatar_256)
+                },
+                "posts": [
+                    {
+                        "mediaId": post['media_id'],
+                        "thumb": {
+                            "256": post['cdn_url_256'] or f"{cdn_base_url}/placeholders/post-256.webp",
+                            "512": post['cdn_url_512'] or f"{cdn_base_url}/placeholders/post-512.webp"
+                        },
+                        "available": post['available']
+                    }
+                    for post in media_response.posts
+                ],
+                "stats": {
+                    "total_assets": media_response.total_assets,
+                    "completed_assets": media_response.completed_assets,
+                    "completion_percentage": round((media_response.completed_assets / max(media_response.total_assets, 1)) * 100)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get media URLs for response: {e}")
+            # Return empty response with placeholders
+            cdn_base_url = "https://cdn.following.ae"
+            return {
+                "avatar": {
+                    "256": f"{cdn_base_url}/placeholders/avatar-256.webp",
+                    "512": f"{cdn_base_url}/placeholders/avatar-512.webp", 
+                    "available": False
+                },
+                "posts": [],
+                "stats": {
+                    "total_assets": 0,
+                    "completed_assets": 0,
+                    "completion_percentage": 0
+                }
+            }
     
     async def _format_basic_response(
         self, 
         profile: Profile, 
         data_source: str, 
         ai_task: Dict[str, Any],
+        db: AsyncSession,
         processing_time: float = None
     ) -> Dict[str, Any]:
         """Format basic response with profile data (Phase 1)"""
+        
+        # Get CDN media URLs for frontend
+        media_urls = await self._get_media_urls_for_response(profile.id, db)
+        
         return {
             "success": True,
             "stage": "basic",
             "data_source": data_source,
             "message": "Profile data retrieved. AI analysis in progress...",
             "profile": await self._format_basic_profile_data(profile),
+            "media": media_urls,  # INCLUDE MEDIA URLS IN MAIN RESPONSE
             "ai_analysis": {
                 "status": ai_task.get("status", "processing"),
                 "estimated_completion": 45,
@@ -512,7 +793,7 @@ class RobustCreatorSearchService:
             ]
         }
     
-    async def _format_complete_response(self, profile: Profile, data_source: str) -> Dict[str, Any]:
+    async def _format_complete_response(self, profile: Profile, data_source: str, db: AsyncSession) -> Dict[str, Any]:
         """Format complete response with AI insights (Phase 2)"""
         profile_data = await self._format_basic_profile_data(profile)
         
@@ -528,12 +809,16 @@ class RobustCreatorSearchService:
             "last_analyzed": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None
         }
         
+        # Get CDN media URLs for frontend
+        media_urls = await self._get_media_urls_for_response(profile.id, db)
+        
         return {
             "success": True,
             "stage": "complete",
             "data_source": data_source,
             "message": "Complete profile analysis with AI insights available",
             "profile": profile_data,
+            "media": media_urls,  # INCLUDE MEDIA URLS IN COMPLETE RESPONSE TOO
             "ai_analysis": {
                 "status": "completed",
                 "completion_percentage": 100,

@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     R2_ACCESS_KEY_ID: str = os.getenv("R2_ACCESS_KEY_ID", "")
     R2_SECRET_ACCESS_KEY: str = os.getenv("R2_SECRET_ACCESS_KEY", "")
     R2_BUCKET_NAME: str = os.getenv("R2_BUCKET_NAME", "")
+    CDN_BASE_URL: str = os.getenv("CDN_BASE_URL", "https://cdn.following.ae")
+    IMG_MAX_POSTS_PER_PROFILE: int = int(os.getenv("IMG_MAX_POSTS_PER_PROFILE", "12"))
+    
+    # CORS Proxy Configuration
+    CORS_PROXY_URL: str = os.getenv("CORS_PROXY_URL", "https://corsproxy.io")
+    CORS_PROXY_API_KEY: str = os.getenv("CORS_PROXY_API_KEY", "b416e4ec")
+    ENABLE_CORS_PROXY: bool = os.getenv("ENABLE_CORS_PROXY", "true").lower() == "true"
     
     class Config:
         case_sensitive = True

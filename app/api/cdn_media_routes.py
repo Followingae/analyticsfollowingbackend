@@ -51,6 +51,7 @@ def get_transcoder_service() -> ImageTranscoderService:
 
 async def get_cdn_service(db: AsyncSession = Depends(get_db)):
     """Get CDN image service with database dependency"""
+    cdn_image_service.set_db_session(db)
     return cdn_image_service
 
 @router.get("/creators/ig/{profile_id}/media")

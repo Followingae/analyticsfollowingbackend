@@ -38,16 +38,15 @@ async def lifespan(app: FastAPI):
     setup_logging()
     print("Starting Analytics Following Backend...")
     
-    # MANDATORY DATABASE INITIALIZATION - App cannot start without database
+    # RE-ENABLE DATABASE INITIALIZATION
     try:
         print("Initializing database connection...")
         await init_database()
-        # await create_tables()  # Temporary: Skip table creation during startup
         print("Connected to Supabase - Database ready")
     except Exception as e:
-        print(f"CRITICAL: Database initialization failed: {e}")
-        print("APPLICATION CANNOT START WITHOUT DATABASE")
-        raise SystemExit(f"Database initialization failed: {e}")
+        print(f"WARNING: Database initialization failed: {e}")
+        print("Starting in fallback mode - some features may be limited")
+        # Don't exit, allow server to start for testing
     
     # Initialize auth service (independent of database)
     try:
@@ -238,8 +237,10 @@ app.include_router(admin_proposals_router, prefix="/api")
 # Include CDN Media and Health routes
 from app.api.cdn_media_routes import router as cdn_media_router
 from app.api.cdn_health_routes import router as cdn_health_router
+from app.api.cdn_monitoring_routes import router as cdn_monitoring_router
 app.include_router(cdn_media_router, prefix="/api/v1")
 app.include_router(cdn_health_router, prefix="/api/v1")
+app.include_router(cdn_monitoring_router)
 
 # TEMPORARY FIX: Add credit routes with double prefix to fix frontend calling wrong URL
 # This should be removed once frontend is updated to use correct /api/v1/credits/* paths

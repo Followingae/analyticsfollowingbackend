@@ -59,6 +59,38 @@ class ImageTranscoderService:
         self.OUTPUT_METHOD = 6  # Best WebP compression
         
         logger.info("🖼️ Image Transcoder Service initialized")
+        
+        # CORS proxy configuration
+        from app.core.config import settings
+        self.cors_proxy_url = settings.CORS_PROXY_URL
+        self.cors_proxy_api_key = settings.CORS_PROXY_API_KEY
+        self.enable_cors_proxy = settings.ENABLE_CORS_PROXY
+    
+    def _get_proxied_url(self, url: str) -> str:
+        """Get CORS proxied URL for Instagram images"""
+        if not self.enable_cors_proxy:
+            return url
+            
+        # Check if URL needs proxying (Instagram CDN domains)
+        instagram_domains = [
+            'scontent',           # scontent-lax3-2.cdninstagram.com
+            'instagram.com',      # instagram.com
+            'fbcdn.net',          # instagram.fkhi2-2.fna.fbcdn.net
+            'cdninstagram.com',   # scontent-ord5-2.cdninstagram.com  
+            '.cdninstagram.',     # any cdninstagram subdomain
+            'scontent-',          # scontent-ist1-2.cdninstagram.com etc.
+        ]
+        
+        needs_proxy = any(domain in url.lower() for domain in instagram_domains)
+        
+        if needs_proxy:
+            # Use corsproxy.io with API key
+            proxied_url = f"{self.cors_proxy_url}/?{url}"
+            logger.debug(f"🔄 Using CORS proxy for Instagram URL")
+            return proxied_url
+        else:
+            # Direct access for non-Instagram URLs
+            return url
     
     async def process_job(self, job_data: Dict[str, Any]) -> ProcessingResult:
         """Process a single CDN image job"""
@@ -133,9 +165,11 @@ class ImageTranscoderService:
     async def _download_image(self, url: str) -> Tuple[bytes, Dict[str, Any]]:
         """Download image with error handling and metadata extraction"""
         try:
-            logger.debug(f"📥 Downloading image: {url}")
+            # Use CORS proxy for Instagram URLs
+            download_url = self._get_proxied_url(url)
+            logger.debug(f"📥 Downloading image: {download_url[:100]}...")
             
-            response = await self.session.get(url, follow_redirects=True)
+            response = await self.session.get(download_url, follow_redirects=True)
             response.raise_for_status()
             
             # Extract metadata

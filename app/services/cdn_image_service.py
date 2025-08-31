@@ -38,7 +38,7 @@ class EnqueueResult:
     error: str = ""
 
 class CDNImageService:
-    """Core CDN image management service - completely independent"""
+    """Core CDN image management service with database dependency injection"""
     
     def __init__(self):
         # Configuration from environment
@@ -51,7 +51,14 @@ class CDNImageService:
         self.placeholder_post_256 = f"{self.cdn_base_url}/placeholders/post-256.webp"
         self.placeholder_post_512 = f"{self.cdn_base_url}/placeholders/post-512.webp"
         
+        # Database session will be injected
+        self.db = None
+        
         logger.info("🎯 CDN Image Service initialized")
+    
+    def set_db_session(self, db: AsyncSession):
+        """Set database session for this request"""
+        self.db = db
     
     async def get_profile_media_urls(self, profile_id: UUID) -> ProfileMediaResponse:
         """Get CDN URLs for profile avatar and recent posts"""
@@ -99,37 +106,68 @@ class CDNImageService:
             logger.error(f"❌ Error getting profile media URLs: {e}")
             raise CDNServiceError(f"Failed to get media URLs: {e}")
     
-    async def enqueue_profile_assets(self, profile_id: UUID, decodo_data: Dict) -> EnqueueResult:
+    async def enqueue_profile_assets(self, profile_id: UUID, decodo_data: Dict, db: AsyncSession = None) -> EnqueueResult:
         """Enqueue profile assets for CDN processing"""
         try:
             logger.info(f"📥 Enqueuing assets for profile: {profile_id}")
             
+            # Set database session if provided
+            if db:
+                self.db = db
+            
             jobs_created = 0
             
-            # Enqueue avatar if present
-            avatar_url = decodo_data.get('profile_pic_url_hd') or decodo_data.get('profile_pic_url')
-            if avatar_url:
-                await self._enqueue_asset(
-                    source_type='profile_avatar',
-                    source_id=profile_id,
-                    media_id='avatar',
-                    source_url=avatar_url,
-                    priority=3  # Higher priority for avatars
-                )
-                jobs_created += 1
-                logger.debug(f"📸 Enqueued avatar: {avatar_url}")
+            # Enqueue avatar - GET FROM DATABASE, NOT decodo_data
+            from sqlalchemy import text, select
+            from app.database.unified_models import Profile
             
-            # Enqueue recent posts (limit based on config)
-            posts = decodo_data.get('recent_posts', [])[:self.max_posts_per_profile]
+            # Get avatar URL from database where we actually stored it
+            avatar_query = select(Profile.profile_pic_url_hd, Profile.profile_pic_url).where(
+                Profile.id == profile_id
+            )
+            avatar_result = await self.db.execute(avatar_query)
+            avatar_data = avatar_result.fetchone()
+            
+            if avatar_data:
+                avatar_url = avatar_data[0] or avatar_data[1]  # HD first, then standard
+                if avatar_url:
+                    await self._enqueue_asset(
+                        source_type='profile_avatar',
+                        source_id=profile_id,
+                        media_id='avatar',
+                        source_url=avatar_url,
+                        priority=3  # Higher priority for avatars
+                    )
+                    jobs_created += 1
+                    logger.info(f"📸 Enqueued avatar from database: {avatar_url[:80]}...")
+                else:
+                    logger.warning(f"⚠️ No avatar URL found in database for profile {profile_id}")
+            else:
+                logger.error(f"❌ Profile {profile_id} not found in database")
+            
+            # Enqueue recent posts from database (limit based on config)
+            from app.database.unified_models import Post
+            
+            # Get recent posts with display URLs from database
+            posts_query = select(Post.instagram_post_id, Post.display_url).where(
+                Post.profile_id == profile_id,
+                Post.display_url.is_not(None)
+            ).order_by(Post.created_at.desc()).limit(self.max_posts_per_profile)
+            
+            result = await self.db.execute(posts_query)
+            posts = result.fetchall()
+            
+            logger.info(f"🔍 Found {len(posts)} posts with display URLs for profile {profile_id}")
+            
             for post in posts:
-                display_url = post.get('display_url')
-                shortcode = post.get('shortcode', 'unknown')
+                media_id = post[0] or 'unknown'
+                display_url = post[1]
                 
                 if display_url:
                     await self._enqueue_asset(
                         source_type='post_thumbnail',
                         source_id=profile_id,
-                        media_id=shortcode,
+                        media_id=media_id,
                         source_url=display_url,
                         priority=5  # Normal priority for posts
                     )
@@ -153,43 +191,19 @@ class CDNImageService:
     
     async def _enqueue_asset(self, source_type: str, source_id: UUID, 
                            media_id: str, source_url: str, priority: int = 5) -> Optional[UUID]:
-        """Create or update asset record and enqueue processing job"""
+        """Create or update asset record and enqueue processing job using raw SQL"""
         try:
-            from app.database.unified_models import Base
-            
-            # Dynamically create CDN models (since they're new)
-            CDNImageAsset = type('CDNImageAsset', (Base,), {
-                '__tablename__': 'cdn_image_assets',
-                '__table_args__': {'extend_existing': True},
-                'id': None,  # Will be populated by SQLAlchemy
-                'source_type': None,
-                'source_id': None,
-                'media_id': None,
-                'source_url': None,
-                'processing_status': None
-            })
-            
-            CDNImageJob = type('CDNImageJob', (Base,), {
-                '__tablename__': 'cdn_image_jobs',
-                '__table_args__': {'extend_existing': True},
-                'id': None,
-                'asset_id': None,
-                'job_type': None,
-                'source_url': None,
-                'priority': None,
-                'target_sizes': None,
-                'output_format': None
-            })
+            from sqlalchemy import text
             
             # Create or get asset record
             asset = await self._get_or_create_asset(source_type, source_id, media_id, source_url)
             
             # Check if asset needs processing
             if not self._needs_processing(asset, source_url):
-                logger.debug(f"Asset {asset.id} is up to date, skipping")
-                return asset.id
+                logger.debug(f"Asset {asset['id']} is up to date, skipping")
+                return asset['id']
             
-            # Create processing job using raw SQL to avoid model dependencies
+            # Create processing job using raw SQL
             job_sql = """
                 INSERT INTO cdn_image_jobs (
                     asset_id, job_type, source_url, priority, 
@@ -201,10 +215,10 @@ class CDNImageService:
             """
             
             result = await self.db.execute(
-                job_sql,
+                text(job_sql),
                 {
-                    'asset_id': asset.id,
-                    'job_type': 'ingest' if asset.processing_status == 'pending' else 'update',
+                    'asset_id': asset['id'],
+                    'job_type': 'ingest' if asset['processing_status'] == 'pending' else 'update',
                     'source_url': source_url,
                     'priority': priority,
                     'target_sizes': [256, 512],
@@ -215,8 +229,8 @@ class CDNImageService:
             await self.db.commit()
             job_id = result.scalar()
             
-            logger.debug(f"🎯 Created job {job_id} for asset {asset.id}")
-            return asset.id
+            logger.debug(f"🎯 Created job {job_id} for asset {asset['id']}")
+            return asset['id']
             
         except Exception as e:
             await self.db.rollback()
@@ -227,6 +241,8 @@ class CDNImageService:
                                  media_id: str, source_url: str) -> Dict[str, Any]:
         """Get existing asset or create new one"""
         try:
+            from sqlalchemy import text
+            
             # Try to get existing asset
             asset_sql = """
                 SELECT * FROM cdn_image_assets 
@@ -236,7 +252,7 @@ class CDNImageService:
             """
             
             result = await self.db.execute(
-                asset_sql,
+                text(asset_sql),
                 {
                     'source_type': source_type,
                     'source_id': source_id,
@@ -247,8 +263,11 @@ class CDNImageService:
             asset = result.fetchone()
             
             if asset:
+                # Convert to dict for consistent access
+                asset_dict = dict(asset._mapping)
+                
                 # Update source URL if it changed
-                if asset.source_url != source_url:
+                if asset_dict['source_url'] != source_url:
                     update_sql = """
                         UPDATE cdn_image_assets 
                         SET source_url = :source_url, 
@@ -257,11 +276,13 @@ class CDNImageService:
                         WHERE id = :asset_id
                     """
                     await self.db.execute(
-                        update_sql,
-                        {'source_url': source_url, 'asset_id': asset.id}
+                        text(update_sql),
+                        {'source_url': source_url, 'asset_id': asset_dict['id']}
                     )
+                    asset_dict['source_url'] = source_url
+                    asset_dict['needs_update'] = True
                 
-                return asset
+                return asset_dict
             else:
                 # Create new asset
                 create_sql = """
@@ -273,7 +294,7 @@ class CDNImageService:
                 """
                 
                 result = await self.db.execute(
-                    create_sql,
+                    text(create_sql),
                     {
                         'source_type': source_type,
                         'source_id': source_id,
@@ -285,7 +306,7 @@ class CDNImageService:
                 new_asset = result.fetchone()
                 await self.db.commit()
                 
-                return new_asset
+                return dict(new_asset._mapping)
                 
         except Exception as e:
             await self.db.rollback()
@@ -295,13 +316,15 @@ class CDNImageService:
     async def _get_asset(self, source_type: str, source_id: UUID, media_id: str) -> Optional[Dict[str, Any]]:
         """Get asset by source identifiers"""
         try:
-            asset_sql = """
+            from sqlalchemy import text
+            
+            asset_sql = text("""
                 SELECT * FROM cdn_image_assets 
                 WHERE source_type = :source_type 
                 AND source_id = :source_id 
                 AND media_id = :media_id
                 AND processing_status = 'completed'
-            """
+            """)
             
             result = await self.db.execute(
                 asset_sql,
@@ -312,7 +335,8 @@ class CDNImageService:
                 }
             )
             
-            return result.fetchone()
+            row = result.fetchone()
+            return dict(row._mapping) if row else None
             
         except Exception as e:
             logger.error(f"❌ Failed to get asset: {e}")
@@ -321,20 +345,23 @@ class CDNImageService:
     async def _get_recent_post_assets(self, profile_id: UUID, limit: int = 12) -> List[Dict[str, Any]]:
         """Get recent post assets for a profile"""
         try:
-            assets_sql = """
+            from sqlalchemy import text
+            
+            assets_sql = text("""
                 SELECT * FROM cdn_image_assets 
                 WHERE source_type = 'post_thumbnail' 
                 AND source_id = :profile_id 
                 ORDER BY created_at DESC 
                 LIMIT :limit
-            """
+            """)
             
             result = await self.db.execute(
                 assets_sql,
                 {'profile_id': profile_id, 'limit': limit}
             )
             
-            return [dict(row) for row in result.fetchall()]
+            rows = result.fetchall()
+            return [dict(row._mapping) for row in rows]
             
         except Exception as e:
             logger.error(f"❌ Failed to get recent post assets: {e}")
@@ -343,12 +370,14 @@ class CDNImageService:
     async def _count_pending_jobs(self, profile_id: UUID) -> int:
         """Count pending processing jobs for a profile"""
         try:
-            count_sql = """
+            from sqlalchemy import text
+            
+            count_sql = text("""
                 SELECT COUNT(*) FROM cdn_image_jobs j
                 JOIN cdn_image_assets a ON j.asset_id = a.id
                 WHERE a.source_id = :profile_id
                 AND j.status IN ('queued', 'processing')
-            """
+            """)
             
             result = await self.db.execute(count_sql, {'profile_id': profile_id})
             return result.scalar() or 0

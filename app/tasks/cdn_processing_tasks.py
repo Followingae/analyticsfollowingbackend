@@ -77,7 +77,13 @@ def get_services():
 
 async def get_db_session() -> AsyncSession:
     """Get database session for async operations"""
-    return get_async_session()
+    from app.database.connection import init_database, get_session
+    
+    # Initialize database if not already done
+    await init_database()
+    
+    # Use the existing get_session context manager
+    return get_session()
 
 @app.task(bind=True, name="process_cdn_image_job")
 def process_cdn_image_job(self, job_id: str):
@@ -86,107 +92,99 @@ def process_cdn_image_job(self, job_id: str):
 
 async def _process_cdn_image_job_async(task_self, job_id: str):
     """Async implementation of CDN image job processing"""
-    db_session = None
-    
     try:
         logger.info(f"🚀 Starting CDN job {job_id}")
         
         # Initialize services
         r2_client, transcoder = get_services()
-        db_session = await get_db_session()
         
-        # Get job from database
-        job_sql = """
+        # Get database session using context manager approach
+        from app.database.connection import init_database, get_session
+        await init_database()
+        
+        # Create session directly with async context
+        async with get_session() as db_session:
+            # Get job from database
+            job_sql = """
             SELECT j.*, a.source_id as profile_id, a.media_id, a.source_url
             FROM cdn_image_jobs j
             JOIN cdn_image_assets a ON j.asset_id = a.id
             WHERE j.id = :job_id
-        """
-        
-        result = await db_session.execute(text(job_sql), {'job_id': job_id})
-        job = result.fetchone()
-        
-        if not job:
-            logger.error(f"❌ Job {job_id} not found")
-            return {'success': False, 'error': 'Job not found'}
-        
-        # Update job status to processing
-        update_job_sql = """
+            """
+            
+            result = await db_session.execute(text(job_sql), {'job_id': job_id})
+            job = result.fetchone()
+            
+            if not job:
+                logger.error(f"❌ Job {job_id} not found")
+                return {'success': False, 'error': 'Job not found'}
+            
+            # Update job status to processing
+            update_job_sql = """
             UPDATE cdn_image_jobs 
             SET status = 'processing', 
                 started_at = NOW(),
                 worker_id = :worker_id
             WHERE id = :job_id
-        """
-        await db_session.execute(
-            text(update_job_sql), 
-            {'job_id': job_id, 'worker_id': task_self.request.id}
-        )
-        await db_session.commit()
-        
-        # Prepare job data for transcoder
-        job_data = {
-            'asset_id': str(job.asset_id),
-            'source_url': job.source_url,
-            'target_sizes': job.target_sizes or [256, 512],
-            'profile_id': str(job.profile_id),
-            'media_id': job.media_id
-        }
-        
-        # Process the image
-        processing_result = await transcoder.process_job(job_data)
-        
-        if processing_result.success:
-            # Update asset record with results
-            await _update_asset_with_results(
-                db_session, job.asset_id, processing_result
-            )
-            
-            # Update job status to completed
-            complete_job_sql = """
-                UPDATE cdn_image_jobs 
-                SET status = 'completed', 
-                    completed_at = NOW(),
-                    processing_duration_ms = :duration
-                WHERE id = :job_id
             """
             await db_session.execute(
-                text(complete_job_sql),
-                {
-                    'job_id': job_id,
-                    'duration': processing_result.processing_stats.get('total_time_ms', 0)
-                }
+                text(update_job_sql), 
+                {'job_id': job_id, 'worker_id': task_self.request.id}
             )
             await db_session.commit()
             
-            logger.info(f"✅ Job {job_id} completed successfully")
-            return {
-                'success': True,
-                'processing_stats': processing_result.processing_stats,
-                'derivatives': list(processing_result.derivatives.keys())
+            # Prepare job data for transcoder
+            job_data = {
+                'asset_id': str(job.asset_id),
+                'source_url': job.source_url,
+                'target_sizes': job.target_sizes or [256, 512],
+                'profile_id': str(job.profile_id),
+                'media_id': job.media_id
             }
-        
-        else:
-            # Handle failure
-            await _handle_job_failure(db_session, job_id, processing_result.error)
             
-            logger.error(f"❌ Job {job_id} failed: {processing_result.error}")
-            return {'success': False, 'error': processing_result.error}
+            # Process the image
+            processing_result = await transcoder.process_job(job_data)
+            
+            if processing_result.success:
+                # Update asset record with results
+                await _update_asset_with_results(
+                    db_session, job.asset_id, processing_result
+                )
+                
+                # Update job status to completed
+                complete_job_sql = """
+                        UPDATE cdn_image_jobs 
+                    SET status = 'completed', 
+                        completed_at = NOW(),
+                        processing_duration_ms = :duration
+                    WHERE id = :job_id
+                """
+                await db_session.execute(
+                    text(complete_job_sql),
+                    {
+                        'job_id': job_id,
+                        'duration': processing_result.processing_stats.get('total_time_ms', 0)
+                    }
+                )
+                await db_session.commit()
+                
+                logger.info(f"✅ Job {job_id} completed successfully")
+                return {
+                    'success': True,
+                    'processing_stats': processing_result.processing_stats,
+                    'derivatives': list(processing_result.derivatives.keys())
+                }
+            
+            else:
+                # Handle failure
+                await _handle_job_failure(db_session, job_id, processing_result.error)
+                
+                logger.error(f"❌ Job {job_id} failed: {processing_result.error}")
+                return {'success': False, 'error': processing_result.error}
     
     except Exception as e:
         logger.error(f"❌ CDN job {job_id} processing failed: {e}")
-        
-        if db_session:
-            try:
-                await _handle_job_failure(db_session, job_id, str(e))
-            except Exception as cleanup_error:
-                logger.error(f"❌ Failed to handle job failure: {cleanup_error}")
-        
         return {'success': False, 'error': str(e)}
-    
-    finally:
-        if db_session:
-            await db_session.close()
 
 async def _update_asset_with_results(db_session: AsyncSession, asset_id: UUID, result):
     """Update asset record with processing results"""
@@ -309,7 +307,8 @@ async def _batch_enqueue_profile_assets_async(profile_data_list: List[Dict]):
         # Initialize services
         r2_client, _ = get_services()
         db_session = await get_db_session()
-        cdn_service = CDNImageService(db_session, r2_client)
+        cdn_service = CDNImageService()
+        cdn_service.set_db_session(db_session)
         
         logger.info(f"📦 Batch processing {len(profile_data_list)} profiles")
         
