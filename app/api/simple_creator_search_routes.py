@@ -77,7 +77,7 @@ async def simple_creator_search(
             ]
             
             # Run AI analysis
-            ai_results = await ai_service.analyze_posts_batch(posts_data)
+            ai_results = await ai_service.batch_analyze_posts(posts_data)
             
             # Update posts with AI results
             for post, result in zip(unanalyzed_posts, ai_results):
