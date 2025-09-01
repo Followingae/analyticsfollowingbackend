@@ -11,7 +11,7 @@ requests>=2.31.0
 
 # Database & Storage
 asyncpg>=0.29.0
-sqlalchemy>=1.4.50
+sqlalchemy[asyncio]>=2.0.0
 databases>=0.7.0
 supabase>=2.17.0
 psycopg2-binary>=2.9.9

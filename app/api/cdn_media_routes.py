@@ -24,7 +24,7 @@ from app.tasks.cdn_processing_tasks import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1", tags=["CDN Media"])
+router = APIRouter(tags=["CDN Media"])
 
 # Initialize global services
 _r2_client = None

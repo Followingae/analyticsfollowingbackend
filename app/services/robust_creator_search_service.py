@@ -120,18 +120,12 @@ class RobustCreatorSearchService:
                     return await self._format_complete_response(existing_profile, "database_complete", db)
                 else:
                     logger.info(f"CREATOR SEARCH AI INCOMPLETE: AI analysis needed for existing profile {username}")
-                    # Run AI analysis but return immediately for better UX
-                    ai_task = await self._schedule_ai_analysis(existing_profile, db)
+                    # Schedule AI analysis in background but return immediately for better UX
+                    ai_task = await self._schedule_ai_analysis_background(existing_profile, db)
                     
-                    # If analysis was successful, return complete response
-                    if ai_task.get("status") == "completed" and ai_task.get("posts_analyzed", 0) > 0:
-                        logger.info(f"CREATOR SEARCH AI COMPLETED: Fresh AI analysis completed for {username}")
-                        # Refresh profile from DB to get updated AI data
-                        refreshed_profile = await comprehensive_service.get_profile_by_username(db, username)
-                        return await self._format_complete_response(refreshed_profile, "database_fresh_ai", db)
-                    else:
-                        # Return basic response if AI analysis is still ongoing or already complete
-                        return await self._format_basic_response(existing_profile, "database_processing", ai_task, db)
+                    # ALWAYS return basic response immediately - don't wait for AI completion
+                    logger.info(f"CREATOR SEARCH STAGE 1 COMPLETE: Returning basic profile data for {username} while AI processes in background")
+                    return await self._format_basic_response(existing_profile, "database_processing", ai_task, db)
             
             # PHASE 2: Profile doesn't exist or force refresh - fetch from Instagram
             logger.info(f"CREATOR SEARCH FETCH: Fetching fresh Instagram data for {username}")
@@ -156,8 +150,8 @@ class RobustCreatorSearchService:
                 await self._trigger_cdn_processing(profile, raw_instagram_data, db)
                 logger.info(f"🔧 DEBUG: CDN processing call completed for {profile.username}")
                 
-                # Schedule comprehensive AI analysis
-                ai_task = await self._schedule_ai_analysis(profile, db)
+                # Schedule comprehensive AI analysis in background
+                ai_task = await self._schedule_ai_analysis_background(profile, db)
                 
                 processing_time = (datetime.now(timezone.utc) - search_start).total_seconds()
                 logger.info(f"✅ Creator search completed in {processing_time:.2f}s: {username}")
@@ -410,6 +404,63 @@ class RobustCreatorSearchService:
                 "status": "error",
                 "error": str(e)
             }
+    
+    async def _schedule_ai_analysis_background(self, profile: Profile, db: AsyncSession) -> Dict[str, Any]:
+        """Schedule AI analysis in background and return immediately for 2-stage processing"""
+        try:
+            # Check how many posts need analysis
+            unanalyzed_posts_query = select(func.count(Post.id)).where(
+                and_(
+                    Post.profile_id == profile.id,
+                    Post.ai_analyzed_at.is_(None)
+                )
+            )
+            unanalyzed_count_result = await db.execute(unanalyzed_posts_query)
+            unanalyzed_count = unanalyzed_count_result.scalar() or 0
+            
+            total_posts_query = select(func.count(Post.id)).where(Post.profile_id == profile.id)
+            total_posts_result = await db.execute(total_posts_query)
+            total_posts = total_posts_result.scalar() or 0
+            
+            if unanalyzed_count == 0:
+                logger.info(f"🧠 BACKGROUND AI: All posts already analyzed for {profile.username}")
+                return {
+                    "status": "completed",
+                    "posts_to_analyze": 0,
+                    "total_posts": total_posts,
+                    "message": "AI analysis already complete"
+                }
+            
+            # Start AI analysis in the background using asyncio.create_task
+            logger.info(f"🧠 BACKGROUND AI: Scheduling analysis for {unanalyzed_count} posts for {profile.username}")
+            
+            # Create a background task that won't block the response
+            background_task = asyncio.create_task(self._run_background_ai_analysis(profile, db))
+            
+            # Return immediately with status
+            return {
+                "status": "processing",
+                "posts_to_analyze": unanalyzed_count,
+                "total_posts": total_posts,
+                "estimated_completion_seconds": min(unanalyzed_count * 3, 120),  # 3 seconds per post, max 2 minutes
+                "message": f"AI analysis started for {unanalyzed_count} posts"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Background AI scheduling failed for {profile.username}: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+    
+    async def _run_background_ai_analysis(self, profile: Profile, db: AsyncSession) -> None:
+        """Run AI analysis in background without blocking"""
+        try:
+            logger.info(f"🧠 BACKGROUND TASK: Starting AI analysis for {profile.username}")
+            await self._schedule_ai_analysis(profile, db)
+            logger.info(f"✅ BACKGROUND TASK: AI analysis completed for {profile.username}")
+        except Exception as e:
+            logger.error(f"❌ BACKGROUND TASK: AI analysis failed for {profile.username}: {e}")
     
     async def _update_profile_ai_aggregate(self, db: AsyncSession, profile_id: UUID, posts_data: List[Dict] = None) -> None:
         """Update profile with aggregate AI analysis data"""

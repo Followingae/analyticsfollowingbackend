@@ -123,8 +123,8 @@ async def init_database():
                 async_url,
                 pool_pre_ping=True,
                 pool_recycle=600,
-                pool_size=2,  # Reduced pool size for network issues
-                max_overflow=1,
+                pool_size=10,  # Increased pool size for concurrent requests
+                max_overflow=5,
                 pool_timeout=10,  # Shorter timeout for network issues
                 echo=False,
                 connect_args={
@@ -154,13 +154,12 @@ async def init_database():
             async_url,
             pool_pre_ping=False,         # Disable pre-ping for faster startup
             pool_recycle=600,            # Standard recycle time
-            pool_size=2,                 # Minimal pool size
-            max_overflow=0,              # No overflow for simplicity
+            pool_size=10,                # Increased pool size for concurrent requests
+            max_overflow=5,              # Allow overflow for peak usage
             pool_timeout=3,              # Very short timeout
             echo=False,
             connect_args={
                 "command_timeout": 5,    # Very short timeout
-                "connect_timeout": 5,    # Connection timeout
                 "server_settings": {
                     "application_name": "analytics_backend_emergency",
                     "statement_timeout": "10s"
@@ -209,8 +208,8 @@ async def init_database():
                     async_url,
                     pool_pre_ping=False,  # Disable pre-ping in resilient mode
                     pool_recycle=3600,    # Longer recycle time
-                    pool_size=1,          # Minimal pool size
-                    max_overflow=0,       # No overflow
+                    pool_size=5,          # Basic pool size
+                    max_overflow=2,       # Small overflow
                     pool_timeout=5,       # Very short timeout
                     echo=False
                 )

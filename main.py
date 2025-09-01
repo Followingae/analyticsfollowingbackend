@@ -222,7 +222,11 @@ app.include_router(team_management_router, prefix="/api/v1")
 # Include Stripe Subscription routes - Billing and subscription management
 app.include_router(stripe_router, prefix="/api/v1")
 
-# Include Robust Creator Search routes - BULLETPROOF CREATOR SEARCH SYSTEM
+# Include Simple Creator Search routes - SIMPLE USER FLOW
+from app.api.simple_creator_search_routes import router as simple_creator_router
+app.include_router(simple_creator_router)
+
+# Include Robust Creator Search routes - BULLETPROOF CREATOR SEARCH SYSTEM (BACKUP)
 from app.api.robust_creator_search_routes import router as robust_creator_router
 app.include_router(robust_creator_router, prefix="/api/v1")
 

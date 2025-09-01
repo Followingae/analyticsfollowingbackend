@@ -33,12 +33,21 @@ class ImageTranscoderService:
     def __init__(self, r2_client):
         self.r2_client = r2_client
         
-        # HTTP client optimized for image downloads
+        # HTTP client optimized for image downloads with Instagram-friendly headers
         self.session = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
             headers={
-                'User-Agent': 'AnalyticsFollowing-CDN/1.0 (Image Processor)'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'image',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'cross-site'
             }
         )
         
@@ -65,11 +74,18 @@ class ImageTranscoderService:
         self.cors_proxy_url = settings.CORS_PROXY_URL
         self.cors_proxy_api_key = settings.CORS_PROXY_API_KEY
         self.enable_cors_proxy = settings.ENABLE_CORS_PROXY
+        
+        # SmartProxy configuration for Instagram access
+        self.smartproxy_username = settings.SMARTPROXY_USERNAME
+        self.smartproxy_password = settings.SMARTPROXY_PASSWORD
+        self.use_smartproxy = bool(self.smartproxy_username and self.smartproxy_password)
     
-    def _get_proxied_url(self, url: str) -> str:
-        """Get CORS proxied URL for Instagram images"""
+    def _get_proxied_url(self, url: str) -> Tuple[str, Dict[str, str]]:
+        """Get CORS proxied URL for Instagram images with appropriate headers"""
+        headers = {}
+        
         if not self.enable_cors_proxy:
-            return url
+            return url, headers
             
         # Check if URL needs proxying (Instagram CDN domains)
         instagram_domains = [
@@ -84,13 +100,17 @@ class ImageTranscoderService:
         needs_proxy = any(domain in url.lower() for domain in instagram_domains)
         
         if needs_proxy:
-            # Use corsproxy.io with API key
-            proxied_url = f"{self.cors_proxy_url}/?{url}"
-            logger.debug(f"🔄 Using CORS proxy for Instagram URL")
-            return proxied_url
+            # Use corsproxy.io with proper API key format
+            if self.cors_proxy_api_key:
+                proxied_url = f"{self.cors_proxy_url}/?api_key={self.cors_proxy_api_key}&target={url}"
+            else:
+                proxied_url = f"{self.cors_proxy_url}/?{url}"
+            
+            logger.debug(f"Using CORS proxy for Instagram URL")
+            return proxied_url, headers
         else:
             # Direct access for non-Instagram URLs
-            return url
+            return url, headers
     
     async def process_job(self, job_data: Dict[str, Any]) -> ProcessingResult:
         """Process a single CDN image job"""
@@ -165,48 +185,105 @@ class ImageTranscoderService:
     async def _download_image(self, url: str) -> Tuple[bytes, Dict[str, Any]]:
         """Download image with error handling and metadata extraction"""
         try:
-            # Use CORS proxy for Instagram URLs
-            download_url = self._get_proxied_url(url)
-            logger.debug(f"📥 Downloading image: {download_url[:100]}...")
+            # Strategy 1: Try CORS proxy first for Instagram URLs (most reliable with API key)
+            if self._is_instagram_url(url) and self.enable_cors_proxy:
+                try:
+                    return await self._download_via_cors_proxy(url)
+                except Exception as e:
+                    logger.debug(f"CORS proxy failed: {e}, trying SmartProxy...")
             
-            response = await self.session.get(download_url, follow_redirects=True)
+            # Strategy 2: Try SmartProxy for Instagram URLs
+            if self.use_smartproxy and self._is_instagram_url(url):
+                try:
+                    return await self._download_via_smartproxy(url)
+                except Exception as e:
+                    logger.debug(f"SmartProxy failed: {e}, trying direct...")
+            
+            # Strategy 3: Try direct download with enhanced headers
+            return await self._download_direct(url)
+                
+        except Exception as e:
+            raise ProcessingError(f"All download methods failed: {e}")
+    
+    def _is_instagram_url(self, url: str) -> bool:
+        """Check if URL is from Instagram CDN"""
+        instagram_domains = ['scontent', 'instagram.com', 'fbcdn.net', 'cdninstagram']
+        return any(domain in url.lower() for domain in instagram_domains)
+    
+    async def _download_via_smartproxy(self, url: str) -> Tuple[bytes, Dict[str, Any]]:
+        """Download via SmartProxy residential proxy"""
+        proxy_auth = f"{self.smartproxy_username}:{self.smartproxy_password}"
+        proxy_url = f"http://{proxy_auth}@rotating-residential.smartproxy.com:10000"
+        
+        async with httpx.AsyncClient(
+            proxy=proxy_url,
+            timeout=httpx.Timeout(45.0),
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+            }
+        ) as client:
+            logger.debug(f"Downloading via SmartProxy: {url[:80]}...")
+            response = await client.get(url, follow_redirects=True)
             response.raise_for_status()
             
-            # Extract metadata
-            content_type = response.headers.get('content-type', 'image/jpeg')
-            content_length = len(response.content)
-            etag = response.headers.get('etag')
-            last_modified = response.headers.get('last-modified')
-            
-            # Validate content type
-            if not content_type.startswith('image/'):
-                raise ProcessingError(f"Invalid content type: {content_type}")
-            
-            # Validate file size (max 50MB)
-            if content_length > 50 * 1024 * 1024:
-                raise ProcessingError(f"Image too large: {content_length} bytes")
-            
-            # Validate minimum size (at least 1KB)
-            if content_length < 1024:
-                raise ProcessingError(f"Image too small: {content_length} bytes")
-            
-            download_info = {
-                'content_type': content_type,
-                'content_length': content_length,
-                'etag': etag,
-                'last_modified': last_modified,
-                'final_url': str(response.url)  # After redirects
-            }
-            
-            logger.debug(f"✅ Downloaded {content_length} bytes")
-            return response.content, download_info
-            
-        except httpx.TimeoutException:
-            raise ProcessingError(f"Download timeout for URL: {url}")
-        except httpx.HTTPStatusError as e:
-            raise ProcessingError(f"HTTP {e.response.status_code} downloading {url}")
-        except Exception as e:
-            raise ProcessingError(f"Download failed: {e}")
+            return self._extract_download_metadata(response)
+    
+    async def _download_direct(self, url: str) -> Tuple[bytes, Dict[str, Any]]:
+        """Download directly with enhanced headers"""
+        logger.debug(f"Downloading directly: {url[:80]}...")
+        response = await self.session.get(url, follow_redirects=True)
+        response.raise_for_status()
+        
+        return self._extract_download_metadata(response)
+    
+    async def _download_via_cors_proxy(self, url: str) -> Tuple[bytes, Dict[str, Any]]:
+        """Download via CORS proxy as last resort"""
+        download_url, extra_headers = self._get_proxied_url(url)
+        request_headers = {**self.session.headers, **extra_headers}
+        
+        logger.debug(f"Downloading via CORS proxy: {download_url[:80]}...")
+        response = await self.session.get(download_url, headers=request_headers, follow_redirects=True)
+        response.raise_for_status()
+        
+        return self._extract_download_metadata(response)
+    
+    def _extract_download_metadata(self, response: httpx.Response) -> Tuple[bytes, Dict[str, Any]]:
+        """Extract metadata from HTTP response"""
+        # Extract metadata
+        content_type = response.headers.get('content-type', 'image/jpeg')
+        content_length = len(response.content)
+        etag = response.headers.get('etag')
+        last_modified = response.headers.get('last-modified')
+        
+        # Validate content type
+        if not content_type.startswith('image/'):
+            raise ProcessingError(f"Invalid content type: {content_type}")
+        
+        # Validate file size (max 50MB)
+        if content_length > 50 * 1024 * 1024:
+            raise ProcessingError(f"Image too large: {content_length} bytes")
+        
+        # Validate minimum size (at least 1KB)
+        if content_length < 1024:
+            raise ProcessingError(f"Image too small: {content_length} bytes")
+        
+        download_info = {
+            'content_type': content_type,
+            'content_length': content_length,
+            'etag': etag,
+            'last_modified': last_modified,
+            'final_url': str(response.url)  # After redirects
+        }
+        
+        logger.debug(f"Downloaded {content_length} bytes")
+        return response.content, download_info
     
     async def _load_and_validate_image(self, image_data: bytes) -> Image.Image:
         """Load and validate image with format conversion"""

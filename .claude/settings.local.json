@@ -12,7 +12,13 @@
       "Bash(curl:*)",
       "Bash(redis-cli:*)",
       "WebSearch",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(pip install:*)",
+      "Bash(taskkill:*)",
+      "Read(\\/**)",
+      "Bash(cmd /c:*)",
+      "Bash(powershell:*)",
+      "Bash(dir:*)"
     ],
     "deny": [],
     "ask": [],

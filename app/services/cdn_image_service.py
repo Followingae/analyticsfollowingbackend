@@ -117,51 +117,35 @@ class CDNImageService:
             
             jobs_created = 0
             
-            # Enqueue avatar - GET FROM DATABASE, NOT decodo_data
-            from sqlalchemy import text, select
-            from app.database.unified_models import Profile
+            # Enqueue avatar from Decodo data
+            avatar_url = None
+            if 'profile_pic_url_hd' in decodo_data and decodo_data['profile_pic_url_hd']:
+                avatar_url = decodo_data['profile_pic_url_hd']
+            elif 'profile_pic_url' in decodo_data and decodo_data['profile_pic_url']:
+                avatar_url = decodo_data['profile_pic_url']
             
-            # Get avatar URL from database where we actually stored it
-            avatar_query = select(Profile.profile_pic_url_hd, Profile.profile_pic_url).where(
-                Profile.id == profile_id
-            )
-            avatar_result = await self.db.execute(avatar_query)
-            avatar_data = avatar_result.fetchone()
-            
-            if avatar_data:
-                avatar_url = avatar_data[0] or avatar_data[1]  # HD first, then standard
-                if avatar_url:
-                    await self._enqueue_asset(
-                        source_type='profile_avatar',
-                        source_id=profile_id,
-                        media_id='avatar',
-                        source_url=avatar_url,
-                        priority=3  # Higher priority for avatars
-                    )
-                    jobs_created += 1
-                    logger.info(f"📸 Enqueued avatar from database: {avatar_url[:80]}...")
-                else:
-                    logger.warning(f"⚠️ No avatar URL found in database for profile {profile_id}")
+            if avatar_url:
+                await self._enqueue_asset(
+                    source_type='profile_avatar',
+                    source_id=profile_id,
+                    media_id='avatar',
+                    source_url=avatar_url,
+                    priority=3  # Higher priority for avatars
+                )
+                jobs_created += 1
+                logger.info(f"Enqueued avatar from Decodo: {avatar_url[:80]}...")
             else:
-                logger.error(f"❌ Profile {profile_id} not found in database")
+                logger.warning(f"No avatar URL found in Decodo data for profile {profile_id}")
             
-            # Enqueue recent posts from database (limit based on config)
-            from app.database.unified_models import Post
+            # Enqueue recent posts from Decodo data
+            recent_posts = decodo_data.get('recent_posts', [])
             
-            # Get recent posts with display URLs from database
-            posts_query = select(Post.instagram_post_id, Post.display_url).where(
-                Post.profile_id == profile_id,
-                Post.display_url.is_not(None)
-            ).order_by(Post.created_at.desc()).limit(self.max_posts_per_profile)
+            logger.info(f"Found {len(recent_posts)} recent posts in Decodo data")
             
-            result = await self.db.execute(posts_query)
-            posts = result.fetchall()
-            
-            logger.info(f"🔍 Found {len(posts)} posts with display URLs for profile {profile_id}")
-            
-            for post in posts:
-                media_id = post[0] or 'unknown'
-                display_url = post[1]
+            # Limit to configured max posts per profile
+            for post in recent_posts[:self.max_posts_per_profile]:
+                media_id = post.get('id', 'unknown')
+                display_url = post.get('display_url')
                 
                 if display_url:
                     await self._enqueue_asset(
