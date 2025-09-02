@@ -230,6 +230,22 @@ app.include_router(simple_creator_router)
 from app.api.robust_creator_search_routes import router as robust_creator_router
 app.include_router(robust_creator_router, prefix="/api/v1")
 
+# FRONTEND COMPATIBILITY FIX: Add missing /api/v1/creator/search/{username} route
+# This creates an alias that maps to the simple creator search endpoint
+from app.api.simple_creator_search_routes import simple_creator_search
+from fastapi import Depends
+from app.middleware.auth_middleware import get_current_active_user
+from app.database.connection import get_db
+
+@app.post("/api/v1/creator/search/{username}")
+async def creator_search_compatibility(
+    username: str,
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """Compatibility endpoint for frontend - maps to simple creator search"""
+    return await simple_creator_search(username, current_user, db)
+
 # System status and recovery routes
 from app.api.system_status_routes import router as system_status_router  
 app.include_router(system_status_router, prefix="/api/v1")

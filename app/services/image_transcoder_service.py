@@ -506,3 +506,19 @@ class ImageTranscoderService:
 
 # Global transcoder service instance  
 image_transcoder_service: Optional[ImageTranscoderService] = None
+
+def initialize_transcoder_service():
+    """Initialize the global transcoder service with R2 client"""
+    global image_transcoder_service
+    if image_transcoder_service is None:
+        from app.infrastructure.r2_storage_client import get_r2_client
+        r2_client = get_r2_client()
+        image_transcoder_service = ImageTranscoderService(r2_client)
+        logger.info("✅ Image Transcoder Service initialized globally")
+    return image_transcoder_service
+
+def get_transcoder_service():
+    """Get the transcoder service, initializing if needed"""
+    if image_transcoder_service is None:
+        return initialize_transcoder_service()
+    return image_transcoder_service

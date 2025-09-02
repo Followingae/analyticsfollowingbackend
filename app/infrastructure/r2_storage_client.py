@@ -394,3 +394,23 @@ class R2UploadError(R2StorageError):
 
 # Global storage client instance
 r2_storage_client: Optional[R2StorageClient] = None
+
+def initialize_r2_client():
+    """Initialize the global R2 storage client"""
+    global r2_storage_client
+    if r2_storage_client is None:
+        from app.core.config import settings
+        r2_storage_client = R2StorageClient(
+            account_id=settings.CF_ACCOUNT_ID,
+            access_key=settings.R2_ACCESS_KEY_ID,
+            secret_key=settings.R2_SECRET_ACCESS_KEY,
+            bucket_name=settings.R2_BUCKET_NAME
+        )
+        logger.info("✅ R2 Storage Client initialized globally")
+    return r2_storage_client
+
+def get_r2_client():
+    """Get the R2 client, initializing if needed"""
+    if r2_storage_client is None:
+        return initialize_r2_client()
+    return r2_storage_client

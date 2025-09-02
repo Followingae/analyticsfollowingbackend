@@ -238,16 +238,17 @@ class ProductionSupabaseAuthService:
             from app.database.connection import async_engine
             from sqlalchemy import text
             
-            # Use connection pool for fast database access
-            async with async_engine.begin() as conn:
-                # Get fresh user data from database using Supabase user ID
-                result = await conn.execute(text("""
-                    SELECT id, email, full_name, role, status, created_at, last_login, 
-                           profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name, 
-                           company, job_title, phone_number, bio, timezone, language, updated_at
-                    FROM users 
-                    WHERE supabase_user_id = :user_id
-                """), {"user_id": supabase_user.id})
+            # Use connection pool for fast database access with timeout
+            async with asyncio.timeout(15.0):  # 15 second timeout
+                async with async_engine.begin() as conn:
+                    # Get fresh user data from database using Supabase user ID
+                    result = await conn.execute(text("""
+                        SELECT id, email, full_name, role, status, created_at, last_login, 
+                               profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name, 
+                               company, job_title, phone_number, bio, timezone, language, updated_at
+                        FROM users 
+                        WHERE supabase_user_id = :user_id
+                    """), {"user_id": supabase_user.id})
                 
                 user_row = result.fetchone()
                 
@@ -322,6 +323,21 @@ class ProductionSupabaseAuthService:
                     
                     return user_response
                     
+        except asyncio.TimeoutError:
+            logger.warning(f"LOGIN-FRESH: Database timeout after 15s for {supabase_user.email}")
+            # Fallback to basic Supabase data if database times out
+            logger.warning("LOGIN-FALLBACK: Using basic Supabase data - database timeout")
+            return UserResponse(
+                id=supabase_user.id,
+                email=supabase_user.email,
+                full_name=user_metadata.get("full_name") or user_metadata.get("name"),
+                role=user_role,
+                status=UserStatus.ACTIVE,
+                created_at=datetime.now(timezone.utc),
+                last_login=datetime.now(),
+                timezone="UTC",
+                language="en"
+            )
         except Exception as e:
             logger.error(f"LOGIN-FRESH: Failed to fetch fresh user data for {supabase_user.email}: {e}")
             # Fallback to basic Supabase data if database fetch fails
@@ -667,85 +683,97 @@ class ProductionSupabaseAuthService:
             from app.database.connection import async_engine
             from sqlalchemy import text
             
-            # Use connection pool instead of creating new connections
-            async with async_engine.begin() as conn:
+            # Use connection pool instead of creating new connections with timeout
+            async with asyncio.timeout(15.0):  # 15 second timeout
+                async with async_engine.begin() as conn:
+                    
+                    # Optimized query: Get user ID and basic info in one query
+                    user_result = await conn.execute(text("""
+                        SELECT id, created_at FROM users WHERE supabase_user_id = :user_id
+                    """), {"user_id": str(user_id)})
                 
-                # Optimized query: Get user ID and basic info in one query
-                user_result = await conn.execute(text("""
-                    SELECT id, created_at FROM users WHERE supabase_user_id = :user_id
-                """), {"user_id": str(user_id)})
+                    user_row = user_result.fetchone()
+                    
+                    if not user_row:
+                        logger.warning(f"No database user found for Supabase ID: {user_id}")
+                        return UserDashboardStats(
+                            total_searches=0,
+                            searches_this_month=0,
+                            favorite_profiles=[],
+                            recent_searches=[],
+                            account_created=datetime.now(),
+                            last_active=datetime.now()
+                        )
+                    
+                    db_user_id = user_row.id
+                    user_created = user_row.created_at
                 
-                user_row = user_result.fetchone()
+                    # Optimized query: Get search statistics in one query
+                    search_stats_result = await conn.execute(text("""
+                        SELECT 
+                            COUNT(*) as total_searches,
+                            COUNT(*) FILTER (WHERE search_timestamp >= date_trunc('month', CURRENT_DATE)) as searches_this_month
+                        FROM user_searches 
+                        WHERE user_id = :user_id
+                    """), {"user_id": str(db_user_id)})
+                    
+                    stats_row = search_stats_result.fetchone()
+                    total_searches = stats_row.total_searches or 0
+                    searches_this_month = stats_row.searches_this_month or 0
+                    
+                    # Get recent searches
+                    recent_search_result = await conn.execute(text("""
+                        SELECT id, user_id, instagram_username, search_timestamp, 
+                               analysis_type, search_metadata
+                        FROM user_searches 
+                        WHERE user_id = :user_id
+                        ORDER BY search_timestamp DESC 
+                        LIMIT 10
+                    """), {"user_id": str(db_user_id)})
                 
-                if not user_row:
-                    logger.warning(f"No database user found for Supabase ID: {user_id}")
+                    recent_searches = [
+                        UserSearchHistory(
+                            id=str(row.id),
+                            user_id=str(row.user_id),
+                            instagram_username=row.instagram_username,
+                            search_timestamp=row.search_timestamp,
+                            analysis_type=row.analysis_type,
+                            search_metadata=row.search_metadata or {}
+                        )
+                        for row in recent_search_result.fetchall()
+                    ]
+                    
+                    # Get favorite profiles (unlocked profiles) - user_profile_access.user_id is UUID
+                    favorite_profiles_result = await conn.execute(text("""
+                        SELECT p.username FROM user_profile_access upa
+                        JOIN profiles p ON p.id = upa.profile_id
+                        WHERE upa.user_id = :user_id
+                        ORDER BY upa.granted_at DESC
+                        LIMIT 10
+                    """), {"user_id": str(db_user_id)})
+                    
+                    favorite_profile_list = [row.username for row in favorite_profiles_result.fetchall()]
+                    
                     return UserDashboardStats(
-                        total_searches=0,
-                        searches_this_month=0,
-                        favorite_profiles=[],
-                        recent_searches=[],
-                        account_created=datetime.now(),
+                        total_searches=total_searches,
+                        searches_this_month=searches_this_month,
+                        favorite_profiles=favorite_profile_list,
+                        recent_searches=recent_searches,
+                        account_created=user_created,
                         last_active=datetime.now()
                     )
                 
-                db_user_id = user_row.id
-                user_created = user_row.created_at
-                
-                # Optimized query: Get search statistics in one query
-                search_stats_result = await conn.execute(text("""
-                    SELECT 
-                        COUNT(*) as total_searches,
-                        COUNT(*) FILTER (WHERE search_timestamp >= date_trunc('month', CURRENT_DATE)) as searches_this_month
-                    FROM user_searches 
-                    WHERE user_id = :user_id
-                """), {"user_id": str(db_user_id)})
-                
-                stats_row = search_stats_result.fetchone()
-                total_searches = stats_row.total_searches or 0
-                searches_this_month = stats_row.searches_this_month or 0
-                
-                # Get recent searches
-                recent_search_result = await conn.execute(text("""
-                    SELECT id, user_id, instagram_username, search_timestamp, 
-                           analysis_type, search_metadata
-                    FROM user_searches 
-                    WHERE user_id = :user_id
-                    ORDER BY search_timestamp DESC 
-                    LIMIT 10
-                """), {"user_id": str(db_user_id)})
-                
-                recent_searches = [
-                    UserSearchHistory(
-                        id=str(row.id),
-                        user_id=str(row.user_id),
-                        instagram_username=row.instagram_username,
-                        search_timestamp=row.search_timestamp,
-                        analysis_type=row.analysis_type,
-                        search_metadata=row.search_metadata or {}
-                    )
-                    for row in recent_search_result.fetchall()
-                ]
-                
-                # Get favorite profiles (unlocked profiles) - user_profile_access.user_id is UUID
-                favorite_profiles_result = await conn.execute(text("""
-                    SELECT p.username FROM user_profile_access upa
-                    JOIN profiles p ON p.id = upa.profile_id
-                    WHERE upa.user_id = :user_id
-                    ORDER BY upa.granted_at DESC
-                    LIMIT 10
-                """), {"user_id": str(db_user_id)})
-                
-                favorite_profile_list = [row.username for row in favorite_profiles_result.fetchall()]
-                
-                return UserDashboardStats(
-                    total_searches=total_searches,
-                    searches_this_month=searches_this_month,
-                    favorite_profiles=favorite_profile_list,
-                    recent_searches=recent_searches,
-                    account_created=user_created,
-                    last_active=datetime.now()
-                )
-                
+        except asyncio.TimeoutError:
+            logger.warning(f"DASHBOARD: Database timeout after 15s for user {user_id}")
+            # Return empty stats on timeout
+            return UserDashboardStats(
+                total_searches=0,
+                searches_this_month=0,
+                favorite_profiles=[],
+                recent_searches=[],
+                account_created=datetime.now(),
+                last_active=datetime.now()
+            )
         except Exception as e:
             logger.error(f"ERROR: Failed to get dashboard stats for user {user_id}: {e}")
             # Return empty stats on error

@@ -83,9 +83,13 @@ class RobustCreatorSearchService:
         force_refresh: bool = False
     ) -> Dict[str, Any]:
         """
-        🎯 MAIN CREATOR SEARCH METHOD
+        🎯 BULLETPROOF CREATOR SEARCH METHOD
         
-        Returns immediate basic data, schedules AI analysis if needed
+        Multi-layer fallback system with guaranteed success:
+        1. Database cache (fastest)
+        2. Fresh Instagram fetch
+        3. Database fallback with warnings
+        4. Emergency basic response
         
         Args:
             username: Instagram username to analyze
@@ -100,79 +104,245 @@ class RobustCreatorSearchService:
             await self.initialize()
             
         search_start = datetime.now(timezone.utc)
-        logger.info(f"CREATOR SEARCH: Creator search started: {username} for user {user_id}")
+        logger.info(f"CREATOR SEARCH: Bulletproof search started: {username} for user {user_id}")
+        
+        # Track fallbacks used for monitoring
+        fallbacks_used = []
+        warnings = []
         
         try:
             # PHASE 1: Check database for existing profile (DATABASE-FIRST STRATEGY)
-            existing_profile = await comprehensive_service.get_profile_by_username(db, username)
+            existing_profile = await self._safe_database_check(db, username, user_id, fallbacks_used)
             
             if existing_profile and not force_refresh:
-                logger.info(f"CREATOR SEARCH: Profile {username} exists in database")
+                logger.info(f"CREATOR SEARCH: Profile {username} found in database")
                 
-                # Grant user access to existing profile
-                await comprehensive_service.grant_profile_access(db, user_id, existing_profile.id)
-                
-                # Check if AI analysis is complete (comprehensive check with posts)
-                ai_complete = await self._check_ai_analysis_status(existing_profile, db)
-                
-                if ai_complete:
-                    logger.info(f"CREATOR SEARCH AI COMPLETE: AI analysis complete for {username} - serving from database")
-                    return await self._format_complete_response(existing_profile, "database_complete", db)
-                else:
-                    logger.info(f"CREATOR SEARCH AI INCOMPLETE: AI analysis needed for existing profile {username}")
-                    # Schedule AI analysis in background but return immediately for better UX
-                    ai_task = await self._schedule_ai_analysis_background(existing_profile, db)
+                try:
+                    # Check if AI analysis is complete
+                    ai_complete = await self._check_ai_analysis_status(existing_profile, db)
                     
-                    # ALWAYS return basic response immediately - don't wait for AI completion
-                    logger.info(f"CREATOR SEARCH STAGE 1 COMPLETE: Returning basic profile data for {username} while AI processes in background")
-                    return await self._format_basic_response(existing_profile, "database_processing", ai_task, db)
+                    if ai_complete:
+                        logger.info(f"CREATOR SEARCH AI COMPLETE: Serving complete data for {username}")
+                        return await self._format_complete_response(existing_profile, "database_complete", db)
+                    else:
+                        logger.info(f"CREATOR SEARCH: Triggering background AI for {username}")
+                        # Schedule AI analysis in background
+                        await self._safe_schedule_ai_analysis(existing_profile, db, fallbacks_used)
+                        
+                        # Ensure CDN processing
+                        await self._safe_ensure_cdn_processing(existing_profile, db, fallbacks_used)
+                        
+                        return await self._format_basic_response(existing_profile, "database_processing", None, db)
+                        
+                except Exception as ai_error:
+                    logger.warning(f"AI check failed for {username}: {ai_error}")
+                    fallbacks_used.append("ai_check_failed")
+                    warnings.append("AI analysis unavailable")
+                    # Continue with basic response
+                    return await self._format_basic_response(existing_profile, "database_degraded", None, db, warnings=warnings)
             
-            # PHASE 2: Profile doesn't exist or force refresh - fetch from Instagram
-            logger.info(f"CREATOR SEARCH FETCH: Fetching fresh Instagram data for {username}")
+            # PHASE 2: Fresh Instagram fetch
+            logger.info(f"CREATOR SEARCH: Fetching fresh data for {username}")
             
             try:
-                # Fetch comprehensive data from Decodo
-                raw_instagram_data = await self._fetch_instagram_data(username)
-                
-                # Store complete profile data in database
+                fresh_result = await self._safe_instagram_fetch(username, user_id, db, fallbacks_used)
+                if fresh_result:
+                    return fresh_result
+            except Exception as fetch_error:
+                logger.warning(f"Fresh fetch failed for {username}: {fetch_error}")
+                fallbacks_used.append("instagram_fetch_failed")
+            
+            # PHASE 3: Database fallback (existing profile even if old)
+            logger.warning(f"CREATOR SEARCH FALLBACK: Using database fallback for {username}")
+            fallback_profile = await self._database_fallback_search(db, username, user_id, fallbacks_used)
+            if fallback_profile:
+                warnings.append("Using cached data - fresh data temporarily unavailable")
+                return fallback_profile
+            
+            # PHASE 4: Emergency response
+            logger.error(f"CREATOR SEARCH EMERGENCY: All methods failed for {username}")
+            return self._create_emergency_response(username, fallbacks_used)
+            
+        except Exception as critical_error:
+            logger.error(f"CRITICAL ERROR: Creator search system failure for {username}: {critical_error}")
+            return self._create_emergency_response(username, fallbacks_used + ["system_failure"], str(critical_error))
+    
+    async def _safe_database_check(self, db: AsyncSession, username: str, user_id: UUID, fallbacks_used: List[str]) -> Optional[object]:
+        """Safely check database with error handling"""
+        try:
+            existing_profile = await comprehensive_service.get_profile_by_username(db, username)
+            if existing_profile:
+                # Grant access safely
+                try:
+                    await comprehensive_service.grant_profile_access(db, user_id, existing_profile.id)
+                except Exception as access_error:
+                    logger.warning(f"Access grant failed: {access_error}")
+                    fallbacks_used.append("access_grant_failed")
+                    # Continue anyway
+                return existing_profile
+            return None
+        except Exception as e:
+            logger.error(f"Database check failed: {e}")
+            fallbacks_used.append("database_check_failed")
+            return None
+    
+    async def _safe_instagram_fetch(self, username: str, user_id: UUID, db: AsyncSession, fallbacks_used: List[str]) -> Optional[Dict[str, Any]]:
+        """Safely fetch from Instagram with comprehensive error handling"""
+        try:
+            # Fetch with timeout and retries
+            raw_instagram_data = await self._fetch_instagram_data_with_fallbacks(username)
+            
+            if not raw_instagram_data:
+                fallbacks_used.append("instagram_empty_response")
+                return None
+            
+            # Store data safely
+            try:
                 profile, is_new = await comprehensive_service.store_complete_profile(
                     db, username, raw_instagram_data
                 )
                 
                 if not profile:
-                    return self._create_error_response(f"Failed to store profile data for {username}")
+                    fallbacks_used.append("database_store_failed")
+                    return None
                 
-                # Grant user access
-                await comprehensive_service.grant_profile_access(db, user_id, profile.id)
+                # Grant access
+                try:
+                    await comprehensive_service.grant_profile_access(db, user_id, profile.id)
+                except Exception:
+                    fallbacks_used.append("access_grant_failed")
+                    # Continue anyway
                 
-                # TRIGGER CDN PROCESSING - NEW!
-                logger.info(f"🔧 DEBUG: About to trigger CDN processing for {profile.username}")
-                await self._trigger_cdn_processing(profile, raw_instagram_data, db)
-                logger.info(f"🔧 DEBUG: CDN processing call completed for {profile.username}")
+                # Trigger CDN and AI processing safely
+                await self._safe_ensure_cdn_processing(profile, db, fallbacks_used, raw_instagram_data)
+                await self._safe_schedule_ai_analysis(profile, db, fallbacks_used)
                 
-                # Schedule comprehensive AI analysis in background
-                ai_task = await self._schedule_ai_analysis_background(profile, db)
+                return await self._format_basic_response(profile, "instagram_fresh", None, db)
                 
-                processing_time = (datetime.now(timezone.utc) - search_start).total_seconds()
-                logger.info(f"✅ Creator search completed in {processing_time:.2f}s: {username}")
+            except Exception as store_error:
+                logger.error(f"Failed to store profile data: {store_error}")
+                fallbacks_used.append("database_store_failed")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Instagram fetch failed: {e}")
+            fallbacks_used.append("instagram_api_failed")
+            return None
+    
+    async def _fetch_instagram_data_with_fallbacks(self, username: str) -> Optional[Dict[str, Any]]:
+        """Fetch Instagram data with multiple fallback attempts"""
+        attempts = 0
+        max_attempts = 3
+        
+        while attempts < max_attempts:
+            try:
+                async with EnhancedDecodoClient(
+                    settings.SMARTPROXY_USERNAME,
+                    settings.SMARTPROXY_PASSWORD
+                ) as client:
+                    data = await client.get_instagram_profile_comprehensive(username)
+                    if data:
+                        return data
+            except Exception as e:
+                attempts += 1
+                logger.warning(f"Instagram fetch attempt {attempts} failed for {username}: {e}")
+                if attempts < max_attempts:
+                    await asyncio.sleep(min(2 ** attempts, 10))  # Exponential backoff
+        
+        return None
+    
+    async def _database_fallback_search(self, db: AsyncSession, username: str, user_id: UUID, fallbacks_used: List[str]) -> Optional[Dict[str, Any]]:
+        """Database fallback search for existing profiles"""
+        try:
+            profile = await comprehensive_service.get_profile_by_username(db, username)
+            if profile:
+                fallbacks_used.append("database_fallback_used")
+                try:
+                    await comprehensive_service.grant_profile_access(db, user_id, profile.id)
+                except Exception:
+                    fallbacks_used.append("fallback_access_failed")
                 
                 return await self._format_basic_response(
                     profile, 
-                    "instagram_fresh", 
-                    ai_task,
-                    db,
-                    processing_time
+                    "database_fallback", 
+                    None, 
+                    db, 
+                    warnings=["Using cached data - Instagram temporarily unavailable"]
                 )
-                
-            except Exception as fetch_error:
-                logger.error(f"❌ Failed to fetch Instagram data for {username}: {fetch_error}")
-                return self._create_error_response(
-                    f"Failed to fetch Instagram profile: {str(fetch_error)}"
-                )
-            
+            return None
         except Exception as e:
-            logger.error(f"ERROR: Creator search failed for {username}: {e}")
-            return self._create_error_response(f"Creator search failed: {str(e)}")
+            logger.error(f"Database fallback failed: {e}")
+            fallbacks_used.append("database_fallback_failed")
+            return None
+    
+    async def _safe_ensure_cdn_processing(self, profile: object, db: AsyncSession, fallbacks_used: List[str], raw_data: Optional[Dict] = None) -> None:
+        """Safely ensure CDN processing is triggered"""
+        try:
+            if raw_data:
+                await self._trigger_cdn_processing(profile, raw_data, db)
+            else:
+                # Check if CDN processing is needed
+                cdn_image_service.set_db_session(db)
+                media_status = await cdn_image_service.get_profile_media_urls(profile.id)
+                if media_status.has_pending_jobs or media_status.completed_assets == 0:
+                    # Try to get basic profile data for CDN
+                    basic_data = {
+                        'profile_pic_url': profile.profile_pic_url,
+                        'profile_pic_url_hd': profile.profile_pic_url_hd,
+                        'recent_posts': []
+                    }
+                    await self._trigger_cdn_processing(profile, basic_data, db)
+        except Exception as e:
+            logger.warning(f"CDN processing trigger failed: {e}")
+            fallbacks_used.append("cdn_trigger_failed")
+    
+    async def _safe_schedule_ai_analysis(self, profile: object, db: AsyncSession, fallbacks_used: List[str]) -> None:
+        """Safely schedule AI analysis"""
+        try:
+            await self._schedule_ai_analysis_background(profile, db)
+        except Exception as e:
+            logger.warning(f"AI scheduling failed: {e}")
+            fallbacks_used.append("ai_schedule_failed")
+    
+    def _create_emergency_response(self, username: str, fallbacks_used: List[str], error: str = None) -> Dict[str, Any]:
+        """Create emergency response when all methods fail"""
+        # Determine likely cause based on fallbacks used
+        likely_cause = "Unknown error"
+        user_action = "Try again later"
+        
+        if "instagram_api_failed" in fallbacks_used:
+            likely_cause = "Instagram API temporarily unavailable"
+            user_action = "Instagram may be blocking requests - try again in 30 minutes"
+        elif "database_check_failed" in fallbacks_used:
+            likely_cause = "Database connectivity issues"
+            user_action = "System maintenance in progress - try again shortly"
+        elif "username_not_found" in fallbacks_used:
+            likely_cause = "Instagram profile does not exist"
+            user_action = "Verify the username is spelled correctly"
+        elif "system_failure" in fallbacks_used:
+            likely_cause = "Critical system error"
+            user_action = "Contact support with error details"
+        
+        return {
+            "success": False,
+            "stage": "emergency",
+            "error": error or f"Profile '{username}' could not be found or processed",
+            "likely_cause": likely_cause,
+            "fallbacks_used": fallbacks_used,
+            "message": "All search methods exhausted - profile may not exist or systems temporarily unavailable",
+            "user_action": user_action,
+            "recommendations": [
+                "Verify the Instagram username is correct",
+                "Try again in a few minutes", 
+                "Contact support if issue persists",
+                "Check Instagram.com to verify profile exists"
+            ],
+            "support_info": {
+                "error_code": f"SEARCH_FAIL_{len(fallbacks_used)}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "fallback_chain": " -> ".join(fallbacks_used)
+            }
+        }
     
     async def get_creator_detailed_analysis(
         self, 
@@ -646,13 +816,18 @@ class RobustCreatorSearchService:
                     from app.tasks.cdn_processing_tasks import _process_cdn_image_job_async
                     from sqlalchemy import text
                     
-                    # Get all queued jobs for this profile
+                    # Get all jobs for this profile that need processing (avoid duplicates)
                     jobs_query = text('''
                         SELECT cij.id, cia.source_type
                         FROM cdn_image_jobs cij
                         JOIN cdn_image_assets cia ON cij.asset_id = cia.id
                         WHERE cia.source_id = :profile_id
-                        AND cij.status = 'queued'
+                        AND cij.status IN ('queued', 'retry')
+                        AND cij.id NOT IN (
+                            SELECT id FROM cdn_image_jobs 
+                            WHERE status IN ('processing', 'completed')
+                            AND updated_at > NOW() - INTERVAL '5 minutes'
+                        )
                         ORDER BY cij.priority ASC
                     ''')
                     jobs_result = await db.execute(jobs_query, {'profile_id': str(profile.id)})
@@ -818,14 +993,15 @@ class RobustCreatorSearchService:
         data_source: str, 
         ai_task: Dict[str, Any],
         db: AsyncSession,
-        processing_time: float = None
+        processing_time: float = None,
+        warnings: List[str] = None
     ) -> Dict[str, Any]:
         """Format basic response with profile data (Phase 1)"""
         
         # Get CDN media URLs for frontend
         media_urls = await self._get_media_urls_for_response(profile.id, db)
         
-        return {
+        response = {
             "success": True,
             "stage": "basic",
             "data_source": data_source,
@@ -833,9 +1009,9 @@ class RobustCreatorSearchService:
             "profile": await self._format_basic_profile_data(profile),
             "media": media_urls,  # INCLUDE MEDIA URLS IN MAIN RESPONSE
             "ai_analysis": {
-                "status": ai_task.get("status", "processing"),
+                "status": ai_task.get("status", "processing") if ai_task else "processing",
                 "estimated_completion": 45,
-                "posts_to_analyze": ai_task.get("total_posts", 0)
+                "posts_to_analyze": ai_task.get("total_posts", 0) if ai_task else 0
             },
             "processing_time": processing_time,
             "next_steps": [
@@ -843,6 +1019,12 @@ class RobustCreatorSearchService:
                 f"Call GET /creator/{profile.username}/detailed when AI is complete"
             ]
         }
+        
+        # Add warnings if any
+        if warnings:
+            response["warnings"] = warnings
+            
+        return response
     
     async def _format_complete_response(self, profile: Profile, data_source: str, db: AsyncSession) -> Dict[str, Any]:
         """Format complete response with AI insights (Phase 2)"""
@@ -885,6 +1067,21 @@ class RobustCreatorSearchService:
             "stage": "error",
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+
+    async def _alert_cdn_failure(self, username: str, error: str) -> None:
+        """Alert system administrators of critical CDN failure"""
+        try:
+            logger.critical(f"SYSTEM ALERT: IN-HOUSE CDN FAILURE")
+            logger.critical(f"Profile: {username}")
+            logger.critical(f"Error: {error}")
+            logger.critical(f"Timestamp: {datetime.now(timezone.utc)}")
+            logger.critical(f"This requires immediate investigation!")
+            
+            # TODO: Add webhook/email alert to ops team
+            # await send_ops_alert("CDN_FAILURE", {"username": username, "error": error})
+            
+        except Exception as alert_error:
+            logger.error(f"Failed to send CDN failure alert: {alert_error}")
 
 # Global service instance
 robust_creator_search_service = RobustCreatorSearchService()

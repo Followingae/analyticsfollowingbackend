@@ -149,20 +149,21 @@ async def init_database():
         # Create SQLAlchemy engines with network resilience
         async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
         
-        # Emergency connection configuration with very short timeouts
+        # Fixed connection configuration with proper timeouts
         async_engine = create_async_engine(
             async_url,
-            pool_pre_ping=False,         # Disable pre-ping for faster startup
-            pool_recycle=600,            # Standard recycle time
-            pool_size=10,                # Increased pool size for concurrent requests
-            max_overflow=5,              # Allow overflow for peak usage
-            pool_timeout=3,              # Very short timeout
+            pool_pre_ping=True,          # Enable pre-ping for connection health
+            pool_recycle=1800,           # 30 minutes recycle time
+            pool_size=5,                 # Smaller pool size to avoid connection issues
+            max_overflow=3,              # Smaller overflow
+            pool_timeout=30,             # 30 second timeout for getting connections
             echo=False,
             connect_args={
-                "command_timeout": 5,    # Very short timeout
+                "command_timeout": 60,   # 60 second command timeout
                 "server_settings": {
-                    "application_name": "analytics_backend_emergency",
-                    "statement_timeout": "10s"
+                    "application_name": "analytics_backend_fixed",
+                    "statement_timeout": "60s",  # 60 second statement timeout
+                    "connect_timeout": "30"      # 30 second connect timeout
                 }
             }
         )
@@ -174,9 +175,21 @@ async def init_database():
             expire_on_commit=False
         )
         
-        # Skip connection test for emergency mode
-        logger.warning("EMERGENCY MODE: Skipping connection test to avoid hangs")
-        database_resilience.record_success()  # Assume success for emergency startup
+        # Test database connection with proper timeout
+        logger.info("TESTING: Database connection with timeout protection...")
+        try:
+            connection_test_result = await asyncio.wait_for(
+                _test_connection_with_resilience(async_engine), 
+                timeout=30.0
+            )
+            if connection_test_result:
+                logger.info("SUCCESS: Database connection test passed")
+            else:
+                logger.warning("WARNING: Database connection test failed - continuing with pool")
+        except asyncio.TimeoutError:
+            logger.warning("WARNING: Connection test timed out after 30s - continuing with pool")
+        except Exception as test_error:
+            logger.warning(f"WARNING: Connection test failed: {test_error} - continuing with pool")
         
         # Using SQLAlchemy async only - databases library not needed
         database = None
@@ -310,16 +323,17 @@ async def get_db():
         async with get_session() as session:
             # Test the session with a simple query to detect network issues early
             try:
-                await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=5)
+                # Increased timeout from 5s to 15s for more resilience
+                await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=15)
                 database_resilience.record_success()
                 yield session
             except asyncio.TimeoutError:
-                logger.warning("DATABASE: Session timeout - network issues detected")
+                logger.warning("DATABASE: Session timeout after 15s - network issues detected")
                 database_resilience.record_failure()
                 from fastapi import HTTPException
                 raise HTTPException(
                     status_code=503,
-                    detail="Database response timeout - network connectivity issues detected"
+                    detail="Database response timeout - please try again in a moment"
                 )
             except Exception as session_error:
                 logger.warning(f"DATABASE: Session error: {session_error}")

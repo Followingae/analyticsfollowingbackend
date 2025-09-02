@@ -76,8 +76,8 @@ class CDNImageService:
             for asset in post_assets:
                 post_data = {
                     'media_id': asset['media_id'],
-                    'cdn_url_256': self._build_cdn_url(asset.get('cdn_path_256')),
-                    'cdn_url_512': self._build_cdn_url(asset.get('cdn_path_512')),
+                    'cdn_url_256': asset.get('cdn_url_256'),  # Direct CDN URL from database
+                    'cdn_url_512': asset.get('cdn_url_512'),  # Direct CDN URL from database
                     'available': asset.get('processing_status') == 'completed',
                     'processing_status': asset.get('processing_status', 'unknown')
                 }
@@ -372,12 +372,19 @@ class CDNImageService:
     
     def _build_cdn_urls(self, asset: Dict[str, Any]) -> Optional[Dict[str, str]]:
         """Build CDN URLs from asset data"""
-        if not asset or not asset.get('cdn_path_256') or not asset.get('cdn_path_512'):
+        if not asset:
+            return None
+            
+        # Use direct CDN URLs from database (not paths)
+        cdn_256 = asset.get('cdn_url_256')
+        cdn_512 = asset.get('cdn_url_512')
+        
+        if not cdn_256 or not cdn_512:
             return None
         
         return {
-            '256': self._build_cdn_url(asset['cdn_path_256']),
-            '512': self._build_cdn_url(asset['cdn_path_512'])
+            '256': cdn_256,
+            '512': cdn_512
         }
     
     def _build_cdn_url(self, cdn_path: str) -> Optional[str]:

@@ -18,7 +18,15 @@
       "Read(\\/**)",
       "Bash(cmd /c:*)",
       "Bash(powershell:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(claude doctor)",
+      "Bash(claude mcp)",
+      "Bash(claude mcp:*)",
+      "Bash(npm install:*)",
+      "Bash(npm config:*)",
+      "Bash(setx:*)",
+      "mcp__supabase__apply_migration",
+      "mcp__supabase__get_advisors"
     ],
     "deny": [],
     "ask": [],
@@ -29,5 +37,9 @@
       "C:\\Users\\user\\Desktop",
       "C:\\c\\Users\\user\\Desktop"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "supabase"
+  ]
 }

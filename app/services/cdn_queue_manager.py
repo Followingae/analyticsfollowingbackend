@@ -13,6 +13,9 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
+# Global set to track jobs currently being processed
+_processing_jobs_global = set()
+
 class JobPriority(Enum):
     """Job priority levels for processing queue"""
     CRITICAL = 1    # Profile avatars, immediate user requests
@@ -109,6 +112,16 @@ class CDNQueueManager:
             bool: True if job was enqueued successfully
         """
         try:
+            # Check if job is already being processed globally
+            if job_id in _processing_jobs_global:
+                logger.debug(f"⚠️ Job {job_id} is already being processed, skipping")
+                return False
+                
+            # Check if job is already in our queue
+            if job_id in self.processing_jobs or job_id in self.completed_jobs:
+                logger.debug(f"⚠️ Job {job_id} already exists in queue, skipping")
+                return False
+            
             job_item = {
                 'id': job_id,
                 'asset_data': asset_data,
@@ -241,19 +254,23 @@ class CDNQueueManager:
             job_item['status'] = JobStatus.PROCESSING
             job_item['started_at'] = job_start
             self.processing_jobs.add(job_id)
+            _processing_jobs_global.add(job_id)  # Track globally
             
             self.stats.pending_jobs -= 1
             self.stats.processing_jobs += 1
             
             # Process the actual CDN job directly (bypassing Celery for now)
-            from app.services.image_transcoder_service import image_transcoder_service
+            from app.services.image_transcoder_service import get_transcoder_service
+            
+            # Get initialized transcoder service
+            transcoder_service = get_transcoder_service()
             
             # Get job data from our internal tracking
             job_data = job_item.get('asset_data', {})
             
             # Process the image directly
             result = await asyncio.wait_for(
-                image_transcoder_service.process_job(job_data),
+                transcoder_service.process_job(job_data),
                 timeout=self.config.timeout_seconds
             )
             
@@ -286,6 +303,7 @@ class CDNQueueManager:
             
         finally:
             self.processing_jobs.discard(job_id)
+            _processing_jobs_global.discard(job_id)  # Clean up global tracking
             self.stats.processing_jobs -= 1
     
     async def _handle_job_failure(self, job_item: Dict[str, Any], error_message: str):

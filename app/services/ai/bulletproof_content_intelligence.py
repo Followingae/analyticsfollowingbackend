@@ -418,6 +418,85 @@ class BulletproofContentIntelligence:
                 "processing_completed": False
             }
     
+    async def update_profile_aggregates(self, db: AsyncSession, profile_id: str) -> bool:
+        """Update profile with aggregate AI analysis data"""
+        try:
+            from uuid import UUID
+            from sqlalchemy import select, update
+            from sqlalchemy.sql import and_
+            
+            # Convert string UUID to UUID object
+            profile_uuid = UUID(profile_id) if isinstance(profile_id, str) else profile_id
+            
+            # Calculate aggregate statistics
+            content_categories = {}
+            sentiment_scores = []
+            languages = {}
+            
+            # Get AI analysis for all posts
+            posts_query = select(Post).where(
+                and_(
+                    Post.profile_id == profile_uuid,
+                    Post.ai_analyzed_at.is_not(None)
+                )
+            )
+            posts_result = await db.execute(posts_query)
+            analyzed_posts = posts_result.scalars().all()
+            
+            for post in analyzed_posts:
+                # Content categories
+                if post.ai_content_category:
+                    content_categories[post.ai_content_category] = content_categories.get(post.ai_content_category, 0) + 1
+                
+                # Sentiment scores
+                if post.ai_sentiment_score is not None:
+                    sentiment_scores.append(post.ai_sentiment_score)
+                
+                # Languages
+                if post.ai_language_code:
+                    languages[post.ai_language_code] = languages.get(post.ai_language_code, 0) + 1
+            
+            # Calculate aggregates
+            primary_content_type = max(content_categories.items(), key=lambda x: x[1])[0] if content_categories else None
+            avg_sentiment = sum(sentiment_scores) / len(sentiment_scores) if sentiment_scores else 0.0
+            
+            # Content distribution (percentages)
+            total_posts = len(analyzed_posts)
+            content_distribution = {
+                cat: round((count / total_posts) * 100, 1) 
+                for cat, count in content_categories.items()
+            } if total_posts > 0 else {}
+            
+            # Language distribution
+            language_distribution = {
+                lang: round((count / total_posts) * 100, 1) 
+                for lang, count in languages.items()
+            } if total_posts > 0 else {}
+            
+            # Content quality score (based on engagement and AI analysis)
+            content_quality_score = min(10.0, (abs(avg_sentiment) * 5) + 5)  # Scale to 0-10
+            
+            # Update profile with aggregate data
+            await db.execute(
+                update(Profile).where(Profile.id == profile_uuid).values(
+                    ai_primary_content_type=primary_content_type,
+                    ai_content_distribution=content_distribution,
+                    ai_avg_sentiment_score=avg_sentiment,
+                    ai_language_distribution=language_distribution,
+                    ai_content_quality_score=content_quality_score,
+                    ai_profile_analyzed_at=datetime.now(timezone.utc)
+                )
+            )
+            await db.commit()
+            
+            logger.info(f"✅ Profile AI aggregates updated: {primary_content_type}, sentiment: {avg_sentiment:.2f}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update profile AI aggregates: {e}")
+            await db.rollback()
+            return False
+
     def get_system_health(self) -> Dict[str, Any]:
         """Get comprehensive system health status"""
         return {
