@@ -703,6 +703,8 @@ async def nuclear_unlocked_profiles(
             unlocked_profiles.append(profile_data)
         
         bulletproof_logger.info(f"NUCLEAR: Successfully returned {len(unlocked_profiles)} profiles")
+        bulletproof_logger.info(f"NUCLEAR: Profile usernames: {[p.get('username', 'NO_USERNAME') for p in unlocked_profiles]}")
+        bulletproof_logger.info(f"NUCLEAR: Response structure: success=True, profiles_count={len(unlocked_profiles)}")
         
         return {
             "success": True,
