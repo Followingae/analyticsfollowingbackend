@@ -352,7 +352,7 @@ class CreditWalletService:
         
         try:
             async with get_session() as session:
-                # Use database function for safe spending
+                # Use the corrected database function
                 result = await session.execute(
                     text("""
                         SELECT public.update_wallet_balance(

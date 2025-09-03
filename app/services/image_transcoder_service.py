@@ -123,6 +123,12 @@ class ImageTranscoderService:
             profile_id = job_data.get('profile_id')
             media_id = job_data.get('media_id', 'unknown')
             
+            # Validate required job data
+            if not asset_id:
+                raise ProcessingError(f"Invalid job data: asset_id is None. Job data: {job_data}")
+            if not source_url:
+                raise ProcessingError(f"Invalid job data: source_url is None. Job data: {job_data}")
+            
             logger.info(f"🔄 Processing job for asset {asset_id}: {source_url}")
             
             # 1. Download original image
@@ -184,6 +190,8 @@ class ImageTranscoderService:
     
     async def _download_image(self, url: str) -> Tuple[bytes, Dict[str, Any]]:
         """Download image with error handling and metadata extraction"""
+        if not url:
+            raise ProcessingError("URL cannot be None or empty")
         try:
             # Strategy 1: Try CORS proxy first for Instagram URLs (most reliable with API key)
             if self._is_instagram_url(url) and self.enable_cors_proxy:
@@ -207,6 +215,8 @@ class ImageTranscoderService:
     
     def _is_instagram_url(self, url: str) -> bool:
         """Check if URL is from Instagram CDN"""
+        if not url:
+            return False
         instagram_domains = ['scontent', 'instagram.com', 'fbcdn.net', 'cdninstagram']
         return any(domain in url.lower() for domain in instagram_domains)
     

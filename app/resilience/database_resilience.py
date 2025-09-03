@@ -83,6 +83,28 @@ class DatabaseResilience:
         self.last_failure_time = None
         self.circuit_breaker_open = False
     
+    def reset_circuit_breaker(self):
+        """Manually reset circuit breaker - for admin recovery operations"""
+        logger.info("CIRCUIT BREAKER: Manual reset triggered")
+        self.connection_failures = 0
+        self.last_failure_time = None
+        self.circuit_breaker_open = False
+    
+    @property
+    def failure_count(self) -> int:
+        """Get current failure count"""
+        return self.connection_failures
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current resilience status"""
+        return {
+            "circuit_breaker_open": self.circuit_breaker_open,
+            "failure_count": self.connection_failures,
+            "last_failure_time": self.last_failure_time,
+            "network_available": self.is_network_available(),
+            "status": "open" if self.circuit_breaker_open else "closed"
+        }
+    
     async def execute_with_resilience(
         self,
         db: AsyncSession,

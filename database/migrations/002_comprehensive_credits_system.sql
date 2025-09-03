@@ -314,7 +314,7 @@ DECLARE
     v_billing_cycle_date DATE;
 BEGIN
     -- Get current wallet info with row lock
-    SELECT user_id, current_balance, billing_cycle_start
+    SELECT user_id, current_balance, current_billing_cycle_start
     INTO v_user_id, v_balance_before, v_billing_cycle_date
     FROM public.credit_wallets 
     WHERE id = p_wallet_id

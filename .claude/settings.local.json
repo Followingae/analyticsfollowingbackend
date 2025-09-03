@@ -26,7 +26,12 @@
       "Bash(npm config:*)",
       "Bash(setx:*)",
       "mcp__supabase__apply_migration",
-      "mcp__supabase__get_advisors"
+      "mcp__supabase__get_advisors",
+      "Bash(del \"C:\\Users\\user\\Desktop\\analyticsfollowingbackend\\test_real_creator_search.py\")",
+      "Bash(rm:*)",
+      "mcp__supabase__execute_sql",
+      "Bash(py test_real_creator_search.py)",
+      "Bash(py test_nuclear_endpoint.py)"
     ],
     "deny": [],
     "ask": [],

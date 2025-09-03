@@ -110,6 +110,7 @@ class CDNImageService:
         """Enqueue profile assets for CDN processing"""
         try:
             logger.info(f"📥 Enqueuing assets for profile: {profile_id}")
+            print(f"📸 CDN: Starting CDN asset enqueue for profile {profile_id}")
             
             # Set database session if provided
             if db:
@@ -118,13 +119,17 @@ class CDNImageService:
             jobs_created = 0
             
             # Enqueue avatar from Decodo data
+            print(f"📸 CDN: Looking for profile avatar URL in Decodo data...")
             avatar_url = None
             if 'profile_pic_url_hd' in decodo_data and decodo_data['profile_pic_url_hd']:
                 avatar_url = decodo_data['profile_pic_url_hd']
+                print(f"📸 CDN: Found HD avatar URL: {avatar_url[:80]}...")
             elif 'profile_pic_url' in decodo_data and decodo_data['profile_pic_url']:
                 avatar_url = decodo_data['profile_pic_url']
+                print(f"📸 CDN: Found standard avatar URL: {avatar_url[:80]}...")
             
             if avatar_url:
+                print(f"📸 CDN: Enqueuing profile avatar for processing (HIGH priority)...")
                 await self._enqueue_asset(
                     source_type='profile_avatar',
                     source_id=profile_id,
@@ -134,30 +139,60 @@ class CDNImageService:
                 )
                 jobs_created += 1
                 logger.info(f"Enqueued avatar from Decodo: {avatar_url[:80]}...")
+                print(f"✅ CDN: Profile avatar enqueued successfully")
             else:
                 logger.warning(f"No avatar URL found in Decodo data for profile {profile_id}")
+                print(f"⚠️  CDN: No profile avatar URL found in Decodo data")
             
-            # Enqueue recent posts from Decodo data
-            recent_posts = decodo_data.get('recent_posts', [])
+            # Enqueue recent posts from DATABASE (more reliable than Decodo structure parsing)
+            print(f"📸 CDN: Getting recent posts from database for profile {profile_id}...")
             
-            logger.info(f"Found {len(recent_posts)} recent posts in Decodo data")
-            
-            # Limit to configured max posts per profile
-            for post in recent_posts[:self.max_posts_per_profile]:
-                media_id = post.get('id', 'unknown')
-                display_url = post.get('display_url')
+            if self.db:
+                from sqlalchemy import select, desc
+                from app.database.unified_models import Post
                 
-                if display_url:
-                    await self._enqueue_asset(
-                        source_type='post_thumbnail',
-                        source_id=profile_id,
-                        media_id=media_id,
-                        source_url=display_url,
-                        priority=5  # Normal priority for posts
-                    )
-                    jobs_created += 1
+                # Get recent posts with display URLs from database
+                posts_query = select(Post.instagram_post_id, Post.display_url).where(
+                    Post.profile_id == profile_id
+                ).where(
+                    Post.display_url.is_not(None)
+                ).where(
+                    Post.display_url != ''
+                ).order_by(desc(Post.created_at)).limit(self.max_posts_per_profile)
+                
+                posts_result = await self.db.execute(posts_query)
+                db_posts = posts_result.fetchall()
+                
+                print(f"📸 CDN: Found {len(db_posts)} posts with display URLs in database")
+                logger.info(f"Found {len(db_posts)} recent posts with display URLs from database")
+                
+                # Process posts from database
+                for i, post_row in enumerate(db_posts, 1):
+                    media_id = post_row[0] or f'post_{i}'  # instagram_post_id
+                    display_url = post_row[1]  # display_url
+                    
+                    print(f"📸 CDN: Processing post {i}/{len(db_posts)} (media_id: {media_id})")
+                    
+                    if display_url:
+                        print(f"📸 CDN: Enqueuing post thumbnail: {display_url[:80]}...")
+                        await self._enqueue_asset(
+                            source_type='post_thumbnail',
+                            source_id=profile_id,
+                            media_id=media_id,
+                            source_url=display_url,
+                            priority=5  # Normal priority for posts
+                        )
+                        jobs_created += 1
+                        print(f"✅ CDN: Post {i} thumbnail enqueued successfully")
+                    else:
+                        print(f"⚠️  CDN: Post {i} has no display_url, skipping")
+            else:
+                print(f"⚠️  CDN: No database session available, cannot get posts")
+                logger.warning(f"No database session available for CDN post processing")
             
             logger.info(f"✅ Enqueued {jobs_created} assets for processing")
+            print(f"✅ CDN: Successfully enqueued {jobs_created} assets for CDN processing")
+            print(f"📸 CDN: CDN jobs will be processed in background by workers")
             
             return EnqueueResult(
                 success=True,
@@ -167,6 +202,9 @@ class CDNImageService:
             
         except Exception as e:
             logger.error(f"❌ Error enqueuing profile assets: {e}")
+            print(f"❌ CDN: Error enqueuing profile assets - {str(e)}")
+            # Add more detailed error info for debugging
+            print(f"❌ CDN: Error details - profile_id: {profile_id}, db session: {self.db is not None}")
             return EnqueueResult(
                 success=False,
                 jobs_created=0,

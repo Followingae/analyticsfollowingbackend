@@ -23,6 +23,10 @@ security = HTTPBearer()
 _token_cache = {}
 _token_cache_ttl = timedelta(minutes=10)  # Cache tokens for 10 minutes
 
+# User sync cache to prevent excessive database syncing
+_user_sync_cache = {}
+_user_sync_cache_ttl = timedelta(minutes=30)  # Cache user sync for 30 minutes
+
 # JWT settings for token creation
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
@@ -185,9 +189,9 @@ class ProductionSupabaseAuthService:
             refresh_token = session.refresh_token if session else ""
             expires_in = session.expires_in if session else ACCESS_TOKEN_EXPIRE_MINUTES * 60
             
-            # Ensure user exists in our database (non-blocking)
+            # Ensure user exists in our database (non-blocking) - with caching
             try:
-                await self._ensure_user_in_database(user, user_metadata)
+                await self._ensure_user_in_database_cached(user, user_metadata)
             except Exception as db_error:
                 logger.warning(f"Database sync failed (non-blocking): {db_error}")
                 # Don't fail authentication if database sync fails - continue with login
@@ -363,6 +367,49 @@ class ProductionSupabaseAuthService:
                 updated_at=None
             )
 
+    async def _ensure_user_in_database_cached(self, supabase_user, user_metadata: dict):
+        """Cached version of _ensure_user_in_database to prevent excessive syncing"""
+        user_cache_key = f"{supabase_user.id}:{supabase_user.email}"
+        current_time = datetime.now()
+        
+        # Debug logging
+        logger.debug(f"SYNC-CACHE: Checking cache for key: {user_cache_key}")
+        logger.debug(f"SYNC-CACHE: Current cache size: {len(_user_sync_cache)}")
+        
+        # Check if user was recently synced
+        if user_cache_key in _user_sync_cache:
+            cached_time, cached_data = _user_sync_cache[user_cache_key]
+            time_since_cache = current_time - cached_time
+            logger.debug(f"SYNC-CACHE: Found in cache, age: {time_since_cache}, TTL: {_user_sync_cache_ttl}")
+            
+            if time_since_cache < _user_sync_cache_ttl:
+                logger.info(f"SYNC-CACHE: Cache HIT for {supabase_user.email}, skipping database sync")
+                return cached_data
+            else:
+                logger.debug(f"SYNC-CACHE: Cache expired for {supabase_user.email}")
+        else:
+            logger.debug(f"SYNC-CACHE: Key not found in cache")
+        
+        # User not in cache or cache expired, perform sync
+        logger.info(f"SYNC-CACHE: Cache MISS for {supabase_user.email}, performing database sync")
+        result = await self._ensure_user_in_database(supabase_user, user_metadata)
+        
+        # Cache the result
+        _user_sync_cache[user_cache_key] = (current_time, result)
+        logger.debug(f"SYNC-CACHE: Stored in cache: {user_cache_key} at {current_time}")
+        
+        # Clean up old cache entries (simple cleanup)
+        if len(_user_sync_cache) > 100:  # Prevent memory bloat
+            cutoff_time = current_time - _user_sync_cache_ttl
+            expired_keys = [
+                key for key, (cached_time, _) in _user_sync_cache.items() 
+                if cached_time < cutoff_time
+            ]
+            for key in expired_keys:
+                del _user_sync_cache[key]
+        
+        return result
+
     async def _ensure_user_in_database(self, supabase_user, user_metadata: dict):
         """Ensure user exists in our database with proper fields - CRITICAL FOR USER DATA"""
         try:
@@ -393,16 +440,26 @@ class ProductionSupabaseAuthService:
                         from sqlalchemy import text
                         await db.execute(text("SET statement_timeout = '30s'"))
                         
-                        # Check if user exists by Supabase ID first (more reliable)
+                        # ENFORCE: Check if user exists by Supabase ID ONLY (never create duplicates)
                         logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id} (attempt {attempt + 1})")
                         result = await db.execute(select(User).where(User.supabase_user_id == supabase_user.id))
                         existing_user = result.scalar_one_or_none()
                         
                         if not existing_user:
-                            # Check by email as fallback
+                            # CRITICAL: Check by email and UPDATE their supabase_user_id if they exist
                             logger.info(f"SYNC: User not found by Supabase ID, checking by email: {supabase_user.email}")
                             result = await db.execute(select(User).where(User.email == supabase_user.email))
                             existing_user = result.scalar_one_or_none()
+                            
+                            if existing_user and not existing_user.supabase_user_id:
+                                # Fix orphaned user: link to Supabase Auth ID
+                                logger.warning(f"SYNC: FIXING ORPHANED USER - Linking {supabase_user.email} to Supabase ID {supabase_user.id}")
+                                await db.execute(
+                                    update(User)
+                                    .where(User.id == existing_user.id)
+                                    .values(supabase_user_id=supabase_user.id)
+                                )
+                                existing_user.supabase_user_id = supabase_user.id  # Update local object
                         
                         if existing_user:
                             # Update existing user's last login and Supabase ID
@@ -496,7 +553,7 @@ class ProductionSupabaseAuthService:
             user = auth_response.user
             user_metadata = user.user_metadata or {}
             
-            # Sync to database
+            # Sync to database - forced sync during registration
             await self._ensure_user_in_database(user, user_metadata)
             
             # Handle datetime parsing safely
@@ -558,7 +615,7 @@ class ProductionSupabaseAuthService:
                     # CRITICAL: Ensure user exists in database before creating UserInDB object
                     try:
                         user_metadata = user_response.user.user_metadata or {}
-                        await self._ensure_user_in_database(user_response.user, user_metadata)
+                        await self._ensure_user_in_database_cached(user_response.user, user_metadata)
                     except Exception as db_error:
                         logger.warning(f"Database sync failed during token validation: {db_error}")
                         # Continue authentication even if database sync fails
@@ -586,7 +643,7 @@ class ProductionSupabaseAuthService:
                     # CRITICAL: Ensure user exists in database before creating UserInDB object
                     try:
                         user_metadata = user_response.user.user_metadata or {}
-                        await self._ensure_user_in_database(user_response.user, user_metadata)
+                        await self._ensure_user_in_database_cached(user_response.user, user_metadata)
                     except Exception as db_error:
                         logger.warning(f"Database sync failed during session validation: {db_error}")
                         # Continue authentication even if database sync fails

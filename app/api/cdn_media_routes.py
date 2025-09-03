@@ -54,24 +54,39 @@ async def get_cdn_service(db: AsyncSession = Depends(get_db)):
     cdn_image_service.set_db_session(db)
     return cdn_image_service
 
-@router.get("/creators/ig/{profile_id}/media")
+@router.get("/creators/ig/{profile_identifier}/media")
 async def get_profile_media_urls(
-    profile_id: str,
+    profile_identifier: str,
     current_user=Depends(get_current_active_user),
-    cdn_service: CDNImageService = Depends(get_cdn_service)
+    cdn_service: CDNImageService = Depends(get_cdn_service),
+    db: AsyncSession = Depends(get_db)
 ):
     """Get CDN URLs for profile images (avatar + recent posts)"""
     try:
-        logger.info(f"🔍 Getting media URLs for profile: {profile_id}")
+        logger.info(f"🔍 Getting media URLs for profile: {profile_identifier}")
         
-        # Validate profile ID format
+        # Check if it's a UUID or username
+        profile_uuid = None
         try:
-            profile_uuid = UUID(profile_id)
+            profile_uuid = UUID(profile_identifier)
+            logger.info(f"📱 Using provided UUID: {profile_uuid}")
         except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid profile ID format"
-            )
+            # It's a username, look up the UUID
+            logger.info(f"📱 Looking up UUID for username: {profile_identifier}")
+            from sqlalchemy import select
+            from app.database.unified_models import Profile
+            
+            query = select(Profile.id).where(Profile.username == profile_identifier)
+            result = await db.execute(query)
+            profile_uuid = result.scalar_one_or_none()
+            
+            if not profile_uuid:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Profile not found: {profile_identifier}"
+                )
+            
+            logger.info(f"📱 Found UUID for {profile_identifier}: {profile_uuid}")
         
         # Get media URLs from CDN service
         media_response = await cdn_service.get_profile_media_urls(profile_uuid)
@@ -80,7 +95,8 @@ async def get_profile_media_urls(
         cdn_base_url = settings.CDN_BASE_URL
         
         response = {
-            "profile_id": profile_id,
+            "profile_id": str(profile_uuid),
+            "profile_identifier": profile_identifier,
             "avatar": {
                 "256": media_response.avatar_256 or f"{cdn_base_url}/placeholders/avatar-256.webp",
                 "512": media_response.avatar_512 or f"{cdn_base_url}/placeholders/avatar-512.webp",

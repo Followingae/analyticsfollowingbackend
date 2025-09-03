@@ -90,8 +90,8 @@ class CDNQueueManager:
             'failures': 0,
             'last_failure': None,
             'is_open': False,
-            'failure_threshold': 5,
-            'recovery_timeout': 30  # seconds
+            'failure_threshold': 20,  # More tolerant for enterprise scale
+            'recovery_timeout': 60  # seconds
         }
         
         logger.info(f"🎯 CDN Queue Manager initialized with {self.config.max_concurrent_jobs} concurrent jobs")
@@ -274,7 +274,7 @@ class CDNQueueManager:
                 timeout=self.config.timeout_seconds
             )
             
-            if result and result.get('success'):
+            if result and hasattr(result, 'success') and result.success:
                 # Job completed successfully
                 job_item['status'] = JobStatus.COMPLETED
                 job_item['completed_at'] = datetime.utcnow()
@@ -291,7 +291,8 @@ class CDNQueueManager:
                 
             else:
                 # Job failed - handle retry logic
-                await self._handle_job_failure(job_item, result.get('error', 'Unknown error'))
+                error_msg = getattr(result, 'error', 'Unknown error') if result else 'No result returned'
+                await self._handle_job_failure(job_item, error_msg)
                 
         except asyncio.TimeoutError:
             logger.error(f"⏱️ Job {job_id} timed out after {self.config.timeout_seconds}s")

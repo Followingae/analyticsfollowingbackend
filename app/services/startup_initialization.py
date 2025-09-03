@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from app.services.ai.ai_manager_singleton import ai_manager
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
-from app.services.robust_creator_search_service import robust_creator_search_service
+# Robust creator search service removed - using Simple API endpoints
 from app.database.comprehensive_service import comprehensive_service
 from app.monitoring.network_health_monitor import network_health_monitor
 
@@ -160,29 +160,12 @@ class StartupInitializationService:
             }
     
     async def _initialize_creator_search(self):
-        """Initialize Robust Creator Search Service - CRITICAL"""
-        try:
-            logger.info("Initializing Creator Search Service...")
-            
-            success = await robust_creator_search_service.initialize()
-            
-            if not success:
-                raise Exception("Creator Search Service initialization failed")
-            
-            self.initialization_results["creator_search"] = {
-                "status": "success",
-                "service_initialized": robust_creator_search_service.initialized
-            }
-            
-            logger.info("SUCCESS: Creator Search Service initialized successfully")
-            
-        except Exception as e:
-            logger.critical(f"ERROR: Creator Search Service initialization FAILED: {e}")
-            self.critical_failures.append(f"Creator Search: {str(e)}")
-            self.initialization_results["creator_search"] = {
-                "status": "critical_failure",
-                "error": str(e)
-            }
+        """Simple API endpoints use AI and Database services (already initialized)"""
+        logger.info("Simple API endpoints ready - using AI and Database services")
+        self.initialization_results["simple_api"] = {
+            "status": "success",
+            "message": "Simple API endpoints ready with AI and Database services"
+        }
     
     async def _initialize_database_services(self):
         """Initialize Database Services - WARNING IF FAIL (non-critical)"""
@@ -289,17 +272,17 @@ class StartupInitializationService:
             except Exception as e:
                 health_results["content_intelligence"] = {"status": "error", "error": str(e)}
             
-            # Check Creator Search Service
-            health_results["creator_search"] = {
-                "status": "healthy" if robust_creator_search_service.initialized else "unhealthy",
-                "initialized": robust_creator_search_service.initialized
+            # Check Simple API status
+            health_results["simple_api"] = {
+                "status": "healthy",
+                "message": "Simple API endpoints ready"
             }
             
             # Overall system health
             all_healthy = all([
                 ai_health.get("status") == "healthy",
                 ci_health.get("overall_status") == "healthy",
-                robust_creator_search_service.initialized
+                True  # Simple API is always ready
             ])
             
             return {

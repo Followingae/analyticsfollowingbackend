@@ -52,9 +52,12 @@ class EnhancedDecodoClient:
         
     async def __aenter__(self):
         """Async context manager entry"""
+        # Enhanced HTTP client with DNS resolution resilience (compatible version)
         self.session = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0),  # 30 seconds timeout for unstable instagram_graphql_profile
-            limits=httpx.Limits(max_connections=settings.MAX_CONCURRENT_REQUESTS)
+            timeout=httpx.Timeout(30.0, connect=15.0),  # Separate connect timeout for DNS
+            limits=httpx.Limits(max_connections=settings.MAX_CONCURRENT_REQUESTS),
+            # Enable HTTP/2 for better connection reuse and stability
+            http2=True
         )
         return self
     
@@ -97,12 +100,22 @@ class EnhancedDecodoClient:
                     wait_time = min(2 * (1.5 ** attempt), 15)
                     logger.warning(f"Retrying {username} in {wait_time}s (attempt {attempt + 1}/5)")
                     await asyncio.sleep(wait_time)
-            except (httpx.TimeoutException, httpx.ConnectError) as e:
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, OSError) as e:
                 last_exception = e
-                # Network issues - reset empty content counter and retry
+                # Enhanced network error handling including DNS resolution failures
+                error_msg = str(e).lower()
+                if 'getaddrinfo failed' in error_msg or 'name resolution' in error_msg:
+                    logger.warning(f"DNS resolution failed for attempt {attempt + 1}: {e}")
+                elif 'timeout' in error_msg:
+                    logger.warning(f"Connection timeout for attempt {attempt + 1}: {e}")
+                else:
+                    logger.warning(f"Network error for attempt {attempt + 1}: {e}")
+                
+                # Network issues - reset empty content counter and retry with exponential backoff
                 empty_content_count = 0
                 if attempt < 4:
-                    wait_time = min(2 * (1.5 ** attempt), 15)
+                    wait_time = min(3 * (2 ** attempt), 30)  # More aggressive backoff for network issues
+                    logger.info(f"Retrying after network error in {wait_time}s...")
                     await asyncio.sleep(wait_time)
         
         # If we get here, all retries failed
@@ -114,7 +127,7 @@ class EnhancedDecodoClient:
     @retry(
         stop=stop_after_attempt(5),  # Increased retries as Decodo tech team confirmed retrying is effective
         wait=wait_exponential(multiplier=1.5, min=2, max=15),  # More aggressive retry strategy
-        retry=retry_if_exception_type((DecodoInstabilityError, httpx.TimeoutException, httpx.ConnectError)),
+        retry=retry_if_exception_type((DecodoInstabilityError, httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, OSError)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         after=after_log(logger, logging.WARNING)
     )
@@ -202,10 +215,29 @@ class EnhancedDecodoClient:
                 logger.error(f"JSON decode error: {str(e)}")
                 raise DecodoAPIError(f"Invalid JSON response: {str(e)}")
                 
-        except httpx.TimeoutException:
-            raise DecodoInstabilityError("Request timeout")
+        except httpx.TimeoutException as e:
+            logger.warning(f"Request timeout: {str(e)}")
+            raise DecodoInstabilityError("Request timeout - will retry")
         except httpx.ConnectError as e:
-            raise DecodoInstabilityError(f"Connection error: {str(e)}")
+            error_msg = str(e).lower()
+            if 'getaddrinfo failed' in error_msg or 'name resolution' in error_msg:
+                logger.warning(f"DNS resolution failure: {str(e)}")
+                raise DecodoInstabilityError(f"DNS resolution error: {str(e)}")
+            else:
+                logger.warning(f"Connection error: {str(e)}")
+                raise DecodoInstabilityError(f"Connection error: {str(e)}")
+        except httpx.NetworkError as e:
+            logger.warning(f"Network error: {str(e)}")
+            raise DecodoInstabilityError(f"Network error: {str(e)}")
+        except OSError as e:
+            # Catch socket-level errors including getaddrinfo failures
+            error_msg = str(e).lower()
+            if 'getaddrinfo failed' in error_msg or 'name resolution' in error_msg:
+                logger.warning(f"DNS/Socket error: {str(e)}")
+                raise DecodoInstabilityError(f"DNS resolution error: {str(e)}")
+            else:
+                logger.warning(f"Socket error: {str(e)}")
+                raise DecodoInstabilityError(f"Socket error: {str(e)}")
         except httpx.RequestError as e:
             logger.error(f"HTTP request error: {str(e)}")
             raise DecodoAPIError(f"Request error: {str(e)}")
@@ -243,6 +275,7 @@ class EnhancedDecodoClient:
     
     async def get_instagram_profile_comprehensive(self, username: str) -> Dict[str, Any]:
         """Get comprehensive Instagram profile data with Decodo-recommended fallbacks"""
+        print(f"📡 DECODO API: Starting profile fetch for '{username}'")
         
         # Decodo-recommended fallback strategies (from their error message)
         fallback_configs = [
@@ -308,9 +341,12 @@ class EnhancedDecodoClient:
                 
             except Exception as e:
                 last_error = e
+                print(f"❌ DECODO API: Config #{i} failed for '{username}': {e}")
                 if i < len(fallback_configs) - 1:
+                    print(f"🔄 DECODO API: Trying fallback config #{i+1}...")
                     continue
                 else:
+                    print(f"💥 DECODO API: All configs failed for '{username}'")
                     raise last_error
         
         # If we get here, one of the configs worked
@@ -319,6 +355,8 @@ class EnhancedDecodoClient:
             raise DecodoAPIError("No content in Decodo response")
         
         logger.info(f"Successfully fetched Instagram data for {username}")
+        print(f"✅ DECODO API: Successfully fetched data for '{username}'")
+        print(f"📊 Raw data keys: {list(response_data.keys())}")
         return response_data
     
     def parse_profile_data(self, raw_data: Dict[str, Any], username: str) -> InstagramProfile:

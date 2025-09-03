@@ -1391,15 +1391,10 @@ class CreditTransaction(Base):
     billing_cycle_date = Column(Date, nullable=True, index=True)
     
     # Metadata
-    transaction_metadata = Column(JSONB, nullable=True)
-    processed_by = Column(String(50), default='system')
-    
-    # Status
-    status = Column(String(20), default='completed', nullable=False)
+    transaction_metadata = Column(JSONB, nullable=False, default='{}')
     
     # Timestamps
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    processed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     wallet = relationship("CreditWallet", back_populates="transactions")

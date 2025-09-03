@@ -207,11 +207,14 @@ class ComprehensiveDataService:
         from app.database.robust_storage import store_profile_robust
         
         logger.info(f"Starting comprehensive profile storage for {username}")
+        print(f"🗄️  DATABASE: Storing complete profile for '{username}'")
         
         try:
             # Store main profile first
+            print(f"🗄️  Calling robust_storage.store_profile_robust...")
             profile, is_new = await store_profile_robust(db, username, raw_data)
             logger.info(f"SUCCESS: Profile {username} stored successfully: {'new' if is_new else 'updated'}")
+            print(f"✅ Profile stored: ID={profile.id}, new={is_new}")
             
             # Extract user data for post processing
             user_data = self._extract_user_data_comprehensive(raw_data)
@@ -219,15 +222,21 @@ class ComprehensiveDataService:
             if user_data:
                 # Store all posts from profile
                 logger.info(f"Processing posts for profile {profile.id}")
-                await self._store_profile_posts(db, profile.id, user_data)
+                print(f"📝 DATABASE: Processing posts for profile {profile.id}")
+                posts_count = await self._store_profile_posts(db, profile.id, user_data)
+                print(f"✅ DATABASE: Stored {posts_count} posts")
                 
                 # Store related profiles
                 logger.info(f"Processing related profiles for profile {profile.id}")
-                await self._store_related_profiles(db, profile.id, user_data)
+                print(f"👥 DATABASE: Processing related profiles...")
+                related_count = await self._store_related_profiles(db, profile.id, user_data)
+                print(f"✅ DATABASE: Stored {related_count} related profiles")
                 
                 # Store profile images metadata
                 logger.info(f"Processing profile images for profile {profile.id}")
+                print(f"🖼️  DATABASE: Processing profile images metadata...")
                 await self._store_profile_images(db, profile.id, user_data)
+                print(f"✅ DATABASE: Profile images metadata processed")
                 
                 logger.info(f"SUCCESS: Complete profile data stored for {username}")
             else:
@@ -497,67 +506,92 @@ class ComprehensiveDataService:
         
         return profile_data
 
-    async def _store_profile_posts(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]):
+    async def _store_profile_posts(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]) -> int:
         """Store ALL posts from profile with comprehensive data mapping and engagement rate calculation"""
         try:
             posts_edges = user_data.get('edge_owner_to_timeline_media', {}).get('edges', [])
+            print(f"📝 DATABASE: Found {len(posts_edges)} posts to process")
+            
             if not posts_edges:
                 logger.info(f"No posts found for profile {profile_id}")
-                return
+                print(f"📝 DATABASE: No posts found for profile {profile_id}")
+                return 0
             
             # Get profile's followers count for engagement rate calculation
+            print(f"📝 DATABASE: Getting follower count for engagement rate calculation...")
             profile_result = await db.execute(
                 select(Profile.followers_count).where(Profile.id == profile_id)
             )
             followers_count = profile_result.scalar() or 0
+            print(f"📝 DATABASE: Profile has {followers_count} followers for engagement calculation")
             
             posts_created = 0
-            for post_edge in posts_edges:
+            posts_skipped = 0
+            
+            for i, post_edge in enumerate(posts_edges, 1):
                 post_node = post_edge.get('node', {})
-                if not post_node.get('shortcode'):
+                shortcode = post_node.get('shortcode')
+                
+                if not shortcode:
+                    posts_skipped += 1
                     continue
+                
+                print(f"📝 DATABASE: Processing post {i}/{len(posts_edges)} (shortcode: {shortcode})")
                 
                 # Check if post already exists
                 result = await db.execute(
                     select(Post).where(
                         and_(
                             Post.profile_id == profile_id,
-                            Post.shortcode == post_node['shortcode']
+                            Post.shortcode == shortcode
                         )
                     )
                 )
                 existing_post = result.scalar_one_or_none()
                 
-                if not existing_post:
-                    post_data = self._map_post_data_comprehensive(post_node, profile_id)
-                    
-                    # Calculate and add engagement rate
-                    post_data = EngagementRateService.enhance_post_data_with_engagement(
-                        post_data, followers_count
-                    )
-                    
-                    # Filter out any fields that don't exist in the Post model
-                    valid_post_fields = {}
-                    for key, value in post_data.items():
-                        if hasattr(Post, key):
-                            valid_post_fields[key] = value
-                        else:
-                            logger.warning(f"Skipping invalid field for Post model: {key}")
-                    
-                    post = Post(**valid_post_fields)
-                    db.add(post)
-                    posts_created += 1
+                if existing_post:
+                    print(f"📝 DATABASE: Post {shortcode} already exists, skipping")
+                    posts_skipped += 1
+                    continue
+                
+                print(f"📝 DATABASE: Creating new post {shortcode}...")
+                post_data = self._map_post_data_comprehensive(post_node, profile_id)
+                
+                # Calculate and add engagement rate
+                post_data = EngagementRateService.enhance_post_data_with_engagement(
+                    post_data, followers_count
+                )
+                
+                # Filter out any fields that don't exist in the Post model
+                valid_post_fields = {}
+                for key, value in post_data.items():
+                    if hasattr(Post, key):
+                        valid_post_fields[key] = value
+                    else:
+                        logger.warning(f"Skipping invalid field for Post model: {key}")
+                
+                post = Post(**valid_post_fields)
+                db.add(post)
+                posts_created += 1
+                print(f"📝 DATABASE: Post {shortcode} prepared for database insert")
             
+            print(f"📝 DATABASE: Committing {posts_created} new posts to database...")
             await db.commit()
             logger.info(f"Created {posts_created} new posts for profile {profile_id}")
+            print(f"✅ DATABASE: Successfully committed {posts_created} posts ({posts_skipped} skipped as duplicates)")
             
             # Update profile's overall engagement rate after adding posts
             if posts_created > 0:
+                print(f"📊 DATABASE: Updating overall engagement rate for profile...")
                 await EngagementRateService.update_profile_engagement_rate(db, str(profile_id))
                 logger.info(f"Updated overall engagement rate for profile {profile_id}")
+                print(f"✅ DATABASE: Profile engagement rate updated")
+            
+            return posts_created
             
         except Exception as e:
             logger.error(f"Error storing profile posts: {str(e)}")
+            return 0
 
     def _map_post_data_comprehensive(self, post_node: Dict[str, Any], profile_id: UUID) -> Dict[str, Any]:
         """Map ALL post datapoints from Decodo response with automatic image proxying"""
@@ -712,24 +746,36 @@ class ComprehensiveDataService:
         
         return post_data
 
-    async def _store_related_profiles(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]):
+    async def _store_related_profiles(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]) -> int:
         """Store related/suggested profiles"""
         try:
+            print(f"👥 DATABASE: Cleaning existing related profiles...")
             # Delete existing related profiles
-            await db.execute(delete(RelatedProfile).where(RelatedProfile.profile_id == profile_id))
+            delete_result = await db.execute(delete(RelatedProfile).where(RelatedProfile.profile_id == profile_id))
+            print(f"👥 DATABASE: Deleted {delete_result.rowcount or 0} existing related profiles")
             
             # Extract related profiles
             related_edges = user_data.get('edge_related_profiles', {}).get('edges', [])
+            print(f"👥 DATABASE: Found {len(related_edges)} related profiles to process")
+            
+            if not related_edges:
+                print(f"👥 DATABASE: No related profiles found")
+                return 0
             
             related_count = 0
-            for i, edge in enumerate(related_edges[:15]):  # Store up to 15 related profiles
+            for i, edge in enumerate(related_edges[:15], 1):  # Store up to 15 related profiles
                 node = edge.get('node', {})
-                if not node.get('username'):
+                username = node.get('username')
+                
+                if not username:
+                    print(f"👥 DATABASE: Skipping related profile {i} (no username)")
                     continue
+                
+                print(f"👥 DATABASE: Processing related profile {i}/{min(len(related_edges), 15)}: @{username}")
                 
                 related_data = {
                     'profile_id': profile_id,
-                    'related_username': node.get('username', ''),
+                    'related_username': username,
                     'related_full_name': node.get('full_name', ''),
                     'related_is_verified': node.get('is_verified', False),
                     'related_is_private': node.get('is_private', False),
@@ -742,12 +788,17 @@ class ComprehensiveDataService:
                 related_profile = RelatedProfile(**related_data)
                 db.add(related_profile)
                 related_count += 1
+                print(f"👥 DATABASE: Related profile @{username} prepared for insert")
             
+            print(f"👥 DATABASE: Committing {related_count} related profiles to database...")
             await db.commit()
             logger.info(f"Stored {related_count} related profiles for profile {profile_id}")
+            print(f"✅ DATABASE: Successfully committed {related_count} related profiles")
+            return related_count
             
         except Exception as e:
             logger.error(f"Error storing related profiles: {str(e)}")
+            return 0
 
     async def _store_profile_images(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]):
         """Store profile images and thumbnails separately for better organization"""
@@ -1589,10 +1640,12 @@ class ComprehensiveDataService:
     async def grant_team_profile_access(self, db: AsyncSession, team_id: UUID, user_id: UUID, username: str) -> bool:
         """Grant team access to a profile"""
         try:
+            print(f"👥 TEAM ACCESS: Starting team access grant for {username} to team {team_id}")
             from app.database.unified_models import TeamProfileAccess
             from uuid import uuid4
             
             # Find profile by username
+            print(f"👥 TEAM ACCESS: Looking up profile {username} in database...")
             result = await db.execute(
                 select(Profile).where(Profile.username == username)
             )
@@ -1600,9 +1653,13 @@ class ComprehensiveDataService:
             
             if not profile:
                 logger.warning(f"Cannot grant team access - profile {username} not found in database")
+                print(f"❌ TEAM ACCESS: Profile {username} not found in database")
                 return False
+            
+            print(f"✅ TEAM ACCESS: Profile {username} found (ID: {profile.id})")
                 
             # Map auth.users.id to public.users.id for foreign key constraint
+            print(f"👥 TEAM ACCESS: Mapping Supabase user {user_id} to public users table...")
             public_user_result = await db.execute(
                 select(User.id).where(User.supabase_user_id == str(user_id))
             )
@@ -1610,9 +1667,13 @@ class ComprehensiveDataService:
             
             if not public_user_id:
                 logger.error(f"Cannot find public.users record for auth user {user_id}")
+                print(f"❌ TEAM ACCESS: Cannot find public.users record for auth user {user_id}")
                 return False
             
+            print(f"✅ TEAM ACCESS: Mapped to public user ID: {public_user_id}")
+            
             # Check if team access already exists
+            print(f"👥 TEAM ACCESS: Checking if team access already exists...")
             existing_access = await db.execute(
                 select(TeamProfileAccess).where(
                     and_(
@@ -1625,10 +1686,12 @@ class ComprehensiveDataService:
             
             if access_record:
                 # Update access timestamp
+                print(f"👥 TEAM ACCESS: Team access already exists, updating timestamp...")
                 access_record.accessed_at = datetime.now(timezone.utc)
                 logger.info(f"Updated team access for team {team_id} to profile {username}")
             else:
                 # Create new team access
+                print(f"👥 TEAM ACCESS: Creating new team access record...")
                 new_access = TeamProfileAccess(
                     id=uuid4(),
                     team_id=team_id,
@@ -1638,12 +1701,16 @@ class ComprehensiveDataService:
                 )
                 db.add(new_access)
                 logger.info(f"Granted new team access for team {team_id} to profile {username}")
+                print(f"👥 TEAM ACCESS: New team access record created")
             
+            print(f"👥 TEAM ACCESS: Committing team access to database...")
             await db.commit()
+            print(f"✅ TEAM ACCESS: Team access granted successfully for {username}")
             return True
             
         except Exception as e:
             logger.error(f"Error granting team profile access: {e}")
+            print(f"❌ TEAM ACCESS: Error granting team access - {str(e)}")
             await db.rollback()
             return False
 

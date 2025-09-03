@@ -163,7 +163,7 @@ async def _process_cdn_image_job_async(task_self, job_id: str):
                     text(complete_job_sql),
                     {
                         'job_id': job_id,
-                        'duration': processing_result.processing_stats.get('total_time_ms', 0)
+                        'duration': (processing_result.processing_stats or {}).get('total_time_ms', 0)
                     }
                 )
                 await db_session.commit()

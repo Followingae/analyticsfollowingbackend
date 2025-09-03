@@ -22,7 +22,7 @@ from app.services.discovery_service import discovery_service
 from app.middleware.credit_gate import requires_credits
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/discovery", tags=["Discovery"])
+router = APIRouter(prefix="/discovery", tags=["Discovery"])
 
 
 # ============================================================================
@@ -67,14 +67,21 @@ async def start_discovery_search(
 
 
 @router.get("/page/{session_id}/{page_number}", response_model=DiscoverySearchResponse)
+@requires_credits(
+    action_type="discovery", 
+    return_detailed_response=True
+)
 async def get_discovery_page(
     session_id: UUID = Path(..., description="Discovery session ID"),
     page_number: int = Path(..., ge=1, description="Page number to retrieve"),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
-    Get a specific page of discovery results
-    Pages 1-3 are free, page 4+ costs 1 credit each
+    Get a specific page of discovery results - Credit-gated pagination
+    
+    Credits: 1 credit per page (50 free pages per month)
+    - Automatic free allowance handling by credit system
+    - After 50 pages per month, charged 1 credit per page
     """
     user_id = UUID(str(current_user.id))
     
