@@ -389,6 +389,95 @@ class CreditWalletService:
             logger.error(f"Error spending credits for user {user_id}: {e}")
             raise
     
+    async def spend_credits_atomic(
+        self,
+        db,  # Existing database session
+        user_id: UUID,
+        action_type: str,
+        credits_amount: int,
+        reference_id: Optional[str] = None,
+        reference_type: Optional[str] = None,
+        description: Optional[str] = None
+    ) -> Optional[CreditTransaction]:
+        """
+        ATOMIC spend credits within existing database transaction
+        
+        This method is designed for atomic operations where multiple database
+        operations must succeed or fail together. It uses an existing database
+        session instead of creating its own.
+        
+        Args:
+            db: Existing database session (AsyncSession)
+            user_id: User UUID
+            action_type: Action type that triggered spending
+            credits_amount: Credits to spend (positive number)
+            reference_id: Reference ID for tracking
+            reference_type: Type of reference
+            description: Transaction description
+            
+        Returns:
+            CreditTransaction if successful, None otherwise
+            
+        Raises:
+            Exception: If insufficient credits, locked wallet, or database error
+        """
+        if credits_amount <= 0:
+            raise Exception("Amount must be positive when spending credits")
+        
+        # Get wallet within the existing transaction
+        wallet_query = select(CreditWallet).where(CreditWallet.user_id == user_id)
+        wallet_result = await db.execute(wallet_query)
+        wallet = wallet_result.scalar_one_or_none()
+        
+        if not wallet:
+            raise Exception(f"No wallet found for user {user_id}")
+        
+        if wallet.is_locked:
+            raise Exception("Wallet is locked - cannot spend credits")
+        
+        if wallet.current_balance < credits_amount:
+            raise Exception(
+                f"Insufficient credits. Required: {credits_amount}, Available: {wallet.current_balance}"
+            )
+        
+        try:
+            # Use the database function within existing transaction
+            result = await db.execute(
+                text("""
+                    SELECT public.update_wallet_balance(
+                        :wallet_id, :amount, 'spend', 
+                        :description, :reference_id, :reference_type, :action_type
+                    )
+                """),
+                {
+                    "wallet_id": wallet.id,
+                    "amount": -credits_amount,  # Negative for spending
+                    "description": description or f"Credits spent for {action_type}",
+                    "reference_id": reference_id,
+                    "reference_type": reference_type,
+                    "action_type": action_type
+                }
+            )
+            
+            transaction_id = result.scalar()
+            
+            # Get the created transaction within same session
+            transaction_result = await db.execute(
+                select(CreditTransaction).where(CreditTransaction.id == transaction_id)
+            )
+            transaction = transaction_result.scalar_one()
+            
+            # Clear cache (will be called after transaction commits)
+            # Note: Cache clearing happens in the calling atomic method
+            
+            logger.info(f"ATOMIC: Spent {credits_amount} credits for user {user_id}, new balance: {transaction.balance_after}")
+            return transaction
+            
+        except Exception as e:
+            logger.error(f"ATOMIC: Error spending credits for user {user_id}: {e}")
+            # Don't commit or rollback - let the atomic transaction handler manage this
+            raise
+    
     # =========================================================================
     # ACTION PERMISSION CHECKING
     # =========================================================================

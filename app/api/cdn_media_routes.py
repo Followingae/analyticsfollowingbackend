@@ -138,17 +138,17 @@ async def get_profile_media_urls(
             }
         }
         
-        logger.info(f"✅ Retrieved media for profile {profile_id}: {len(response['posts'])} posts")
+        logger.info(f"✅ Retrieved media for profile {profile_uuid}: {len(response['posts'])} posts")
         return response
         
     except CDNServiceError as e:
-        logger.error(f"❌ CDN service error for profile {profile_id}: {e}")
+        logger.error(f"❌ CDN service error for profile {profile_uuid}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"CDN service error: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"❌ Unexpected error getting media for profile {profile_id}: {e}")
+        logger.error(f"❌ Unexpected error getting media for profile {profile_uuid}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve media URLs"

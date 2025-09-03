@@ -157,9 +157,50 @@ class ResilientAuthService:
             
             # Create user object for offline validation with all required fields
             from datetime import datetime, timezone
+            
+            # CRITICAL FIX: Look up actual database user ID using Supabase user ID
+            database_user_id = None
+            try:
+                from app.database.connection import async_engine
+                import asyncio
+                from sqlalchemy import text
+                
+                # Use a coroutine to get the database user ID
+                async def get_db_user_id():
+                    async with async_engine.begin() as conn:
+                        result = await conn.execute(
+                            text("SELECT id FROM users WHERE supabase_user_id = :supabase_id"),
+                            {"supabase_id": user_id}
+                        )
+                        row = result.fetchone()
+                        return str(row[0]) if row else None
+                
+                # Get or create event loop to run the async query
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # If we're in an async context, we can't use loop.run_until_complete
+                        # In this case, we'll use the Supabase ID as fallback and log a warning
+                        logger.warning(f"RESILIENT AUTH: Cannot lookup database ID in async context, using Supabase ID as fallback for {email}")
+                        database_user_id = user_id
+                    else:
+                        database_user_id = loop.run_until_complete(get_db_user_id())
+                except RuntimeError:
+                    # No event loop, create one
+                    database_user_id = asyncio.run(get_db_user_id())
+                    
+            except Exception as db_lookup_error:
+                logger.warning(f"RESILIENT AUTH: Failed to lookup database user ID for {email}: {db_lookup_error}")
+                database_user_id = user_id  # Fallback to Supabase ID
+            
+            # Use the correct database ID or fallback to Supabase ID
+            if not database_user_id:
+                logger.warning(f"RESILIENT AUTH: No database user found for Supabase ID {user_id}, using Supabase ID as fallback")
+                database_user_id = user_id
+            
             user_data = {
-                'id': user_id,
-                'supabase_user_id': user_id,  # Required field
+                'id': database_user_id,  # FIXED: Use actual database user ID
+                'supabase_user_id': user_id,  # Keep Supabase ID for reference
                 'email': email,
                 'full_name': decoded.get('user_metadata', {}).get('full_name', ''),
                 'role': 'free',  # Valid enum value for offline validation

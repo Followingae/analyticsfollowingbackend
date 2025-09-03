@@ -19,7 +19,7 @@ from app.models.discovery import (
     DiscoverySearchResponse, DiscoveryUsageStats
 )
 from app.services.discovery_service import discovery_service
-from app.middleware.credit_gate import requires_credits
+from app.middleware.atomic_credit_gate import atomic_requires_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
@@ -67,7 +67,7 @@ async def start_discovery_search(
 
 
 @router.get("/page/{session_id}/{page_number}", response_model=DiscoverySearchResponse)
-@requires_credits(
+@atomic_requires_credits(
     action_type="discovery", 
     return_detailed_response=True
 )
@@ -132,7 +132,7 @@ async def get_discovery_page(
 # ============================================================================
 
 @router.post("/unlock", response_model=ProfileUnlockApiResponse)
-@requires_credits("profile_analysis", credits_required=25, check_unlock_status=True, return_detailed_response=True)
+@atomic_requires_credits("profile_analysis", credits_required=25, check_unlock_status=True, return_detailed_response=True)
 async def unlock_profile(
     unlock_request: ProfileUnlockRequest,
     current_user: UserInDB = Depends(get_current_active_user)

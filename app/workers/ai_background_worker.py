@@ -117,15 +117,20 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
     
     async with session_factory() as db:
         try:
-            # Initialize AI service if needed
+                # Initialize AI service with ALL models for comprehensive analysis
             if not bulletproof_content_intelligence.initialized:
-                await bulletproof_content_intelligence.initialize()
+                logger.info(f"Task {task_id}: Initializing AI service with all models...")
+                init_success = await bulletproof_content_intelligence.initialize()
+                if not init_success:
+                    logger.error(f"Task {task_id}: Failed to initialize AI service")
+                    raise Exception("AI service initialization failed")
+                logger.info(f"Task {task_id}: AI service initialized successfully with all models")
             
-            # Get all posts for this profile that haven't been analyzed
+            # Get all posts for this profile that haven't been analyzed - COMPREHENSIVE PROCESSING
             posts_query = select(Post).where(
                 Post.profile_id == profile_id,
                 Post.ai_analyzed_at.is_(None)  # Only unanalyzed posts
-            ).limit(50)  # Limit batch size for memory management
+            ).limit(200)  # INCREASED: Process up to 200 posts per batch for comprehensive analysis
             
             posts_result = await db.execute(posts_query)
             posts = posts_result.scalars().all()
@@ -140,23 +145,36 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
             
             logger.info(f"Task {task_id}: Found {len(posts)} posts to analyze for {profile_username}")
             
-            # Prepare posts data for batch analysis
+            # Prepare COMPREHENSIVE posts data for advanced analysis
             posts_data = []
             for post in posts:
+                # ENHANCED: Extract more data from Decodo raw data for comprehensive analysis
+                raw_data = post.raw_data or {}
+                
                 post_data = {
                     'id': str(post.id),
                     'caption': post.caption,
                     'hashtags': post.hashtags,
                     'media_type': post.media_type,
-                    'likes': post.likes,
-                    'comments': post.comments
+                    'likes': post.likes_count,  # CRITICAL FIX: Use likes_count not likes
+                    'comments': post.comments_count,  # CRITICAL FIX: Use comments_count not comments
+                    # ENHANCED: Additional metadata for deeper AI analysis
+                    'engagement_rate': post.engagement_rate if hasattr(post, 'engagement_rate') else 0,
+                    'post_timestamp': post.taken_at_timestamp,
+                    'is_video': post.is_video,
+                    'video_duration': post.video_duration if post.is_video else 0,
+                    'accessibility_caption': raw_data.get('accessibility_caption'),
+                    'location': raw_data.get('location', {}).get('name') if raw_data.get('location') else None,
+                    'tagged_users': len(raw_data.get('edge_media_to_tagged_user', {}).get('edges', [])),
+                    'dimensions': {'width': post.width, 'height': post.height} if post.width and post.height else None,
+                    'raw_insights': raw_data  # Include full raw data for advanced analysis
                 }
                 posts_data.append(post_data)
             
-            # Run batch analysis
+            # Run COMPREHENSIVE batch analysis with all AI models
             batch_results = await bulletproof_content_intelligence.batch_analyze_posts(
                 posts_data, 
-                batch_size=10
+                batch_size=25  # INCREASED: Process 25 posts per batch for better throughput
             )
             
             # Update database with results

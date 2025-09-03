@@ -336,7 +336,7 @@ async def simple_creator_system_stats_compatibility(
 
 # 1. Creator Search with Credit Gate
 import logging
-from app.middleware.credit_gate import requires_credits
+from app.middleware.atomic_credit_gate import atomic_requires_credits
 from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient  
 from app.database.comprehensive_service import ComprehensiveDataService
 from app.core.config import settings
@@ -345,7 +345,7 @@ from app.core.config import settings
 bulletproof_logger = logging.getLogger(__name__)
 
 @app.post("/api/v1/simple/creator/search/{username}")
-@requires_credits(
+@atomic_requires_credits(
     action_type="profile_analysis", 
     check_unlock_status=True,
     unlock_key_param="username",
@@ -427,12 +427,33 @@ async def bulletproof_creator_search(
             print(f"✅ STEP 3 RESULT: Profile stored (new: {is_new})")
             print(f"📊 Profile ID: {profile.id}")
             
-            # Start AI analysis in background (non-blocking)
+            # Start REAL AI analysis in background (non-blocking)
             if is_new:
                 print(f"🔍 STEP 4: Starting background AI analysis...")
                 bulletproof_logger.info(f"BULLETPROOF: Starting background AI analysis for {username}")
-                # AI analysis would be started here but kept simple for bulletproof endpoint
-                print(f"✅ STEP 4 RESULT: AI analysis queued for background processing")
+                
+                try:
+                    # CRITICAL FIX: Use REAL AI analysis instead of fake placeholder
+                    from app.services.ai_background_task_manager import AIBackgroundTaskManager
+                    ai_task_manager = AIBackgroundTaskManager()
+                    
+                    # Schedule real AI analysis
+                    task_result = ai_task_manager.schedule_profile_analysis(
+                        profile_id=str(profile.id),
+                        profile_username=username
+                    )
+                    
+                    if task_result.get("success"):
+                        print(f"✅ STEP 4 RESULT: AI analysis queued for background processing (Task ID: {task_result.get('task_id', 'N/A')})")
+                        bulletproof_logger.info(f"BULLETPROOF: AI analysis task scheduled for {username}: {task_result.get('task_id')}")
+                    else:
+                        print(f"⚠️ STEP 4 RESULT: AI analysis scheduling failed: {task_result.get('error', 'Unknown error')}")
+                        bulletproof_logger.warning(f"BULLETPROOF: AI analysis failed to schedule for {username}: {task_result.get('error')}")
+                        
+                except Exception as ai_error:
+                    print(f"❌ STEP 4 RESULT: AI analysis error: {ai_error}")
+                    bulletproof_logger.error(f"BULLETPROOF: AI analysis error for {username}: {ai_error}")
+                    # Don't fail the entire request if AI fails
             else:
                 print(f"⏩ STEP 4: AI analysis skipped (profile not new)")
             
@@ -461,7 +482,107 @@ async def bulletproof_creator_search(
         bulletproof_logger.error(f"BULLETPROOF: Creator search failed for {username}: {e}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-# 2. Creator Profile Status Compatibility Endpoint
+# 2. Creator Profile AI Analysis Data (Step 2) Endpoint
+@app.get("/api/v1/simple/creator/{username}/ai-analysis")
+async def get_profile_ai_analysis(
+    username: str,
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """Get AI analysis data for a profile (Step 2 data)"""
+    try:
+        from sqlalchemy import select, func
+        from app.database.unified_models import Profile, Post
+        
+        bulletproof_logger.info(f"BULLETPROOF: Getting AI analysis for {username}")
+        
+        # Get profile
+        profile_query = select(Profile).where(Profile.username == username)
+        profile_result = await db.execute(profile_query)
+        profile = profile_result.scalar_one_or_none()
+        
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        
+        # Get posts with AI analysis
+        posts_query = select(Post).where(
+            Post.profile_id == profile.id,
+            Post.ai_analyzed_at.isnot(None)  # Only posts with AI data
+        ).order_by(Post.created_at.desc()).limit(50)
+        
+        posts_result = await db.execute(posts_query)
+        posts = posts_result.scalars().all()
+        
+        # Build comprehensive AI analysis response
+        posts_ai_data = []
+        for post in posts:
+            posts_ai_data.append({
+                "post_id": str(post.id),
+                "instagram_post_id": post.instagram_post_id,
+                "caption": post.caption,
+                "likes_count": post.likes_count,
+                "comments_count": post.comments_count,
+                "engagement_rate": post.engagement_rate,
+                "ai_analysis": {
+                    "content_category": post.ai_content_category,
+                    "category_confidence": post.ai_category_confidence,
+                    "sentiment": post.ai_sentiment,
+                    "sentiment_score": post.ai_sentiment_score,
+                    "sentiment_confidence": post.ai_sentiment_confidence,
+                    "language_code": post.ai_language_code,
+                    "language_confidence": post.ai_language_confidence,
+                    "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None
+                },
+                "created_at": post.created_at.isoformat() if post.created_at else None
+            })
+        
+        # Get summary statistics
+        ai_stats_query = select(
+            func.count(Post.id).label('total_posts'),
+            func.count(Post.ai_analyzed_at).label('analyzed_posts'),
+            func.avg(Post.ai_sentiment_score).label('avg_sentiment'),
+            func.count().filter(Post.ai_sentiment == 'positive').label('positive_posts'),
+            func.count().filter(Post.ai_sentiment == 'negative').label('negative_posts'),
+            func.count().filter(Post.ai_sentiment == 'neutral').label('neutral_posts')
+        ).where(Post.profile_id == profile.id)
+        
+        stats_result = await db.execute(ai_stats_query)
+        stats = stats_result.first()
+        
+        return {
+            "success": True,
+            "username": username,
+            "profile_ai_summary": {
+                "primary_content_type": profile.ai_primary_content_type,
+                "content_distribution": profile.ai_content_distribution,
+                "avg_sentiment_score": profile.ai_avg_sentiment_score,
+                "language_distribution": profile.ai_language_distribution,
+                "content_quality_score": profile.ai_content_quality_score,
+                "profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None
+            },
+            "posts_analysis": posts_ai_data,
+            "ai_statistics": {
+                "total_posts": stats.total_posts if stats else 0,
+                "analyzed_posts": stats.analyzed_posts if stats else 0,
+                "analysis_completion_rate": round((stats.analyzed_posts / stats.total_posts * 100) if stats and stats.total_posts > 0 else 0, 1),
+                "avg_sentiment_score": round(float(stats.avg_sentiment), 3) if stats and stats.avg_sentiment else None,
+                "sentiment_distribution": {
+                    "positive": stats.positive_posts if stats else 0,
+                    "negative": stats.negative_posts if stats else 0,
+                    "neutral": stats.neutral_posts if stats else 0
+                }
+            },
+            "message": "AI analysis data retrieved successfully",
+            "data_source": "database"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        bulletproof_logger.error(f"BULLETPROOF: AI analysis retrieval failed for {username}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve AI analysis: {str(e)}")
+
+# 3. Creator Profile Status Compatibility Endpoint
 @app.get("/api/v1/simple/creator/{username}/status")
 async def bulletproof_creator_status(
     username: str,

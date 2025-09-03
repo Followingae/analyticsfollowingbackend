@@ -11,6 +11,10 @@ from .unified_models import Base
 
 logger = logging.getLogger(__name__)
 
+def get_database_url() -> str:
+    """Get the database URL for external connections"""
+    return settings.DATABASE_URL
+
 async def _test_connection(engine):
     """Helper function to test database connection with resilience"""
     max_retries = 3

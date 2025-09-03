@@ -24,34 +24,28 @@ logger = logging.getLogger(__name__)
 # Initialize Celery app for CDN processing
 app = Celery(
     'cdn_processing',
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL,
-    include=['app.tasks.cdn_processing_tasks']
+    broker='redis://localhost:6379/0',  # Direct Redis URL like AI worker
+    backend='redis://localhost:6379/0'  # Direct Redis URL like AI worker
 )
 
-# Celery configuration optimized for image processing
+# Celery configuration optimized for image processing (matching working AI worker config)
 app.conf.update(
-    # Task routing
-    task_routes={
-        'app.tasks.cdn_processing_tasks.*': {'queue': 'cdn_processing'},
-    },
-    
-    # Performance settings
-    worker_concurrency=settings.INGEST_CONCURRENCY,
-    worker_max_tasks_per_child=100,
-    task_acks_late=True,
-    worker_prefetch_multiplier=2,
-    
-    # Retry settings
-    task_default_retry_delay=60,
-    task_max_retries=settings.INGEST_RETRY_LIMIT,
-    
-    # Result settings
-    result_expires=3600,  # 1 hour
+    task_serializer='json',
+    accept_content=['json'],
+    result_serializer='json',
+    timezone='UTC',
+    enable_utc=True,
     task_track_started=True,
-    
-    # Timezone
-    timezone='UTC'
+    task_time_limit=30 * 60,  # 30 minutes max per task
+    task_soft_time_limit=25 * 60,  # 25 minutes soft limit
+    worker_prefetch_multiplier=1,  # Don't prefetch too many tasks
+    task_acks_late=True,
+    worker_disable_rate_limits=False,
+    task_default_retry_delay=60,  # 1 minute retry delay
+    task_max_retries=3,
+    # Performance tuning
+    worker_concurrency=2,  # Limit concurrent tasks to prevent memory issues
+    worker_max_tasks_per_child=50  # Restart worker after 50 tasks to prevent memory leaks
 )
 
 # Global service instances (initialized in tasks)
@@ -584,6 +578,15 @@ app.conf.beat_schedule = {
         'task': 'nightly_freshness_check',
         'schedule': crontab(minute=0, hour=2),
     },
+}
+
+# Task routing configuration
+app.conf.task_routes = {
+    'process_cdn_image_job': {'queue': 'cdn_processing'},
+    'batch_enqueue_profile_assets': {'queue': 'cdn_processing'},
+    'generate_processing_stats': {'queue': 'cdn_maintenance'},
+    'cleanup_failed_jobs': {'queue': 'cdn_maintenance'},
+    'nightly_freshness_check': {'queue': 'cdn_maintenance'}
 }
 
 if __name__ == '__main__':

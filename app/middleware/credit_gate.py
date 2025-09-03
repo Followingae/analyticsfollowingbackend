@@ -70,7 +70,7 @@ def requires_credits(
             if check_unlock_status:
                 try:
                     from app.database.connection import get_session
-                    from app.database.unified_models import UnlockedProfile, Profile
+                    from app.database.unified_models import UnlockedInfluencer, Profile, User
                     from sqlalchemy import select, and_
                     
                     profile_identifier = None
@@ -87,24 +87,32 @@ def requires_credits(
                     
                     if profile_identifier:
                         async with get_session() as session:
-                            # Check if user has already unlocked this profile
-                            if lookup_type == "username":
-                                unlock_check_query = select(UnlockedProfile).join(Profile).where(
-                                    and_(
-                                        UnlockedProfile.user_id == user_id,
-                                        Profile.username == profile_identifier
+                            # CRITICAL FIX: Get the correct database user ID first
+                            user_query = select(User.id).where(User.supabase_user_id == str(user_id))
+                            user_result = await session.execute(user_query)
+                            database_user_id = user_result.scalar_one_or_none()
+                            
+                            if database_user_id:
+                                # Check if user has already unlocked this profile
+                                if lookup_type == "username":
+                                    unlock_check_query = select(UnlockedInfluencer).join(Profile).where(
+                                        and_(
+                                            UnlockedInfluencer.user_id == database_user_id,
+                                            Profile.username == profile_identifier
+                                        )
                                     )
-                                )
-                            else:  # profile_id
-                                unlock_check_query = select(UnlockedProfile).where(
-                                    and_(
-                                        UnlockedProfile.user_id == user_id,
-                                        UnlockedProfile.profile_id == profile_identifier
+                                else:  # profile_id
+                                    unlock_check_query = select(UnlockedInfluencer).where(
+                                        and_(
+                                            UnlockedInfluencer.user_id == database_user_id,
+                                            UnlockedInfluencer.profile_id == profile_identifier
+                                        )
                                     )
-                                )
                                 
-                            unlock_result = await session.execute(unlock_check_query)
-                            existing_unlock = unlock_result.scalar_one_or_none()
+                                unlock_result = await session.execute(unlock_check_query)
+                                existing_unlock = unlock_result.scalar_one_or_none()
+                            else:
+                                existing_unlock = None
                             
                             if existing_unlock:
                                 logger.info(f"Profile {profile_identifier} ({lookup_type}) already unlocked for user {user_id}, skipping credit check")
@@ -199,6 +207,20 @@ def requires_credits(
                             reference_type=reference_type,
                             description=f"Credits spent for {action_type}"
                         )
+                    
+                    # CRITICAL FIX: Create access records for profile unlock actions
+                    if action_type == "profile_analysis" and transaction and reference_id:
+                        try:
+                            await _create_profile_access_records(
+                                user_id=user_id,
+                                username=reference_id,
+                                credits_spent=permission_check.credits_required,
+                                transaction_id=transaction.id if transaction else None
+                            )
+                            logger.info(f"Created access records for user {user_id} unlocking {reference_id}")
+                        except Exception as access_error:
+                            logger.error(f"Failed to create access records for {user_id}/{reference_id}: {access_error}")
+                            # Don't fail the entire operation - user already paid
                     
                     # Track usage for analytics
                     await credit_transaction_service.track_action_usage(
@@ -320,6 +342,96 @@ class CreditGateMiddleware:
         
         response = await call_next(request)
         return response
+
+
+async def _create_profile_access_records(user_id: UUID, username: str, credits_spent: int, transaction_id: Optional[int] = None):
+    """
+    Create both unlocked_influencers and user_profile_access records
+    when a user unlocks a profile by spending credits
+    """
+    from app.database.connection import get_session
+    from app.database.unified_models import Profile, UnlockedInfluencer, UserProfileAccess
+    from sqlalchemy import select
+    from datetime import datetime, timezone, timedelta
+    
+    async with get_session() as db:
+        try:
+            # CRITICAL FIX: Handle mixed user ID requirements
+            # unlocked_influencers uses Supabase user ID (auth.users)
+            # user_profile_access uses database user ID (users table)
+            supabase_user_id = user_id
+            
+            # Get database user ID for user_profile_access table
+            from app.database.unified_models import User
+            user_query = select(User.id).where(User.supabase_user_id == str(user_id))
+            user_result = await db.execute(user_query)
+            database_user_id = user_result.scalar_one_or_none()
+            
+            if not database_user_id:
+                logger.error(f"No database user found for Supabase ID {user_id}")
+                return
+                
+            logger.info(f"Using Supabase ID {supabase_user_id} for unlocked_influencers, Database ID {database_user_id} for user_profile_access")
+            
+            # Get profile by username
+            profile_query = select(Profile).where(Profile.username == username)
+            profile_result = await db.execute(profile_query)
+            profile = profile_result.scalar_one_or_none()
+            
+            if not profile:
+                logger.error(f"Profile not found for username: {username}")
+                return
+                
+            # Check if unlocked_influencers record already exists
+            unlock_query = select(UnlockedInfluencer).where(
+                UnlockedInfluencer.user_id == supabase_user_id,
+                UnlockedInfluencer.profile_id == profile.id
+            )
+            unlock_result = await db.execute(unlock_query)
+            existing_unlock = unlock_result.scalar_one_or_none()
+            
+            current_time = datetime.now(timezone.utc)
+            
+            if not existing_unlock:
+                # Create unlocked_influencers record - FIXED: Use Supabase user ID
+                unlocked_record = UnlockedInfluencer(
+                    user_id=supabase_user_id,
+                    profile_id=profile.id,
+                    username=username,  # CRITICAL FIX: Include username field
+                    unlocked_at=current_time,
+                    credits_spent=credits_spent,
+                    transaction_id=transaction_id  # Link to credit transaction if available
+                )
+                db.add(unlocked_record)
+                logger.info(f"Created unlocked_influencers record for user {supabase_user_id}, profile {profile.id} ({username})")
+            
+            # Check if user_profile_access record exists
+            access_query = select(UserProfileAccess).where(
+                UserProfileAccess.user_id == database_user_id,
+                UserProfileAccess.profile_id == profile.id
+            )
+            access_result = await db.execute(access_query)
+            existing_access = access_result.scalar_one_or_none()
+            
+            if not existing_access:
+                # Create user_profile_access record (30 day access)
+                expires_at = current_time + timedelta(days=30)
+                access_record = UserProfileAccess(
+                    user_id=database_user_id,
+                    profile_id=profile.id,
+                    granted_at=current_time,
+                    expires_at=expires_at
+                )
+                db.add(access_record)
+                logger.info(f"Created user_profile_access record for user {database_user_id}, profile {profile.id}")
+            
+            await db.commit()
+            logger.info(f"Successfully created access records for user {database_user_id} -> profile {username}")
+            
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"Failed to create access records: {e}")
+            raise
 
 
 # Global middleware instance

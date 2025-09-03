@@ -54,20 +54,24 @@ class StartupInitializationService:
             logger.info("Phase 1: Initializing AI Manager Singleton (MANDATORY)")
             await self._initialize_ai_manager()
             
-            # PHASE 2: Content Intelligence Service (CRITICAL)
-            logger.info("Phase 2: Initializing Content Intelligence Service")
+            # PHASE 2: Infrastructure Validation (CRITICAL - CANNOT FAIL)
+            logger.info("Phase 2: Validating Critical Infrastructure (MANDATORY)")
+            await self._validate_infrastructure()
+            
+            # PHASE 3: Content Intelligence Service (CRITICAL)
+            logger.info("Phase 3: Initializing Content Intelligence Service")
             await self._initialize_content_intelligence()
             
-            # PHASE 3: Creator Search Service (CRITICAL)
-            logger.info("Phase 3: Initializing Creator Search Service")
+            # PHASE 4: Creator Search Service (CRITICAL)
+            logger.info("Phase 4: Initializing Creator Search Service")
             await self._initialize_creator_search()
             
-            # PHASE 4: Database Services (WARNING IF FAIL)
-            logger.info("Phase 4: Initializing Database Services")
+            # PHASE 5: Database Services (WARNING IF FAIL)
+            logger.info("Phase 5: Initializing Database Services")
             await self._initialize_database_services()
             
-            # PHASE 5: Network Monitoring (NON-CRITICAL)
-            logger.info("Phase 5: Starting Network Health Monitoring")
+            # PHASE 6: Network Monitoring (NON-CRITICAL)
+            logger.info("Phase 6: Starting Network Health Monitoring")
             await self._initialize_network_monitoring()
             
             # Calculate initialization time
@@ -128,6 +132,86 @@ class StartupInitializationService:
                 "status": "critical_failure",
                 "error": str(e)
             }
+    
+    async def _validate_infrastructure(self):
+        """Validate Critical Infrastructure (Celery/Redis) - MANDATORY"""
+        try:
+            logger.info("🔧 Validating Celery/Redis infrastructure...")
+            
+            # Test Redis connection
+            redis_available = await self._test_redis_connection()
+            
+            # Test Celery broker connection  
+            celery_available = await self._test_celery_broker()
+            
+            # Validate both are available
+            if not redis_available:
+                raise Exception("Redis connection failed - required for CDN processing, caching, and background tasks")
+            
+            if not celery_available:
+                raise Exception("Celery broker connection failed - required for AI analysis and CDN thumbnail processing")
+            
+            self.initialization_results["infrastructure"] = {
+                "status": "success",
+                "redis_available": redis_available,
+                "celery_available": celery_available,
+                "message": "All critical infrastructure validated"
+            }
+            
+            logger.info("✅ SUCCESS: Critical infrastructure validated (Redis + Celery)")
+            
+        except Exception as e:
+            logger.critical(f"❌ ERROR: Infrastructure validation FAILED: {e}")
+            logger.critical("🚨 CRITICAL: System cannot operate without Redis and Celery")
+            logger.critical("📋 SOLUTION: Start Redis server and ensure proper configuration")
+            self.critical_failures.append(f"Infrastructure: {str(e)}")
+            self.initialization_results["infrastructure"] = {
+                "status": "critical_failure",
+                "error": str(e),
+                "impact": "CDN processing, AI analysis, and background tasks will fail"
+            }
+    
+    async def _test_redis_connection(self) -> bool:
+        """Test Redis connection"""
+        try:
+            import redis.asyncio as redis
+            from app.core.config import settings
+            
+            # Parse Redis URL
+            redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+            
+            # Test connection with timeout
+            await asyncio.wait_for(redis_client.ping(), timeout=5.0)
+            await redis_client.close()
+            
+            logger.info("✅ Redis connection successful")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Redis connection failed: {e}")
+            return False
+    
+    async def _test_celery_broker(self) -> bool:
+        """Test Celery broker connection"""
+        try:
+            # Try to connect to Celery broker (Redis)
+            from celery import Celery
+            from app.core.config import settings
+            
+            # Create test Celery app
+            test_app = Celery('test_connection', broker=settings.REDIS_URL)
+            
+            # Test broker connection with timeout
+            inspect = test_app.control.inspect(timeout=5.0)
+            active_tasks = inspect.active()
+            
+            # If we get here, broker is available
+            logger.info("✅ Celery broker connection successful")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Celery broker connection failed: {e}")
+            return False
     
     async def _initialize_content_intelligence(self):
         """Initialize Bulletproof Content Intelligence Service - CRITICAL"""

@@ -36,8 +36,8 @@ class BulletproofContentIntelligence:
         try:
             logger.info("[INIT] Initializing Bulletproof Content Intelligence Service...")
             
-            # Initialize global AI manager first
-            await ai_manager.initialize_models(['sentiment', 'language'])
+            # Initialize global AI manager with ALL models for comprehensive analysis
+            await ai_manager.initialize_models(['sentiment', 'language', 'category'])
             
             # Initialize all components
             init_results = await asyncio.gather(
@@ -93,11 +93,15 @@ class BulletproofContentIntelligence:
         analysis_start_time = datetime.now(timezone.utc)
         
         try:
-            # Extract text content for analysis
+            # Extract COMPREHENSIVE text content for analysis
             caption_text = post_data.get('caption', '') or ''
             hashtags_list = post_data.get('hashtags', []) or []
             hashtags_text = " ".join(hashtags_list) if hashtags_list else ""
-            combined_text = f"{caption_text} {hashtags_text}".strip()
+            accessibility_caption = post_data.get('accessibility_caption', '') or ''
+            location_text = post_data.get('location', '') or ''
+            
+            # ENHANCED: Combine all textual data for comprehensive analysis
+            combined_text = f"{caption_text} {hashtags_text} {accessibility_caption} {location_text}".strip()
             
             # Basic validation
             if not combined_text and not hashtags_list:
@@ -136,20 +140,29 @@ class BulletproofContentIntelligence:
                     "category_classification": final_category
                 },
                 "ai_analyzed_at": analysis_start_time.isoformat(),
-                "ai_analysis_version": "2.0_bulletproof",
+                "ai_analysis_version": "3.0_comprehensive",
                 "analysis_metadata": {
                     "processing_time_seconds": round(processing_time, 3),
                     "text_length": len(combined_text),
                     "hashtags_count": len(hashtags_list),
                     "has_caption": bool(caption_text),
                     "has_hashtags": bool(hashtags_list),
+                    "has_accessibility_caption": bool(accessibility_caption),
+                    "has_location": bool(location_text),
                     "media_type": post_data.get('media_type'),
+                    "is_video": post_data.get('is_video', False),
+                    "video_duration": post_data.get('video_duration', 0),
+                    "engagement_rate": post_data.get('engagement_rate', 0),
+                    "tagged_users": post_data.get('tagged_users', 0),
+                    "dimensions": post_data.get('dimensions'),
                     "components_used": {
                         "sentiment": final_sentiment.get("method", "unknown"),
                         "language": final_language.get("method", "unknown"),
                         "category": final_category.get("method", "unknown")
                     },
-                    "analysis_quality": self._calculate_analysis_quality(final_sentiment, final_language, final_category)
+                    "analysis_quality": self._calculate_analysis_quality(final_sentiment, final_language, final_category),
+                    "comprehensive_analysis": True,
+                    "data_sources": ["caption", "hashtags", "accessibility", "location", "metadata"]
                 }
             }
             
@@ -320,7 +333,7 @@ class BulletproofContentIntelligence:
                     ai_language_confidence=analysis_results.get("ai_language_confidence"),
                     ai_analysis_raw=analysis_results.get("ai_analysis_raw"),
                     ai_analyzed_at=datetime.now(timezone.utc),
-                    ai_analysis_version=analysis_results.get("ai_analysis_version", "2.0_bulletproof")
+                    ai_analysis_version=analysis_results.get("ai_analysis_version", "3.0_comprehensive")
                 )
             )
             await db.commit()
@@ -344,7 +357,8 @@ class BulletproofContentIntelligence:
         failed_analyses = 0
         batch_results = []
         
-        logger.info(f"Starting batch analysis of {total_posts} posts (batch size: {batch_size})")
+        logger.info(f"Starting COMPREHENSIVE batch analysis of {total_posts} posts (batch size: {batch_size})")
+        logger.info("Using ALL AI models: sentiment, language detection, content categorization")
         
         try:
             # Process in batches to manage memory and performance

@@ -1376,12 +1376,13 @@ class CreditTransaction(Base):
     
     # Transaction details
     transaction_type = Column(String(30), nullable=False, index=True)
+    action_type = Column(String(50), nullable=True, index=True)
     amount = Column(Integer, nullable=False)
-    description = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
     
     # Reference tracking
     reference_type = Column(String(50), nullable=True, index=True)
-    reference_id = Column(UUID(as_uuid=True), nullable=True, index=True)
+    reference_id = Column(String(255), nullable=True, index=True)
     
     # Balance tracking at transaction time
     balance_before = Column(Integer, nullable=False)
@@ -1415,23 +1416,17 @@ class CreditTransaction(Base):
 
 
 class UnlockedInfluencer(Base):
-    """Track permanently unlocked influencers for each user"""
+    """Track permanently unlocked influencers for each user - MATCHES ACTUAL DATABASE SCHEMA"""
     __tablename__ = "unlocked_influencers"
     
-    # Primary identification
+    # ACTUAL DATABASE COLUMNS ONLY
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False, index=True)
     profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
-    
-    # Denormalized data for performance
-    username = Column(String(100), nullable=False)
-    full_name = Column(String(200))
-    followers_count = Column(Integer, default=0)
-    avatar_url = Column(Text)
-    credits_spent = Column(Integer, nullable=False)
-    
-    # Unlock metadata
+    username = Column(String(100), nullable=False)  # For quick lookup
     unlocked_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    credits_spent = Column(Integer, nullable=False)
+    transaction_id = Column(BigInteger)  # Link to credit transaction
     
     # Relationships
     user_wallet = relationship("CreditWallet", primaryjoin="foreign(UnlockedInfluencer.user_id) == CreditWallet.user_id", back_populates="unlocked_influencers")
