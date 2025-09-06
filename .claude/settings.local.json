@@ -33,7 +33,8 @@
       "Bash(py test_real_creator_search.py)",
       "Bash(py test_nuclear_endpoint.py)",
       "Bash(py:*)",
-      "mcp__supabase__get_project_url"
+      "mcp__supabase__get_project_url",
+      "Bash(del:*)"
     ],
     "deny": [],
     "ask": [],

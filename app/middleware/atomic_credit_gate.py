@@ -52,26 +52,58 @@ def atomic_requires_credits(
             user_id = None
             
             # Find request and user_id in the arguments
-            for arg in args:
+            logger.info(f"🔍 DEBUG: Analyzing args={len(args)} kwargs={len(kwargs)}")
+            logger.info(f"🔍 DEBUG: kwargs keys: {list(kwargs.keys())}")
+            
+            # Check args first
+            for i, arg in enumerate(args):
+                logger.info(f"🔍 DEBUG: arg[{i}] type={type(arg)} value={str(arg)[:100]}")
                 if hasattr(arg, 'method') and hasattr(arg, 'url'):  # FastAPI Request
                     request = arg
-                if isinstance(arg, str) and len(arg) == 36:  # UUID string
+                    logger.info(f"🔍 DEBUG: Found Request object in args")
+                # Check for User object with id attribute (FastAPI dependency injection)
+                if hasattr(arg, 'id') and hasattr(arg, 'email'):  # User object
+                    try:
+                        user_id = UUID(str(arg.id))
+                        logger.info(f"🔍 DEBUG: Found User object in args with id={user_id}")
+                    except Exception as e:
+                        logger.error(f"🔍 DEBUG: Failed to extract user_id from User object in args: {e}")
+                elif isinstance(arg, str) and len(arg) == 36:  # UUID string
                     try:
                         user_id = UUID(arg)
+                        logger.info(f"🔍 DEBUG: Found UUID string in args {user_id}")
                     except:
                         pass
+            
+            # Check kwargs for User object (FastAPI dependency injection)
+            for key, value in kwargs.items():
+                logger.info(f"🔍 DEBUG: kwarg[{key}] type={type(value)} value={str(value)[:100]}")
+                if hasattr(value, 'id') and hasattr(value, 'email'):  # User object
+                    try:
+                        user_id = UUID(str(value.id))
+                        logger.info(f"🔍 DEBUG: Found User object in kwargs[{key}] with id={user_id}")
+                    except Exception as e:
+                        logger.error(f"🔍 DEBUG: Failed to extract user_id from User object in kwargs: {e}")
+                elif hasattr(value, 'method') and hasattr(value, 'url'):  # FastAPI Request
+                    request = value
+                    logger.info(f"🔍 DEBUG: Found Request object in kwargs[{key}]")
             
             # Extract reference_id from URL path or kwargs
             reference_id = None
             if 'username' in kwargs:
                 reference_id = kwargs['username']
+                logger.info(f"🔍 DEBUG: Found username in kwargs: {reference_id}")
             elif request and hasattr(request, 'path_params'):
                 reference_id = request.path_params.get('username')
+                logger.info(f"🔍 DEBUG: Found username in request path_params: {reference_id}")
+            
+            logger.info(f"🔍 DEBUG: Final values - user_id={user_id}, reference_id={reference_id}")
             
             if not user_id or not reference_id:
+                logger.error(f"🔍 DEBUG: Missing required values - user_id={user_id}, reference_id={reference_id}")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Unable to extract user_id or reference_id for credit gate"
+                    detail=f"Unable to extract user_id or reference_id for credit gate. user_id={bool(user_id)}, reference_id={bool(reference_id)}"
                 )
                 
             logger.info(f"🔒 ATOMIC CREDIT GATE: {action_type} for user {user_id}, reference {reference_id}")
