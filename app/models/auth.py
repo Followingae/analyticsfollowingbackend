@@ -129,11 +129,37 @@ class UserSearchHistoryResponse(BaseModel):
     page_size: int
 
 
+class TeamInfo(BaseModel):
+    """Team information for dashboard"""
+    id: str
+    name: str
+    subscription_tier: str
+    subscription_status: str
+    monthly_limits: Dict[str, int]
+    monthly_usage: Dict[str, int]
+
+
+class SubscriptionInfo(BaseModel):
+    """Combined subscription information"""
+    tier: str  # Resolved tier (user.role or team.subscription_tier)
+    limits: Dict[str, int]
+    usage: Dict[str, int]
+    is_team_subscription: bool
+
+
 class UserDashboardStats(BaseModel):
-    """User dashboard statistics"""
+    """User dashboard statistics - DEPRECATED, use UserDashboardResponse"""
     total_searches: int
     searches_this_month: int
     favorite_profiles: List[str]
     recent_searches: List[UserSearchHistory]
     account_created: datetime
     last_active: datetime
+
+
+class UserDashboardResponse(BaseModel):
+    """Complete dashboard response with user context"""
+    user: UserResponse
+    team: Optional[TeamInfo] = None
+    subscription: SubscriptionInfo
+    stats: Dict[str, Any]  # Dashboard statistics

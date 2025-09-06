@@ -15,7 +15,8 @@ import uuid
 
 from app.models.auth import (
     UserCreate, UserResponse, LoginRequest, LoginResponse, UserInDB, 
-    UserDashboardStats, UserSearchHistoryResponse
+    UserDashboardStats, UserSearchHistoryResponse, UserDashboardResponse,
+    TeamInfo, SubscriptionInfo
 )
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
 from app.services.resilient_auth_service import resilient_auth_service
@@ -407,26 +408,145 @@ async def debug_session_info(
     }
 
 
-@router.get("/dashboard", response_model=UserDashboardStats)
+@router.get("/dashboard", response_model=UserDashboardResponse)
 async def get_user_dashboard(current_user: UserInDB = Depends(get_current_active_user)):
     """
-    Get user dashboard statistics
+    Get complete user dashboard with user context
     
     Returns comprehensive dashboard data including:
-    - Total searches performed
-    - Searches this month
-    - Recent search history (5 most recent)
-    - Account creation date and last activity
-    - Profile access statistics
+    - User profile and role information
+    - Team subscription details (if applicable)
+    - Resolved subscription tier and limits
+    - Dashboard statistics (searches, favorites, etc.)
     
-    This endpoint powers the user dashboard in the frontend.
+    This endpoint provides all data needed for the frontend dashboard
+    without requiring additional API calls.
     """
     try:
-        stats = await auth_service.get_user_dashboard_stats(current_user.id)
-        return stats
+        from app.database.connection import async_engine
+        from sqlalchemy import text
+        import json
         
+        async with async_engine.begin() as conn:
+            # Get user profile data
+            user_result = await conn.execute(text("""
+                SELECT id, email, full_name, role, status, created_at, last_login,
+                       avatar_config, "user.first_name" as first_name, "user.last_name" as last_name,
+                       company, job_title, phone_number, bio, timezone, language, updated_at
+                FROM users 
+                WHERE supabase_user_id = :user_id
+            """), {"user_id": current_user.id})
+            
+            user_row = user_result.fetchone()
+            if not user_row:
+                raise HTTPException(status_code=404, detail="User profile not found")
+            
+            # Parse avatar config
+            avatar_config = None
+            try:
+                avatar_config = json.loads(user_row.avatar_config) if user_row.avatar_config else None
+            except (json.JSONDecodeError, TypeError):
+                avatar_config = None
+            
+            # Create user response
+            user_response = UserResponse(
+                id=current_user.id,
+                email=user_row.email,
+                full_name=user_row.full_name,
+                role=user_row.role,
+                status=user_row.status,
+                created_at=user_row.created_at,
+                last_login=user_row.last_login,
+                avatar_config=avatar_config,
+                first_name=user_row.first_name,
+                last_name=user_row.last_name,
+                company=user_row.company,
+                job_title=user_row.job_title,
+                phone_number=user_row.phone_number,
+                bio=user_row.bio,
+                timezone=user_row.timezone or "UTC",
+                language=user_row.language or "en",
+                updated_at=user_row.updated_at
+            )
+            
+            # Get team data if user is part of a team
+            team_result = await conn.execute(text("""
+                SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
+                       t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
+                       t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
+                FROM teams t
+                JOIN team_members tm ON t.id = tm.team_id
+                JOIN users u ON tm.user_id = u.id
+                WHERE u.supabase_user_id = :user_id
+            """), {"user_id": current_user.id})
+            
+            team_row = team_result.fetchone()
+            team_info = None
+            
+            if team_row:
+                team_info = TeamInfo(
+                    id=str(team_row.id),
+                    name=team_row.name,
+                    subscription_tier=team_row.subscription_tier,
+                    subscription_status=team_row.subscription_status,
+                    monthly_limits={
+                        "profiles": team_row.monthly_profile_limit,
+                        "emails": team_row.monthly_email_limit,
+                        "posts": team_row.monthly_posts_limit
+                    },
+                    monthly_usage={
+                        "profiles": team_row.profiles_used_this_month,
+                        "emails": team_row.emails_used_this_month,
+                        "posts": team_row.posts_used_this_month
+                    }
+                )
+            
+            # Determine subscription info
+            resolved_tier = user_row.role  # Start with user role
+            limits = {"profiles": 5, "emails": 0, "posts": 0}  # Free tier defaults
+            usage = {"profiles": 0, "emails": 0, "posts": 0}
+            is_team_subscription = team_info is not None
+            
+            if team_info:
+                resolved_tier = team_info.subscription_tier
+                limits = team_info.monthly_limits
+                usage = team_info.monthly_usage
+            else:
+                # Individual subscription limits
+                if user_row.role == "premium":
+                    limits = {"profiles": 2000, "emails": 800, "posts": 300}
+                elif user_row.role == "standard":
+                    limits = {"profiles": 500, "emails": 250, "posts": 125}
+            
+            subscription_info = SubscriptionInfo(
+                tier=resolved_tier,
+                limits=limits,
+                usage=usage,
+                is_team_subscription=is_team_subscription
+            )
+            
+            # Get dashboard statistics
+            stats = await auth_service.get_user_dashboard_stats(current_user.id)
+            stats_dict = {
+                "total_searches": stats.total_searches,
+                "searches_this_month": stats.searches_this_month,
+                "favorite_profiles": stats.favorite_profiles,
+                "recent_searches": [search.dict() for search in stats.recent_searches],
+                "account_created": stats.account_created.isoformat(),
+                "last_active": stats.last_active.isoformat()
+            }
+            
+            return UserDashboardResponse(
+                user=user_response,
+                team=team_info,
+                subscription=subscription_info,
+                stats=stats_dict
+            )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Failed to get dashboard stats for user {current_user.id}: {e}")
+        logger.error(f"Failed to get dashboard for user {current_user.id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to load dashboard data"
