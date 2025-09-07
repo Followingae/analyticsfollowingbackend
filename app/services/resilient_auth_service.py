@@ -13,9 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.services.supabase_auth_service import supabase_auth_service
+from app.services.redis_cache_service import redis_cache
 from app.models.auth import UserInDB
 from app.database.unified_models import User
 from app.resilience.database_resilience import database_resilience
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -86,21 +88,61 @@ class ResilientAuthService:
         }
         logger.debug(f"RESILIENT AUTH: Cached token validation for user {user_dict.get('email', 'unknown')}")
     
+    async def _cache_jwt_validation_redis(self, token_hash: str, user_in_db: UserInDB) -> None:
+        """Cache JWT validation result in Redis for instant subsequent authentication"""
+        try:
+            validation_data = {
+                'user_id': user_in_db.id,
+                'email': user_in_db.email,
+                'validated_at': datetime.now(timezone.utc).isoformat(),
+                'user_data': {
+                    'id': user_in_db.id,
+                    'supabase_user_id': user_in_db.supabase_user_id,
+                    'email': user_in_db.email,
+                    'full_name': user_in_db.full_name,
+                    'role': user_in_db.role.value,
+                    'status': user_in_db.status.value,
+                    'created_at': user_in_db.created_at.isoformat() if user_in_db.created_at else None,
+                    'last_login': user_in_db.last_login.isoformat() if user_in_db.last_login else None
+                }
+            }
+            
+            await redis_cache.cache_jwt_validation(token_hash, validation_data)
+            logger.info(f"✅ RESILIENT: Cached JWT for user {user_in_db.email}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to cache JWT validation in resilient service: {e}")
+    
+    def _create_user_from_cache(self, user_data: dict) -> UserInDB:
+        """Convert cached user data back to UserInDB object"""
+        from app.models.auth import UserRole, UserStatus
+        return UserInDB(
+            id=user_data['id'],
+            supabase_user_id=user_data['supabase_user_id'],
+            email=user_data['email'],
+            full_name=user_data['full_name'],
+            role=UserRole(user_data['role']),
+            status=UserStatus(user_data['status']),
+            created_at=datetime.fromisoformat(user_data['created_at']) if user_data['created_at'] else datetime.now(),
+            updated_at=datetime.now(),
+            last_login=datetime.fromisoformat(user_data['last_login']) if user_data['last_login'] else datetime.now()
+        )
+    
     async def validate_token_resilient(self, token: str) -> Optional[UserInDB]:
         """
-        Validate token with comprehensive fallback strategies
+        Validate token with comprehensive fallback strategies using Redis caching for <100ms auth
         """
         try:
-            # Check if token recently failed
-            if self.is_token_cached_as_failed(token):
-                logger.debug("RESILIENT AUTH: Token recently failed validation, skipping")
-                return None
+            # Generate secure cache key for Redis
+            token_hash = hashlib.sha256(token.encode()).hexdigest()[:16]
             
-            # Try cached validation first
-            cached_user = self.get_cached_token(token)
-            if cached_user:
-                logger.debug("RESILIENT AUTH: Using cached token validation")
-                return UserInDB(**cached_user)
+            # Check Redis cache first for instant JWT validation
+            cached_validation = await redis_cache.get_jwt_validation(token_hash)
+            if cached_validation:
+                logger.info(f"🚀 RESILIENT CACHE HIT: Instant auth for user {cached_validation.get('user_id')}")
+                return self._create_user_from_cache(cached_validation['user_data'])
+            
+            logger.debug("RESILIENT AUTH: Cache MISS, performing full validation")
             
             # Try online validation with Supabase
             try:
@@ -108,8 +150,8 @@ class ResilientAuthService:
                 user_data = await supabase_auth_service.get_current_user(token)
                 
                 if user_data:
-                    # Success! Cache the result
-                    self.cache_token(token, user_data)
+                    # Success! Cache the result in Redis for fast subsequent auth
+                    await self._cache_jwt_validation_redis(token_hash, user_data)
                     self.network_available = True
                     return user_data
                     

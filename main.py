@@ -337,7 +337,7 @@ async def simple_creator_system_stats_compatibility(
 # 1. Creator Search with Credit Gate
 import logging
 from app.middleware.atomic_credit_gate import atomic_requires_credits
-from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient  
+from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient
 from app.database.comprehensive_service import ComprehensiveDataService
 from app.core.config import settings
 
@@ -356,10 +356,10 @@ async def bulletproof_creator_search(
     current_user=Depends(get_current_active_user),
     db=Depends(get_db)
 ):
-    """Bulletproof Creator Search - Credit-gated profile analysis"""
+    """Bulletproof Creator Search - Credit-gated profile analysis with COMPLETE data retrieval"""
     try:
         from sqlalchemy import select
-        from app.database.unified_models import Profile
+        from app.database.unified_models import Profile, Post
         
         print(f"\n🔍 ==================== CREATOR SEARCH START ====================")
         print(f"🔍 SEARCH REQUEST: Username='{username}', User='{current_user.email}'")
@@ -372,15 +372,54 @@ async def bulletproof_creator_search(
         existing_profile = profile_result.scalar_one_or_none()
         
         if existing_profile:
-            # Return existing profile data
+            # RETURN COMPLETE EXISTING PROFILE DATA (NOT JUST BASIC FIELDS)
             print(f"✅ STEP 1 RESULT: Profile '{username}' EXISTS in database")
             print(f"📊 Profile ID: {existing_profile.id}")
             print(f"📊 Followers: {existing_profile.followers_count:,}")
             print(f"📊 Posts: {existing_profile.posts_count:,}")
-            bulletproof_logger.info(f"BULLETPROOF: Profile {username} exists - returning stored data")
+            print(f"🔍 STEP 1.1: Retrieving COMPLETE stored data (posts + AI + analytics)...")
+            
+            bulletproof_logger.info(f"BULLETPROOF: Profile {username} exists - returning COMPLETE stored data")
+            
+            # Get ALL posts with AI analysis
+            posts_query = select(Post).where(
+                Post.profile_id == existing_profile.id
+            ).order_by(Post.created_at.desc()).limit(50)  # Last 50 posts
+            posts_result = await db.execute(posts_query)
+            posts = posts_result.scalars().all()
+            
+            # Build complete posts data with AI analysis
+            posts_data = []
+            for post in posts:
+                posts_data.append({
+                    "id": post.instagram_post_id,
+                    "shortcode": post.shortcode,
+                    "caption": post.caption,
+                    "likes_count": post.likes_count,
+                    "comments_count": post.comments_count,
+                    "engagement_rate": post.engagement_rate,
+                    "display_url": post.display_url,
+                    "taken_at": post.taken_at.isoformat() if post.taken_at else None,
+                    "ai_analysis": {
+                        "content_category": post.ai_content_category,
+                        "category_confidence": post.ai_category_confidence,
+                        "sentiment": post.ai_sentiment,
+                        "sentiment_score": post.ai_sentiment_score,
+                        "sentiment_confidence": post.ai_sentiment_confidence,
+                        "language_code": post.ai_language_code,
+                        "language_confidence": post.ai_language_confidence,
+                        "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None
+                    }
+                })
+            
+            print(f"✅ STEP 1.1 RESULT: Retrieved {len(posts_data)} posts with complete AI analysis")
+            
+            # Return COMPLETE profile data (everything we have stored)
             return {
                 "success": True,
                 "profile": {
+                    # Basic profile data
+                    "id": str(existing_profile.id),
                     "username": existing_profile.username,
                     "full_name": existing_profile.full_name,
                     "biography": existing_profile.biography,
@@ -388,42 +427,86 @@ async def bulletproof_creator_search(
                     "following_count": existing_profile.following_count,
                     "posts_count": existing_profile.posts_count,
                     "is_verified": existing_profile.is_verified,
+                    "is_private": existing_profile.is_private,
+                    "is_business_account": existing_profile.is_business_account,
                     "profile_pic_url": existing_profile.profile_pic_url,
+                    "profile_pic_url_hd": existing_profile.profile_pic_url_hd,
+                    "external_url": existing_profile.external_url,
+                    "business_category_name": existing_profile.business_category_name,
+                    "business_email": existing_profile.business_email,
+                    "business_phone_number": existing_profile.business_phone_number,
+                    
+                    # Analytics data
+                    "engagement_rate": existing_profile.engagement_rate,
+                    "avg_likes": existing_profile.avg_likes,
+                    "avg_comments": existing_profile.avg_comments,
+                    "influence_score": existing_profile.influence_score,
+                    "content_quality_score": existing_profile.content_quality_score,
+                    "follower_growth_rate": existing_profile.follower_growth_rate,
+                    
+                    # Complete AI analysis
                     "ai_analysis": {
                         "primary_content_type": existing_profile.ai_primary_content_type,
-                        "avg_sentiment_score": existing_profile.ai_avg_sentiment_score
-                    }
+                        "content_distribution": existing_profile.ai_content_distribution,
+                        "avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
+                        "language_distribution": existing_profile.ai_language_distribution,
+                        "content_quality_score": existing_profile.ai_content_quality_score,
+                        "top_3_categories": existing_profile.ai_top_3_categories,
+                        "top_10_categories": existing_profile.ai_top_10_categories,
+                        "profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None
+                    },
+                    
+                    # Posts with complete AI analysis
+                    "posts": posts_data,
+                    
+                    # Metadata
+                    "last_refreshed": existing_profile.last_refreshed.isoformat() if existing_profile.last_refreshed else None,
+                    "data_quality_score": existing_profile.data_quality_score,
+                    "created_at": existing_profile.created_at.isoformat() if existing_profile.created_at else None,
+                    "updated_at": existing_profile.updated_at.isoformat() if existing_profile.updated_at else None
                 },
-                "message": "Profile loaded from database",
+                "analytics_summary": {
+                    "total_posts_analyzed": len(posts_data),
+                    "posts_with_ai": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]),
+                    "ai_completion_rate": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]) / max(len(posts_data), 1) * 100,
+                    "avg_engagement_rate": existing_profile.engagement_rate,
+                    "content_categories_found": len(existing_profile.ai_top_10_categories) if existing_profile.ai_top_10_categories else 0
+                },
+                "message": "Complete profile data loaded from database",
+                "data_source": "database_complete",
                 "cached": True
             }
         else:
-            # Fetch new profile from Decodo
+            # Fetch new profile from Decodo with COMPLETE data population
             print(f"❌ STEP 1 RESULT: Profile '{username}' NOT FOUND in database")
-            print(f"🔍 STEP 2: Fetching from Decodo API...")
-            bulletproof_logger.info(f"BULLETPROOF: New profile {username} - fetching from Decodo")
+            print(f"🔍 STEP 2: Fetching COMPLETE data from Decodo API...")
+            bulletproof_logger.info(f"BULLETPROOF: New profile {username} - fetching COMPLETE data from Decodo")
             
             async with EnhancedDecodoClient(
                 settings.SMARTPROXY_USERNAME,
                 settings.SMARTPROXY_PASSWORD
             ) as decodo_client:
-                print(f"📡 Calling Decodo API for '{username}'...")
+                print(f"📡 Calling Decodo API for '{username}' with COMPREHENSIVE settings...")
+                
+                # Use the PERFECT original Decodo client
                 decodo_data = await decodo_client.get_instagram_profile_comprehensive(username)
+                
+                if not decodo_data:
+                    print(f"❌ STEP 2 RESULT: Decodo returned NO DATA for '{username}'")
+                    raise HTTPException(status_code=404, detail="Profile not found")
+                
+                print(f"✅ STEP 2 RESULT: Decodo data received for '{username}'")
+                print(f"📊 Decodo followers: {decodo_data.get('followers_count', 0):,}")
+                print(f"📊 Decodo posts: {decodo_data.get('posts_count', 0):,}")
             
-            if not decodo_data:
-                print(f"❌ STEP 2 RESULT: Decodo returned NO DATA for '{username}'")
-                raise HTTPException(status_code=404, detail="Profile not found")
-            
-            print(f"✅ STEP 2 RESULT: Decodo data received for '{username}'")
-            print(f"📊 Decodo followers: {decodo_data.get('followers_count', 0):,}")
-            print(f"📊 Decodo posts: {decodo_data.get('posts_count', 0):,}")
-            
-            # Store new profile
-            print(f"🔍 STEP 3: Storing profile in database...")
+            print(f"🔍 STEP 3: Storing COMPLETE profile data in database...")
             comprehensive_service = ComprehensiveDataService()
+            
+            # Store new profile with enhanced retry mechanisms  
             profile, is_new = await comprehensive_service.store_complete_profile(
                 db, username, decodo_data
             )
+            
             print(f"✅ STEP 3 RESULT: Profile stored (new: {is_new})")
             print(f"📊 Profile ID: {profile.id}")
             
@@ -433,11 +516,10 @@ async def bulletproof_creator_search(
                 bulletproof_logger.info(f"BULLETPROOF: Starting background AI analysis for {username}")
                 
                 try:
-                    # CRITICAL FIX: Use REAL AI analysis instead of fake placeholder
                     from app.services.ai_background_task_manager import AIBackgroundTaskManager
                     ai_task_manager = AIBackgroundTaskManager()
                     
-                    # Schedule real AI analysis
+                    # Schedule AI analysis with the existing perfect system
                     task_result = ai_task_manager.schedule_profile_analysis(
                         profile_id=str(profile.id),
                         profile_username=username
@@ -473,14 +555,14 @@ async def bulletproof_creator_search(
                 "cached": False
             }
         
-        print(f"🎉 CREATOR SEARCH SUCCESS for '{username}'")
+        print(f"🎉 COMPREHENSIVE CREATOR SEARCH SUCCESS for '{username}'")
         print(f"🔍 ==================== CREATOR SEARCH END ====================\n")
             
     except Exception as e:
-        print(f"💥 CREATOR SEARCH ERROR for '{username}': {e}")
+        print(f"💥 COMPREHENSIVE CREATOR SEARCH ERROR for '{username}': {e}")
         print(f"🔍 ==================== CREATOR SEARCH FAILED ====================\n")
-        bulletproof_logger.error(f"BULLETPROOF: Creator search failed for {username}: {e}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        bulletproof_logger.error(f"BULLETPROOF: Comprehensive creator search failed for {username}: {e}")
+        raise HTTPException(status_code=500, detail=f"Comprehensive search failed: {str(e)}")
 
 # 2. Creator Profile AI Analysis Data (Step 2) Endpoint
 @app.get("/api/v1/simple/creator/{username}/ai-analysis")

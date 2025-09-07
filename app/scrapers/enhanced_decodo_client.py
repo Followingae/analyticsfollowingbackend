@@ -256,503 +256,86 @@ class EnhancedDecodoClient:
             "country": "US"
         }
         
-        logger.info(f"[PHASE 1] Fetching basic profile data for {username}")
+        payload = {
+            "target": "instagram_graphql_profile",
+            "query": username,
+            "settings": {
+                "include_posts": True,
+                "posts_count": 12,
+                "include_related": False,
+                "timeout": 30000  # 30 seconds for basic profile
+            }
+        }
         
         try:
-            response = await self._make_request(basic_config)
+            logger.info(f"Fetching BASIC profile data for {username}")
+            response_data = await self._make_request_smart_retry(payload)
+            logger.info(f"Successfully fetched basic profile data for {username}")
+            return response_data
             
-            if not response or 'results' not in response:
-                raise DecodoAPIError(f"Invalid basic response for {username}")
-            
-            logger.info(f"[PHASE 1] Successfully retrieved basic data for {username}")
-            return response
-            
-        except DecodoAPIError:
+        except DecodoProfileNotFoundError:
+            logger.warning(f"Profile {username} not found (basic search)")
             raise
         except Exception as e:
-            logger.error(f"[PHASE 1] Basic profile fetch failed for {username}: {e}")
+            logger.error(f"Basic profile fetch failed for {username}: {str(e)}")
             raise DecodoAPIError(f"Basic profile fetch failed: {str(e)}")
     
     async def get_instagram_profile_comprehensive(self, username: str) -> Dict[str, Any]:
-        """Get comprehensive Instagram profile data with Decodo-recommended fallbacks"""
-        print(f"📡 DECODO API: Starting profile fetch for '{username}'")
+        """Get comprehensive Instagram profile data with posts and analytics"""
         
-        # Decodo-recommended fallback strategies (from their error message)
-        fallback_configs = [
-            # Default: JS rendering, default geo
-            {
-                "target": "instagram_graphql_profile",
-                "query": username,
-                "render_js": True
-            },
-            # Fallback 1: Switch to non-JS rendering
-            {
-                "target": "instagram_graphql_profile", 
-                "query": username,
-                "render_js": False
-            },
-            # Fallback 2: Different geo-location (US)
-            {
-                "target": "instagram_graphql_profile",
-                "query": username,
-                "render_js": True,
-                "geo_location": "US"
-            },
-            # Fallback 3: Non-JS + Different geo
-            {
-                "target": "instagram_graphql_profile",
-                "query": username, 
-                "render_js": False,
-                "geo_location": "US"
-            },
-            # Fallback 4: Try different target altogether
-            {
-                "target": "instagram_profile",
-                "query": username,
-                "render_js": True
-            }
-        ]
-        
-        logger.info(f"Fetching comprehensive Instagram data for: {username}")
-        
-        last_error = None
-        for i, config in enumerate(fallback_configs):
-            try:
-                if i > 0:
-                    logger.info(f"Trying fallback config #{i}")
-                
-                # Add small random delay to avoid hitting rate limits  
-                await asyncio.sleep(random.uniform(0.5, 2.0))
-                
-                response_data = await self._make_request_smart_retry(config)
-                
-                # Validate response structure
-                if not isinstance(response_data, dict) or 'results' not in response_data:
-                    raise DecodoAPIError("Invalid response structure from Decodo")
-                
-                results = response_data.get('results', [])
-                if not results:
-                    raise DecodoAPIError("No results in Decodo response")
-                
-                # If we got here, the request was successful
-                if i > 0:
-                    logger.info(f"Success using fallback config #{i}")
-                break
-                
-            except Exception as e:
-                last_error = e
-                print(f"❌ DECODO API: Config #{i} failed for '{username}': {e}")
-                if i < len(fallback_configs) - 1:
-                    print(f"🔄 DECODO API: Trying fallback config #{i+1}...")
-                    continue
-                else:
-                    print(f"💥 DECODO API: All configs failed for '{username}'")
-                    raise last_error
-        
-        # If we get here, one of the configs worked
-        content = results[0].get('content', {})
-        if not content:
-            raise DecodoAPIError("No content in Decodo response")
-        
-        logger.info(f"Successfully fetched Instagram data for {username}")
-        print(f"✅ DECODO API: Successfully fetched data for '{username}'")
-        print(f"📊 Raw data keys: {list(response_data.keys())}")
-        return response_data
-    
-    def parse_profile_data(self, raw_data: Dict[str, Any], username: str) -> InstagramProfile:
-        """Parse Decodo response into InstagramProfile model"""
-        try:
-            # Navigate to user data
-            results = raw_data.get('results', [])
-            if not results:
-                logger.error(f"No results in response for {username}")
-                raise DecodoAPIError("No results in response")
-            
-            content = results[0].get('content', {})
-            data = content.get('data', {})
-            user_data = data.get('user', {})
-            
-            if not user_data:
-                logger.error(f"No user data found in response for {username}")
-                raise DecodoAPIError("No user data found in response")
-            
-            # Extract core profile information
-            profile_username = user_data.get('username', username)
-            full_name = user_data.get('full_name', '')
-            biography = user_data.get('biography', '')
-            
-            # Follower/following counts from edge data
-            edge_followed_by = user_data.get('edge_followed_by', {})
-            edge_follow = user_data.get('edge_follow', {})
-            edge_media = user_data.get('edge_owner_to_timeline_media', {})
-            
-            followers = edge_followed_by.get('count', 0)
-            following = edge_follow.get('count', 0)
-            posts_count = edge_media.get('count', 0)
-            
-            # Profile settings
-            is_verified = user_data.get('is_verified', False)
-            is_private = user_data.get('is_private', False)
-            is_business = user_data.get('is_business_account', False)
-            
-            # URLs and media
-            profile_pic_url = user_data.get('profile_pic_url_hd', user_data.get('profile_pic_url', ''))
-            external_url = user_data.get('external_url', '')
-            
-            # Calculate basic engagement metrics
-            engagement_rate = 0.0
-            avg_likes = 0.0
-            avg_comments = 0.0
-            
-            # Get recent posts for engagement calculation
-            if edge_media and 'edges' in edge_media:
-                posts_edges = edge_media.get('edges', [])[:12]  # Last 12 posts
-                if posts_edges and followers > 0:
-                    total_likes = 0
-                    total_comments = 0
-                    post_count = 0
-                    
-                    for post_edge in posts_edges:
-                        post_node = post_edge.get('node', {})
-                        edge_liked_by = post_node.get('edge_liked_by', {})
-                        edge_media_to_comment = post_node.get('edge_media_to_comment', {})
-                        
-                        likes = edge_liked_by.get('count', 0)
-                        comments = edge_media_to_comment.get('count', 0)
-                        
-                        total_likes += likes
-                        total_comments += comments
-                        post_count += 1
-                    
-                    if post_count > 0:
-                        avg_likes = total_likes / post_count
-                        avg_comments = total_comments / post_count
-                        engagement_rate = ((avg_likes + avg_comments) / followers) * 100
-            
-            # Calculate influence score based on multiple factors
-            influence_score = self._calculate_influence_score(
-                followers, following, posts_count, is_verified, is_business, engagement_rate
-            )
-            
-            # Calculate content quality score
-            content_quality_score = self._calculate_content_quality_score(
-                posts_count, engagement_rate, is_verified, biography
-            )
-            
-            return InstagramProfile(
-                username=profile_username,
-                full_name=full_name,
-                biography=biography,
-                followers=followers,
-                following=following,
-                posts_count=posts_count,
-                is_verified=is_verified,
-                is_private=is_private,
-                profile_pic_url=profile_pic_url if profile_pic_url else None,
-                external_url=external_url if external_url else None,
-                engagement_rate=round(engagement_rate, 2),
-                avg_likes=round(avg_likes, 0),
-                avg_comments=round(avg_comments, 0),
-                avg_engagement=round(avg_likes + avg_comments, 0),
-                follower_growth_rate=None,  # Would need historical data
-                content_quality_score=round(content_quality_score, 1),
-                influence_score=round(influence_score, 1)
-            )
-            
-        except Exception as e:
-            logger.error(f"Error parsing profile data: {str(e)}")
-            raise DecodoAPIError(f"Failed to parse profile data: {str(e)}")
-    
-    def _calculate_influence_score(self, followers: int, following: int, posts: int, 
-                                 is_verified: bool, is_business: bool, engagement_rate: float) -> float:
-        """Calculate influence score (1-10) based on multiple factors"""
-        score = 0.0
-        
-        # Follower count impact (0-3 points)
-        if followers >= 10000000:  # 10M+
-            score += 3.0
-        elif followers >= 1000000:  # 1M+
-            score += 2.5
-        elif followers >= 100000:   # 100K+
-            score += 2.0
-        elif followers >= 10000:    # 10K+
-            score += 1.5
-        elif followers >= 1000:     # 1K+
-            score += 1.0
-        else:
-            score += 0.5
-        
-        # Follower-to-following ratio (0-2 points)
-        if following > 0:
-            ratio = followers / following
-            if ratio >= 100:
-                score += 2.0
-            elif ratio >= 10:
-                score += 1.5
-            elif ratio >= 5:
-                score += 1.0
-            else:
-                score += 0.5
-        
-        # Engagement rate (0-2 points)
-        if engagement_rate >= 5.0:
-            score += 2.0
-        elif engagement_rate >= 3.0:
-            score += 1.5
-        elif engagement_rate >= 1.0:
-            score += 1.0
-        else:
-            score += 0.5
-        
-        # Verification status (0-1.5 points)
-        if is_verified:
-            score += 1.5
-        
-        # Business account (0-0.5 points)
-        if is_business:
-            score += 0.5
-        
-        # Post count activity (0-1 point)
-        if posts >= 1000:
-            score += 1.0
-        elif posts >= 100:
-            score += 0.8
-        elif posts >= 50:
-            score += 0.6
-        else:
-            score += 0.3
-        
-        return min(score, 10.0)  # Cap at 10
-    
-    def _calculate_content_quality_score(self, posts: int, engagement_rate: float, 
-                                       is_verified: bool, biography: str) -> float:
-        """Calculate content quality score (1-10)"""
-        score = 0.0
-        
-        # Post consistency (0-2 points)
-        if posts >= 500:
-            score += 2.0
-        elif posts >= 100:
-            score += 1.5
-        elif posts >= 50:
-            score += 1.0
-        else:
-            score += 0.5
-        
-        # Engagement quality (0-3 points)
-        if engagement_rate >= 5.0:
-            score += 3.0
-        elif engagement_rate >= 3.0:
-            score += 2.5
-        elif engagement_rate >= 2.0:
-            score += 2.0
-        elif engagement_rate >= 1.0:
-            score += 1.5
-        else:
-            score += 1.0
-        
-        # Profile completeness (0-2 points)
-        bio_score = 0
-        if biography:
-            if len(biography) >= 100:
-                bio_score += 1.0
-            elif len(biography) >= 50:
-                bio_score += 0.7
-            else:
-                bio_score += 0.5
-        
-        if is_verified:
-            bio_score += 1.0
-        
-        score += min(bio_score, 2.0)
-        
-        # Base quality (3 points)
-        score += 3.0
-        
-        return min(score, 10.0)  # Cap at 10
-    
-    async def analyze_profile_comprehensive(self, username: str) -> ProfileAnalysisResponse:
-        """Get comprehensive profile analysis with all available data points"""
-        try:
-            # Get raw data from Decodo
-            raw_data = await self.get_instagram_profile_comprehensive(username)
-            
-            # Parse into profile model
-            profile = self.parse_profile_data(raw_data, username)
-            
-            # Generate comprehensive analysis
-            from app.models.instagram import EngagementMetrics, CompetitorAnalysis, ContentPerformance
-            
-            recommendations = self._generate_recommendations(profile, raw_data)
-            content_strategy = self._generate_content_strategy(profile, raw_data)
-            audience_insights = self._extract_audience_insights(raw_data)
-            
-            # Generate detailed engagement metrics
-            like_rate = round(profile.engagement_rate * 0.8, 2)
-            comment_rate = round(profile.engagement_rate * 0.15, 2)
-            save_rate = round(profile.engagement_rate * 0.03, 2)
-            share_rate = round(profile.engagement_rate * 0.02, 2)
-            reach_rate = min(50.0, profile.followers / 1000)
-            
-            engagement_metrics = EngagementMetrics(
-                like_rate=like_rate,
-                comment_rate=comment_rate,
-                save_rate=save_rate,
-                share_rate=share_rate,
-                reach_rate=reach_rate
-            )
-            
-            # Generate competitor analysis
-            competitive_score = round(min(10.0, profile.influence_score), 1)
-            market_position = self._get_market_position(profile)
-            growth_opportunities = self._get_growth_opportunities(profile)
-            
-            competitor_analysis = CompetitorAnalysis(
-                similar_accounts=[],  # Would need niche analysis
-                competitive_score=competitive_score,
-                market_position=market_position,
-                growth_opportunities=growth_opportunities
-            )
-            
-            # Generate content performance
-            top_content_types = ["Photos", "Carousel", "Video"] if profile.engagement_rate > 2.0 else ["Video", "Photos", "Carousel"]
-            posting_frequency = self._get_posting_frequency(profile)
-            
-            content_performance = ContentPerformance(
-                top_performing_content_types=top_content_types,
-                optimal_posting_frequency=posting_frequency,
-                content_themes=["Behind the scenes", "Educational content", "User-generated content"],
-                hashtag_effectiveness={"trending": 8.5, "niche": 7.2, "branded": 6.8}
-            )
-            
-            return ProfileAnalysisResponse(
-                profile=profile,
-                recent_posts=[],  # Could be extracted from edge_owner_to_timeline_media
-                hashtag_analysis=[],  # Could be extracted from post captions
-                engagement_metrics=engagement_metrics,
-                audience_insights=audience_insights,
-                competitor_analysis=competitor_analysis,
-                content_performance=content_performance,
-                content_strategy=content_strategy,
-                best_posting_times=self._get_optimal_posting_times(profile),
-                growth_recommendations=recommendations,
-                analysis_timestamp=datetime.now(),
-                data_quality_score=0.9,  # High quality from Decodo
-                scraping_method="decodo",
-                raw_data=raw_data  # FIXED: Include raw data to eliminate duplicate API calls
-            )
-            
-        except Exception as e:
-            logger.error(f"Comprehensive analysis failed for {username}: {str(e)}")
-            raise DecodoAPIError(f"Analysis failed: {str(e)}")
-    
-    def _generate_recommendations(self, profile: InstagramProfile, raw_data: Dict) -> list[str]:
-        """Generate growth recommendations based on profile data"""
-        recommendations = []
-        
-        # Follower-based recommendations
-        if profile.followers < 1000:
-            recommendations.append("Focus on creating consistent, high-quality content to reach your first 1K followers")
-        elif profile.followers < 10000:
-            recommendations.append("Great progress! Consider collaborating with similar accounts to accelerate growth")
-        elif profile.followers < 100000:
-            recommendations.append("Strong foundation! Focus on engagement rate and community building")
-        else:
-            recommendations.append("Excellent follower base! Consider monetization and brand partnerships")
-        
-        # Engagement recommendations
-        if profile.engagement_rate < 1.0:
-            recommendations.append("Work on increasing engagement - try polls, questions, and interactive content")
-        elif profile.engagement_rate < 3.0:
-            recommendations.append("Good engagement! Consider posting at optimal times for your audience")
-        else:
-            recommendations.append("Excellent engagement rate! Maintain this quality consistency")
-        
-        # Verification recommendations
-        if not profile.is_verified and profile.followers > 10000:
-            recommendations.append("Consider applying for account verification")
-        
-        # Bio optimization
-        if not profile.biography or len(profile.biography) < 50:
-            recommendations.append("Optimize your bio with clear description, keywords, and call-to-action")
-        
-        # Content strategy
-        if profile.posts_count < 50:
-            recommendations.append("Increase your content library - aim for at least 3 posts per week")
-        
-        return recommendations
-    
-    def _generate_content_strategy(self, profile: InstagramProfile, raw_data: Dict) -> Dict:
-        """Generate content strategy recommendations"""
-        return {
-            'best_posting_hour': 12,
-            'content_type_distribution': {
-                'photos': 40,
-                'videos': 35,
-                'carousels': 20,
-                'reels': 5
-            },
-            'recommended_content_type': 'mixed',
-            'posting_frequency_per_day': 1.5 if profile.followers > 10000 else 1.0,
-            'avg_caption_length': 150,
-            'hashtag_strategy': {
-                'trending_hashtags': 3,
-                'niche_hashtags': 15,
-                'branded_hashtags': 2,
-                'location_hashtags': 2
+        # Comprehensive configuration for complete data extraction
+        payload = {
+            "target": "instagram_graphql_profile",
+            "query": username,
+            "settings": {
+                "include_posts": True,
+                "posts_count": 50,  # More posts for comprehensive analysis
+                "include_related": True,
+                "related_count": 20,
+                "include_highlights": True,
+                "include_igtv": True,
+                "include_reels": True,
+                "timeout": 45000  # Longer timeout for comprehensive data
             }
         }
-    
-    def _extract_audience_insights(self, raw_data: Dict) -> Dict:
-        """Extract audience insights from Decodo data"""
-        return {
-            'primary_age_group': '25-34',
-            'gender_split': {'female': 52.0, 'male': 48.0},
-            'top_locations': ['United States', 'United Kingdom', 'Canada'],
-            'activity_times': ['09:00-11:00', '14:00-16:00', '19:00-21:00'],
-            'interests': ['lifestyle', 'technology', 'entertainment']
+        
+        try:
+            logger.info(f"Fetching COMPREHENSIVE profile data for {username}")
+            response_data = await self._make_request_smart_retry(payload)
+            logger.info(f"Successfully fetched comprehensive profile data for {username}")
+            return response_data
+            
+        except DecodoProfileNotFoundError:
+            logger.warning(f"Profile {username} not found (comprehensive search)")
+            raise
+        except Exception as e:
+            logger.error(f"Comprehensive profile fetch failed for {username}: {str(e)}")
+            raise DecodoAPIError(f"Comprehensive profile fetch failed: {str(e)}")
+
+    async def get_instagram_posts_only(self, username: str, count: int = 24) -> Dict[str, Any]:
+        """Get only posts data for existing profiles (faster than full profile fetch)"""
+        
+        payload = {
+            "target": "instagram_graphql_profile", 
+            "query": username,
+            "settings": {
+                "include_posts": True,
+                "posts_count": count,
+                "include_related": False,  # Skip related profiles for speed
+                "include_highlights": False,
+                "timeout": 30000
+            }
         }
-    
-    def _get_optimal_posting_times(self, profile: InstagramProfile) -> list[str]:
-        """Get optimal posting times based on profile analysis"""
-        if profile.followers > 100000:
-            return ['07:00', '12:00', '17:00', '20:00']
-        elif profile.followers > 10000:
-            return ['09:00', '15:00', '19:00']
-        else:
-            return ['12:00', '18:00']
-    
-    def _get_market_position(self, profile: InstagramProfile) -> str:
-        """Determine market position based on follower count"""
-        if profile.followers > 1000000:
-            return "Market Leader"
-        elif profile.followers > 100000:
-            return "Strong Challenger"
-        elif profile.followers > 10000:
-            return "Growing Player"
-        else:
-            return "Emerging Account"
-    
-    def _get_growth_opportunities(self, profile: InstagramProfile) -> list[str]:
-        """Generate growth opportunities based on profile metrics"""
-        opportunities = []
         
-        if profile.engagement_rate < 2.0:
-            opportunities.append("Improve content engagement")
-        if profile.posts_count < 100:
-            opportunities.append("Increase posting frequency")
-        if not profile.is_verified and profile.followers > 10000:
-            opportunities.append("Apply for verification")
-        if len(profile.biography or '') < 50:
-            opportunities.append("Optimize bio with clear value proposition")
-        
-        return opportunities
-    
-    def _get_posting_frequency(self, profile: InstagramProfile) -> str:
-        """Get recommended posting frequency based on follower count"""
-        if profile.followers < 1000:
-            return "3-5 times per week"
-        elif profile.followers < 10000:
-            return "5-7 times per week"
-        else:
-            return "1-2 times per day"
+        try:
+            logger.info(f"Fetching posts only for {username} (count: {count})")
+            response_data = await self._make_request_smart_retry(payload)
+            logger.info(f"Successfully fetched {count} posts for {username}")
+            return response_data
+            
+        except DecodoProfileNotFoundError:
+            logger.warning(f"Profile {username} not found (posts only)")
+            raise
+        except Exception as e:
+            logger.error(f"Posts fetch failed for {username}: {str(e)}")
+            raise DecodoAPIError(f"Posts fetch failed: {str(e)}")

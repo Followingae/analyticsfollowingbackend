@@ -5,6 +5,8 @@ Bulletproof, production-ready authentication using only Supabase Auth
 import asyncio
 import logging
 import uuid
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
@@ -15,17 +17,16 @@ from app.models.auth import (
     UserCreate, UserInDB, UserResponse, LoginRequest, LoginResponse,
     UserRole, UserStatus
 )
+from app.services.redis_cache_service import redis_cache
 
 logger = logging.getLogger(__name__)
 security = HTTPBearer()
 
-# Token validation cache to avoid repeated Supabase API calls
+# Legacy in-memory cache (replaced by Redis)
 _token_cache = {}
-_token_cache_ttl = timedelta(minutes=10)  # Cache tokens for 10 minutes
-
-# User sync cache to prevent excessive database syncing
+_token_cache_ttl = timedelta(minutes=10)
 _user_sync_cache = {}
-_user_sync_cache_ttl = timedelta(minutes=30)  # Cache user sync for 30 minutes
+_user_sync_cache_ttl = timedelta(minutes=30)
 
 # JWT settings for token creation
 ALGORITHM = "HS256"
@@ -44,9 +45,12 @@ class ProductionSupabaseAuthService:
         self.initialization_error = None
     
     async def initialize(self) -> bool:
-        """Initialize Supabase client with comprehensive error handling"""
+        """Initialize Supabase client with Redis caching for performance"""
         if self.initialized and self.supabase:
             return True
+        
+        # Initialize Redis cache for performance optimization
+        await redis_cache.init_redis()
             
         try:
             logger.info("Initializing Supabase Auth Service...")
@@ -195,6 +199,9 @@ class ProductionSupabaseAuthService:
             except Exception as db_error:
                 logger.warning(f"Database sync failed (non-blocking): {db_error}")
                 # Don't fail authentication if database sync fails - continue with login
+            
+            # Cache user session for instant authentication on subsequent requests
+            await self._cache_user_session_data(user.id, user_response, access_token)
             
             response = LoginResponse(
                 access_token=access_token,
@@ -595,17 +602,20 @@ class ProductionSupabaseAuthService:
             )
     
     async def get_current_user(self, token: str) -> UserInDB:
-        """Get current user from Supabase session token with enhanced validation"""
+        """Get current user from Supabase session token with Redis caching for <100ms response"""
         await self.ensure_initialized()
         
         try:
-            # Check token cache first to avoid repeated Supabase API calls
-            token_hash = str(hash(token))
-            if token_hash in _token_cache:
-                cached_user, cached_time = _token_cache[token_hash]
-                if datetime.now() - cached_time < _token_cache_ttl:
-                    # Cache hit - no logging needed for performance
-                    return cached_user
+            # Generate secure cache key for JWT validation
+            token_hash = hashlib.sha256(token.encode()).hexdigest()[:16]
+            
+            # Check Redis cache first for instant JWT validation
+            cached_validation = await redis_cache.get_jwt_validation(token_hash)
+            if cached_validation:
+                logger.info(f"🚀 JWT CACHE HIT: Instant auth for user {cached_validation.get('user_id')}")
+                return self._user_response_to_user_in_db(cached_validation['user_data'])
+            
+            logger.info(f"🔍 JWT CACHE MISS: Performing Supabase validation for token {token_hash[:8]}...")
             
             # Method 1: Try direct token validation
             try:
@@ -622,8 +632,8 @@ class ProductionSupabaseAuthService:
                     
                     user_in_db = self._create_user_in_db_from_supabase(user_response.user)
                     
-                    # Cache the successful validation
-                    _token_cache[token_hash] = (user_in_db, datetime.now())
+                    # Cache the successful JWT validation in Redis for 1 hour
+                    await self._cache_jwt_validation(token_hash, user_in_db, user_response.user)
                     
                     return user_in_db
                 else:
@@ -648,7 +658,12 @@ class ProductionSupabaseAuthService:
                         logger.warning(f"Database sync failed during session validation: {db_error}")
                         # Continue authentication even if database sync fails
                     
-                    return self._create_user_in_db_from_supabase(user_response.user)
+                    user_in_db = self._create_user_in_db_from_supabase(user_response.user)
+                    
+                    # Cache the successful JWT validation in Redis
+                    await self._cache_jwt_validation(token_hash, user_in_db, user_response.user)
+                    
+                    return user_in_db
             except Exception as session_error:
                 logger.warning(f"TOKEN: Session validation failed: {session_error}")
             
@@ -717,8 +732,93 @@ class ProductionSupabaseAuthService:
             last_login=datetime.now()
         )
         
-# Removed verbose logging for performance
         return user_in_db
+    
+    async def _cache_jwt_validation(self, token_hash: str, user_in_db: UserInDB, supabase_user) -> None:
+        """Cache JWT validation result in Redis for <100ms authentication"""
+        try:
+            validation_data = {
+                'user_id': user_in_db.id,
+                'email': user_in_db.email,
+                'validated_at': datetime.now(timezone.utc).isoformat(),
+                'user_data': {
+                    'id': user_in_db.id,
+                    'supabase_user_id': user_in_db.supabase_user_id,
+                    'email': user_in_db.email,
+                    'full_name': user_in_db.full_name,
+                    'role': user_in_db.role.value,
+                    'status': user_in_db.status.value,
+                    'created_at': user_in_db.created_at.isoformat() if user_in_db.created_at else None,
+                    'last_login': user_in_db.last_login.isoformat() if user_in_db.last_login else None
+                }
+            }
+            
+            await redis_cache.cache_jwt_validation(token_hash, validation_data)
+            logger.info(f"✅ CACHED JWT validation for user {user_in_db.email}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to cache JWT validation: {e}")
+    
+    async def _cache_user_session_data(self, user_id: str, user_response: UserResponse, access_token: str) -> None:
+        """Cache user session data for instant dashboard loading"""
+        try:
+            session_data = {
+                'user_id': user_id,
+                'email': user_response.email,
+                'full_name': user_response.full_name,
+                'role': user_response.role.value,
+                'status': user_response.status.value,
+                'access_token': access_token,
+                'cached_at': datetime.now(timezone.utc).isoformat()
+            }
+            
+            await redis_cache.cache_user_session(user_id, session_data)
+            logger.info(f"✅ CACHED session data for user {user_response.email}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to cache user session: {e}")
+    
+    def _user_response_to_user_in_db(self, user_data: Dict[str, Any]) -> UserInDB:
+        """Convert cached user data back to UserInDB object"""
+        return UserInDB(
+            id=user_data['id'],
+            supabase_user_id=user_data['supabase_user_id'],
+            email=user_data['email'],
+            full_name=user_data['full_name'],
+            role=UserRole(user_data['role']),
+            status=UserStatus(user_data['status']),
+            created_at=datetime.fromisoformat(user_data['created_at']) if user_data['created_at'] else datetime.now(),
+            updated_at=datetime.now(),
+            last_login=datetime.fromisoformat(user_data['last_login']) if user_data['last_login'] else datetime.now()
+        )
+    
+    async def _cache_dashboard_stats(self, user_id: str, dashboard_stats) -> None:
+        """Cache dashboard statistics in Redis for <500ms subsequent loads"""
+        try:
+            dashboard_data = {
+                'total_searches': dashboard_stats.total_searches,
+                'searches_this_month': dashboard_stats.searches_this_month,
+                'favorite_profiles': dashboard_stats.favorite_profiles,
+                'recent_searches': [
+                    {
+                        'id': search.id,
+                        'user_id': search.user_id,
+                        'instagram_username': search.instagram_username,
+                        'search_timestamp': search.search_timestamp.isoformat() if search.search_timestamp else None,
+                        'analysis_type': search.analysis_type,
+                        'search_metadata': search.search_metadata or {}
+                    } for search in dashboard_stats.recent_searches
+                ],
+                'account_created': dashboard_stats.account_created.isoformat() if dashboard_stats.account_created else None,
+                'last_active': dashboard_stats.last_active.isoformat() if dashboard_stats.last_active else None,
+                'cached_at': datetime.now(timezone.utc).isoformat()
+            }
+            
+            await redis_cache.cache_dashboard_data(user_id, dashboard_data)
+            logger.info(f"✅ CACHED dashboard stats for user {user_id}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to cache dashboard stats: {e}")
     
     async def logout_user(self, token: str) -> bool:
         """Logout user by invalidating Supabase session"""
@@ -732,10 +832,35 @@ class ProductionSupabaseAuthService:
             return False
     
     async def get_user_dashboard_stats(self, user_id: str):
-        """Get comprehensive dashboard statistics for user"""
+        """Get comprehensive dashboard statistics for user with Redis caching for <500ms response"""
         await self.ensure_initialized()
         
         try:
+            # Check Redis cache first for instant dashboard loading
+            cached_dashboard = await redis_cache.get_dashboard_data(user_id)
+            if cached_dashboard:
+                logger.info(f"🚀 DASHBOARD CACHE HIT: Instant load for user {user_id}")
+                from app.models.auth import UserDashboardStats, UserSearchHistory
+                return UserDashboardStats(
+                    total_searches=cached_dashboard['total_searches'],
+                    searches_this_month=cached_dashboard['searches_this_month'],
+                    favorite_profiles=cached_dashboard['favorite_profiles'],
+                    recent_searches=[
+                        UserSearchHistory(
+                            id=search['id'],
+                            user_id=search['user_id'],
+                            instagram_username=search['instagram_username'],
+                            search_timestamp=datetime.fromisoformat(search['search_timestamp']),
+                            analysis_type=search['analysis_type'],
+                            search_metadata=search['search_metadata']
+                        ) for search in cached_dashboard['recent_searches']
+                    ],
+                    account_created=datetime.fromisoformat(cached_dashboard['account_created']),
+                    last_active=datetime.fromisoformat(cached_dashboard['last_active'])
+                )
+            
+            logger.info(f"🔍 DASHBOARD CACHE MISS: Fetching fresh data for user {user_id}")
+            
             from app.models.auth import UserDashboardStats, UserSearchHistory
             from app.database.connection import async_engine
             from sqlalchemy import text
@@ -811,7 +936,7 @@ class ProductionSupabaseAuthService:
                     
                     favorite_profile_list = [row.username for row in favorite_profiles_result.fetchall()]
                     
-                    return UserDashboardStats(
+                    dashboard_stats = UserDashboardStats(
                         total_searches=total_searches,
                         searches_this_month=searches_this_month,
                         favorite_profiles=favorite_profile_list,
@@ -819,6 +944,11 @@ class ProductionSupabaseAuthService:
                         account_created=user_created,
                         last_active=datetime.now()
                     )
+                    
+                    # Cache dashboard data for 5 minutes for instant subsequent loads
+                    await self._cache_dashboard_stats(user_id, dashboard_stats)
+                    
+                    return dashboard_stats
                 
         except asyncio.TimeoutError:
             logger.warning(f"DASHBOARD: Database timeout after 15s for user {user_id}")

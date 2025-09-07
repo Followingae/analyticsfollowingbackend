@@ -28,6 +28,7 @@ from app.services.engagement_rate_service import EngagementRateService
 
 logger = logging.getLogger(__name__)
 
+
 class ComprehensiveDataService:
     """Unified service for complete Decodo data storage and retrieval"""
     

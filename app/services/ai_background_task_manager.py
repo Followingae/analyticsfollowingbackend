@@ -301,13 +301,17 @@ class AIBackgroundTaskManager:
                 status = task_info.get('status', 'UNKNOWN')
                 status_counts[status] = status_counts.get(status, 0) + 1
             
+            # Add enterprise stats to legacy format
+            enterprise_stats = self.get_enterprise_stats()
+            
             return {
                 "active_workers": len(active_workers) if active_workers else 0,
                 "active_tasks_count": len(self.active_tasks),
                 "task_status_breakdown": status_counts,
                 "celery_broker": "redis://localhost:6379/0",
                 "system_healthy": len(active_workers) > 0 if active_workers else False,
-                "last_check": datetime.now(timezone.utc).isoformat()
+                "last_check": datetime.now(timezone.utc).isoformat(),
+                "enterprise_stats": enterprise_stats
             }
             
         except Exception as e:

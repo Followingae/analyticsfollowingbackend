@@ -34,7 +34,8 @@
       "Bash(py test_nuclear_endpoint.py)",
       "Bash(py:*)",
       "mcp__supabase__get_project_url",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "mcp__supabase__list_tables"
     ],
     "deny": [],
     "ask": [],
