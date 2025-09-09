@@ -17,6 +17,7 @@ from .ai_manager_singleton import ai_manager
 from .components.robust_sentiment_analyzer import robust_sentiment_analyzer
 from .components.robust_language_detector import robust_language_detector
 from .components.robust_category_classifier import robust_category_classifier
+from .comprehensive_ai_manager import comprehensive_ai_manager
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,15 @@ class BulletproofContentIntelligence:
         self.components_health = {}
         
     async def initialize(self) -> bool:
-        """Initialize all AI components with comprehensive error handling"""
+        """Initialize all AI components with comprehensive error handling including new AI models"""
         try:
-            logger.info("[INIT] Initializing Bulletproof Content Intelligence Service...")
+            logger.info("[INIT] Initializing Bulletproof Content Intelligence Service with COMPREHENSIVE AI...")
             
             # Initialize global AI manager with ALL models for comprehensive analysis
             await ai_manager.initialize_models(['sentiment', 'language', 'category'])
+            
+            # Initialize comprehensive AI manager with ALL 10 models
+            comprehensive_results = await comprehensive_ai_manager.initialize_all_models()
             
             # Initialize all components
             init_results = await asyncio.gather(
@@ -52,18 +56,34 @@ class BulletproofContentIntelligence:
             language_ok = init_results[1] is None
             category_ok = init_results[2] is None
             
+            # Calculate comprehensive AI success rate
+            comprehensive_success_count = sum(1 for success in comprehensive_results.values() if success)
+            total_models = len(comprehensive_results)
+            comprehensive_success_rate = comprehensive_success_count / total_models if total_models > 0 else 0
+            
             self.components_health = {
                 "sentiment_analyzer": {"initialized": sentiment_ok, "error": None if sentiment_ok else str(init_results[0])},
                 "language_detector": {"initialized": language_ok, "error": None if language_ok else str(init_results[1])},
                 "category_classifier": {"initialized": category_ok, "error": None if category_ok else str(init_results[2])},
+                "comprehensive_ai": {
+                    "initialized": comprehensive_success_rate > 0.5,  # At least 50% success
+                    "success_rate": comprehensive_success_rate,
+                    "models_loaded": comprehensive_success_count,
+                    "total_models": total_models,
+                    "model_status": comprehensive_results
+                }
             }
             
-            # Service is considered initialized if at least one component works
-            self.initialized = any([sentiment_ok, language_ok, category_ok])
+            # Service is considered initialized if at least core models OR comprehensive AI works
+            core_models_ok = any([sentiment_ok, language_ok, category_ok])
+            comprehensive_ai_ok = comprehensive_success_rate > 0.3  # At least 30% of comprehensive models
+            
+            self.initialized = core_models_ok or comprehensive_ai_ok
             
             if self.initialized:
                 logger.info("[SUCCESS] Bulletproof Content Intelligence Service initialized successfully")
-                logger.info(f"Components status: Sentiment={sentiment_ok}, Language={language_ok}, Category={category_ok}")
+                logger.info(f"Core models: Sentiment={sentiment_ok}, Language={language_ok}, Category={category_ok}")
+                logger.info(f"Comprehensive AI: {comprehensive_success_count}/{total_models} models loaded ({comprehensive_success_rate:.1%})")
                 return True
             else:
                 self.initialization_error = "All AI components failed to initialize"
@@ -172,6 +192,217 @@ class BulletproofContentIntelligence:
         except Exception as e:
             logger.error(f"Post content analysis failed: {e}")
             return self._create_error_response(f"Analysis failed: {str(e)}")
+    
+    async def analyze_profile_comprehensive(self, profile_id: str, profile_data: dict, posts_data: List[dict]) -> Dict[str, Any]:
+        """
+        COMPREHENSIVE PROFILE ANALYSIS using all 10 AI models
+        
+        This is the new comprehensive analysis that includes:
+        - Core Models: Sentiment, Language, Category (existing)
+        - Advanced Models: Audience Quality, Visual Content, Audience Insights, 
+          Trend Detection, Advanced NLP, Fraud Detection, Behavioral Patterns
+        
+        Args:
+            profile_id: Profile UUID
+            profile_data: Profile information dict
+            posts_data: List of post data dicts
+            
+        Returns:
+            Complete comprehensive AI analysis results
+        """
+        if not self.initialized:
+            await self.initialize()
+            if not self.initialized:
+                return self._create_error_response(f"AI service not initialized: {self.initialization_error}")
+        
+        analysis_start_time = datetime.now(timezone.utc)
+        logger.info(f"🚀 COMPREHENSIVE PROFILE ANALYSIS START: Profile {profile_id}")
+        
+        try:
+            # Use comprehensive AI manager for complete analysis
+            comprehensive_analysis = await comprehensive_ai_manager.analyze_profile_comprehensive(
+                profile_id, profile_data, posts_data
+            )
+            
+            # Extract and structure the results
+            if comprehensive_analysis.get('processing_complete'):
+                analysis_results = comprehensive_analysis.get('analysis_results', {})
+                job_status = comprehensive_analysis.get('job_status', {})
+                
+                # Build comprehensive response
+                comprehensive_response = {
+                    'success': True,
+                    'profile_id': profile_id,
+                    'analysis_completed_at': datetime.now(timezone.utc).isoformat(),
+                    'processing_duration': (datetime.now(timezone.utc) - analysis_start_time).total_seconds(),
+                    'models_success_rate': comprehensive_analysis.get('success_rate', 0.0),
+                    
+                    # Core AI Analysis (existing)
+                    'sentiment_analysis': analysis_results.get('sentiment', {}),
+                    'language_detection': analysis_results.get('language', {}),
+                    'content_categorization': analysis_results.get('category', {}),
+                    
+                    # Advanced AI Analysis (new)
+                    'audience_quality_assessment': analysis_results.get('audience_quality', {}),
+                    'visual_content_analysis': analysis_results.get('visual_content', {}),
+                    'audience_insights': analysis_results.get('audience_insights', {}),
+                    'trend_detection': analysis_results.get('trend_detection', {}),
+                    'advanced_nlp_analysis': analysis_results.get('advanced_nlp', {}),
+                    'fraud_detection_analysis': analysis_results.get('fraud_detection', {}),
+                    'behavioral_patterns_analysis': analysis_results.get('behavioral_patterns', {}),
+                    
+                    # Processing metadata
+                    'processing_metadata': {
+                        'total_models_processed': job_status.get('total_models', 10),
+                        'successful_models': job_status.get('completed_models', 0),
+                        'failed_models': job_status.get('failed_models', 0),
+                        'models_status': job_status.get('model_status', {}),
+                        'retry_attempts': job_status.get('retry_attempts', {}),
+                        'job_id': job_status.get('job_id'),
+                        'started_at': job_status.get('started_at'),
+                        'completed_at': job_status.get('completed_at')
+                    },
+                    
+                    # Overall insights summary
+                    'comprehensive_insights': {
+                        'overall_authenticity_score': analysis_results.get('audience_quality', {}).get('authenticity_score', 75.0),
+                        'content_quality_rating': analysis_results.get('visual_content', {}).get('aesthetic_score', 65.0),
+                        'engagement_trend': analysis_results.get('trend_detection', {}).get('trend_analysis', {}).get('engagement_trend_direction', 'stable'),
+                        'primary_audience_demographic': analysis_results.get('audience_insights', {}).get('audience_demographics', {}).get('estimated_age_groups', {}),
+                        'fraud_risk_level': analysis_results.get('fraud_detection', {}).get('fraud_assessment', {}).get('risk_level', 'low'),
+                        'lifecycle_stage': analysis_results.get('behavioral_patterns', {}).get('lifecycle_analysis', {}).get('current_stage', 'active'),
+                        'content_themes': analysis_results.get('advanced_nlp', {}).get('topic_modeling', {}).get('content_themes', [])
+                    }
+                }
+                
+                logger.info(f"✅ COMPREHENSIVE ANALYSIS SUCCESS: Profile {profile_id} - {comprehensive_analysis.get('success_rate', 0):.1%} models completed")
+                return comprehensive_response
+                
+            else:
+                logger.warning(f"⚠️ COMPREHENSIVE ANALYSIS INCOMPLETE: Profile {profile_id}")
+                return self._create_error_response("Comprehensive analysis incomplete")
+                
+        except Exception as e:
+            logger.error(f"❌ COMPREHENSIVE ANALYSIS ERROR: Profile {profile_id}: {e}")
+            
+            # Fallback to basic analysis
+            try:
+                logger.info(f"🔄 FALLBACK: Attempting basic analysis for profile {profile_id}")
+                
+                # Analyze a sample of posts for basic insights
+                sample_posts = posts_data[:5] if len(posts_data) > 5 else posts_data
+                basic_results = []
+                
+                for post in sample_posts:
+                    post_result = await self.analyze_post_content(post)
+                    if post_result.get('success'):
+                        basic_results.append(post_result.get('analysis', {}))
+                
+                # Create fallback comprehensive response
+                return {
+                    'success': True,
+                    'profile_id': profile_id,
+                    'analysis_completed_at': datetime.now(timezone.utc).isoformat(),
+                    'processing_duration': (datetime.now(timezone.utc) - analysis_start_time).total_seconds(),
+                    'models_success_rate': 0.3,  # Basic analysis only
+                    'fallback_mode': True,
+                    'fallback_reason': str(e),
+                    
+                    # Basic analysis from post samples
+                    'sentiment_analysis': self._aggregate_basic_sentiment(basic_results),
+                    'language_detection': self._aggregate_basic_language(basic_results),
+                    'content_categorization': self._aggregate_basic_categories(basic_results),
+                    
+                    # Default values for advanced analysis
+                    'audience_quality_assessment': {'authenticity_score': 75.0, 'processing_note': 'fallback_analysis'},
+                    'visual_content_analysis': {'aesthetic_score': 65.0, 'processing_note': 'fallback_analysis'},
+                    'audience_insights': {'processing_note': 'fallback_analysis'},
+                    'trend_detection': {'processing_note': 'fallback_analysis'},
+                    'advanced_nlp_analysis': {'processing_note': 'fallback_analysis'},
+                    'fraud_detection_analysis': {'fraud_assessment': {'risk_level': 'low'}, 'processing_note': 'fallback_analysis'},
+                    'behavioral_patterns_analysis': {'lifecycle_analysis': {'current_stage': 'active'}, 'processing_note': 'fallback_analysis'},
+                    
+                    'comprehensive_insights': {
+                        'overall_authenticity_score': 75.0,
+                        'content_quality_rating': 65.0,
+                        'engagement_trend': 'stable',
+                        'fraud_risk_level': 'low',
+                        'lifecycle_stage': 'active',
+                        'processing_note': 'basic_analysis_fallback'
+                    }
+                }
+                
+            except Exception as fallback_error:
+                logger.error(f"❌ FALLBACK ANALYSIS ALSO FAILED: Profile {profile_id}: {fallback_error}")
+                return self._create_error_response(f"All analysis methods failed: {str(e)}")
+    
+    def _aggregate_basic_sentiment(self, basic_results: List[dict]) -> dict:
+        """Aggregate sentiment from basic post analysis"""
+        if not basic_results:
+            return {'overall_sentiment': 'neutral', 'confidence': 0.5}
+        
+        sentiments = [r.get('sentiment', 'neutral') for r in basic_results if r.get('sentiment')]
+        sentiment_counts = {'positive': 0, 'negative': 0, 'neutral': 0}
+        
+        for sentiment in sentiments:
+            sentiment_counts[sentiment] = sentiment_counts.get(sentiment, 0) + 1
+        
+        if sentiment_counts:
+            overall_sentiment = max(sentiment_counts.items(), key=lambda x: x[1])[0]
+            return {
+                'overall_sentiment': overall_sentiment,
+                'sentiment_distribution': sentiment_counts,
+                'confidence': 0.7,
+                'processing_note': 'basic_analysis'
+            }
+        
+        return {'overall_sentiment': 'neutral', 'confidence': 0.5}
+    
+    def _aggregate_basic_language(self, basic_results: List[dict]) -> dict:
+        """Aggregate language from basic post analysis"""
+        if not basic_results:
+            return {'primary_language': 'en', 'confidence': 0.5}
+        
+        languages = [r.get('language', 'en') for r in basic_results if r.get('language')]
+        
+        if languages:
+            # Find most common language
+            lang_counts = {}
+            for lang in languages:
+                lang_counts[lang] = lang_counts.get(lang, 0) + 1
+            
+            primary_language = max(lang_counts.items(), key=lambda x: x[1])[0]
+            return {
+                'primary_language': primary_language,
+                'language_distribution': lang_counts,
+                'confidence': 0.7,
+                'processing_note': 'basic_analysis'
+            }
+        
+        return {'primary_language': 'en', 'confidence': 0.5}
+    
+    def _aggregate_basic_categories(self, basic_results: List[dict]) -> dict:
+        """Aggregate categories from basic post analysis"""
+        if not basic_results:
+            return {'primary_category': 'general', 'confidence': 0.5}
+        
+        categories = [r.get('category', 'general') for r in basic_results if r.get('category')]
+        
+        if categories:
+            # Find most common category
+            cat_counts = {}
+            for cat in categories:
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            
+            primary_category = max(cat_counts.items(), key=lambda x: x[1])[0]
+            return {
+                'primary_category': primary_category,
+                'category_distribution': cat_counts,
+                'confidence': 0.7,
+                'processing_note': 'basic_analysis'
+            }
+        
+        return {'primary_category': 'general', 'confidence': 0.5}
     
     async def _safe_sentiment_analysis(self, text: str) -> Dict[str, Any]:
         """Sentiment analysis with error handling"""

@@ -444,8 +444,9 @@ async def bulletproof_creator_search(
                     "content_quality_score": existing_profile.content_quality_score,
                     "follower_growth_rate": existing_profile.follower_growth_rate,
                     
-                    # Complete AI analysis
+                    # Complete AI analysis (ALL 10 MODELS)
                     "ai_analysis": {
+                        # Core AI Analysis (existing 3 models)
                         "primary_content_type": existing_profile.ai_primary_content_type,
                         "content_distribution": existing_profile.ai_content_distribution,
                         "avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
@@ -453,7 +454,31 @@ async def bulletproof_creator_search(
                         "content_quality_score": existing_profile.ai_content_quality_score,
                         "top_3_categories": existing_profile.ai_top_3_categories,
                         "top_10_categories": existing_profile.ai_top_10_categories,
-                        "profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None
+                        "profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None,
+                        
+                        # Advanced AI Analysis (NEW 7 MODELS)
+                        "audience_quality_assessment": getattr(existing_profile, 'ai_audience_quality', None),
+                        "visual_content_analysis": getattr(existing_profile, 'ai_visual_content', None),
+                        "audience_insights": getattr(existing_profile, 'ai_audience_insights', None),
+                        "trend_detection": getattr(existing_profile, 'ai_trend_detection', None),
+                        "advanced_nlp_analysis": getattr(existing_profile, 'ai_advanced_nlp', None),
+                        "fraud_detection_analysis": getattr(existing_profile, 'ai_fraud_detection', None),
+                        "behavioral_patterns_analysis": getattr(existing_profile, 'ai_behavioral_patterns', None),
+                        
+                        # Comprehensive Analysis Metadata
+                        "comprehensive_analysis_version": getattr(existing_profile, 'ai_comprehensive_analysis_version', None),
+                        "comprehensive_analyzed_at": getattr(existing_profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(existing_profile, 'ai_comprehensive_analyzed_at', None) else None,
+                        "models_success_rate": getattr(existing_profile, 'ai_models_success_rate', 0.0),
+                        "models_status": getattr(existing_profile, 'ai_models_status', {}),
+                        
+                        # Overall AI insights summary
+                        "comprehensive_insights": {
+                            "overall_authenticity_score": getattr(existing_profile, 'ai_audience_quality', {}).get('authenticity_score') if getattr(existing_profile, 'ai_audience_quality', None) else None,
+                            "content_quality_rating": getattr(existing_profile, 'ai_visual_content', {}).get('aesthetic_score') if getattr(existing_profile, 'ai_visual_content', None) else None,
+                            "fraud_risk_level": getattr(existing_profile, 'ai_fraud_detection', {}).get('fraud_assessment', {}).get('risk_level') if getattr(existing_profile, 'ai_fraud_detection', None) else None,
+                            "engagement_trend": getattr(existing_profile, 'ai_trend_detection', {}).get('trend_analysis', {}).get('engagement_trend_direction') if getattr(existing_profile, 'ai_trend_detection', None) else None,
+                            "lifecycle_stage": getattr(existing_profile, 'ai_behavioral_patterns', {}).get('lifecycle_analysis', {}).get('current_stage') if getattr(existing_profile, 'ai_behavioral_patterns', None) else None
+                        }
                     },
                     
                     # Posts with complete AI analysis
@@ -519,10 +544,11 @@ async def bulletproof_creator_search(
                     from app.services.ai_background_task_manager import AIBackgroundTaskManager
                     ai_task_manager = AIBackgroundTaskManager()
                     
-                    # Schedule AI analysis with the existing perfect system
-                    task_result = ai_task_manager.schedule_profile_analysis(
+                    # Schedule COMPREHENSIVE AI analysis with all 10 models
+                    task_result = ai_task_manager.schedule_comprehensive_profile_analysis(
                         profile_id=str(profile.id),
-                        profile_username=username
+                        profile_username=username,
+                        comprehensive_analysis=True  # Enable all 10 AI models
                     )
                     
                     if task_result.get("success"):
@@ -565,6 +591,105 @@ async def bulletproof_creator_search(
         raise HTTPException(status_code=500, detail=f"Comprehensive search failed: {str(e)}")
 
 # 2. Creator Profile AI Analysis Data (Step 2) Endpoint
+@app.get("/api/v1/simple/creator/{username}/comprehensive-ai-analysis")
+async def get_comprehensive_ai_analysis(
+    username: str,
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """Get COMPREHENSIVE AI Analysis - All 10 AI models data for existing profile"""
+    try:
+        bulletproof_logger.info(f"COMPREHENSIVE AI: Getting complete analysis for {username}")
+        
+        # Get profile
+        from sqlalchemy import select
+        from app.database.unified_models import Profile, Post
+        
+        profile_query = select(Profile).where(Profile.username == username)
+        profile_result = await db.execute(profile_query)
+        profile = profile_result.scalar_one_or_none()
+        
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        
+        # Get posts for comprehensive analysis
+        posts_query = select(Post).where(
+            Post.profile_id == profile.id
+        ).order_by(Post.created_at.desc()).limit(50)
+        posts_result = await db.execute(posts_query)
+        posts = posts_result.scalars().all()
+        
+        # Build comprehensive AI analysis response
+        comprehensive_ai_data = {
+            "success": True,
+            "profile_id": str(profile.id),
+            "username": profile.username,
+            "analysis_timestamp": datetime.now().isoformat(),
+            
+            # Core AI Models (existing 3)
+            "core_ai_analysis": {
+                "sentiment_analysis": {
+                    "primary_content_type": profile.ai_primary_content_type,
+                    "avg_sentiment_score": profile.ai_avg_sentiment_score,
+                    "content_distribution": profile.ai_content_distribution,
+                    "analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None
+                },
+                "language_detection": {
+                    "language_distribution": profile.ai_language_distribution,
+                    "primary_language": profile.ai_language_distribution.get("primary_language") if profile.ai_language_distribution else None
+                },
+                "content_categorization": {
+                    "top_3_categories": profile.ai_top_3_categories,
+                    "top_10_categories": profile.ai_top_10_categories,
+                    "content_quality_score": profile.ai_content_quality_score
+                }
+            },
+            
+            # Advanced AI Models (NEW 7)
+            "advanced_ai_analysis": {
+                "audience_quality_assessment": getattr(profile, 'ai_audience_quality', None),
+                "visual_content_analysis": getattr(profile, 'ai_visual_content', None),
+                "audience_insights": getattr(profile, 'ai_audience_insights', None),
+                "trend_detection": getattr(profile, 'ai_trend_detection', None),
+                "advanced_nlp_analysis": getattr(profile, 'ai_advanced_nlp', None),
+                "fraud_detection_analysis": getattr(profile, 'ai_fraud_detection', None),
+                "behavioral_patterns_analysis": getattr(profile, 'ai_behavioral_patterns', None)
+            },
+            
+            # Comprehensive insights summary
+            "comprehensive_insights": {
+                "overall_authenticity_score": getattr(profile, 'ai_audience_quality', {}).get('authenticity_score') if getattr(profile, 'ai_audience_quality', None) else None,
+                "fake_follower_percentage": getattr(profile, 'ai_audience_quality', {}).get('fake_follower_percentage') if getattr(profile, 'ai_audience_quality', None) else None,
+                "content_aesthetic_score": getattr(profile, 'ai_visual_content', {}).get('aesthetic_score') if getattr(profile, 'ai_visual_content', None) else None,
+                "professional_quality_score": getattr(profile, 'ai_visual_content', {}).get('professional_quality_score') if getattr(profile, 'ai_visual_content', None) else None,
+                "fraud_risk_level": getattr(profile, 'ai_fraud_detection', {}).get('fraud_assessment', {}).get('risk_level') if getattr(profile, 'ai_fraud_detection', None) else None,
+                "bot_likelihood_percentage": getattr(profile, 'ai_fraud_detection', {}).get('fraud_assessment', {}).get('bot_likelihood_percentage') if getattr(profile, 'ai_fraud_detection', None) else None,
+                "engagement_trend_direction": getattr(profile, 'ai_trend_detection', {}).get('trend_analysis', {}).get('engagement_trend_direction') if getattr(profile, 'ai_trend_detection', None) else None,
+                "viral_potential_score": getattr(profile, 'ai_trend_detection', {}).get('viral_potential', {}).get('overall_viral_score') if getattr(profile, 'ai_trend_detection', None) else None,
+                "user_lifecycle_stage": getattr(profile, 'ai_behavioral_patterns', {}).get('lifecycle_analysis', {}).get('current_stage') if getattr(profile, 'ai_behavioral_patterns', None) else None,
+                "content_strategy_maturity": getattr(profile, 'ai_behavioral_patterns', {}).get('behavioral_insights', {}).get('content_strategy_maturity') if getattr(profile, 'ai_behavioral_patterns', None) else None
+            },
+            
+            # Analysis metadata
+            "analysis_metadata": {
+                "models_success_rate": getattr(profile, 'ai_models_success_rate', 0.0),
+                "comprehensive_analysis_version": getattr(profile, 'ai_comprehensive_analysis_version', None),
+                "comprehensive_analyzed_at": getattr(profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(profile, 'ai_comprehensive_analyzed_at', None) else None,
+                "total_posts_analyzed": len(posts),
+                "posts_with_ai_analysis": len([p for p in posts if p.ai_analyzed_at]),
+                "ai_completion_rate": len([p for p in posts if p.ai_analyzed_at]) / len(posts) * 100 if posts else 0
+            }
+        }
+        
+        bulletproof_logger.info(f"COMPREHENSIVE AI: Successfully retrieved analysis for {username}")
+        return comprehensive_ai_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        bulletproof_logger.error(f"COMPREHENSIVE AI: Error getting analysis for {username}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get comprehensive AI analysis: {str(e)}")
+
 @app.get("/api/v1/simple/creator/{username}/ai-analysis")
 async def get_profile_ai_analysis(
     username: str,
@@ -870,6 +995,13 @@ app.include_router(system_health_router)
 # Include Admin Proposals Routes - SECURITY ENABLED
 from app.api.admin_secure.proposals_routes import router as admin_proposals_router
 app.include_router(admin_proposals_router, prefix="/api")
+
+# Include Refined B2B Proposals Routes - NEW SYSTEM
+from app.api.superadmin_proposals_routes import router as superadmin_proposals_router
+from app.api.brand_proposals_routes_v2 import router as brand_proposals_v2_router
+
+app.include_router(superadmin_proposals_router, prefix="/api")
+app.include_router(brand_proposals_v2_router, prefix="/api")
 
 # Include CDN Media and Health routes
 from app.api.cdn_media_routes import router as cdn_media_router
