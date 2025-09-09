@@ -1003,6 +1003,12 @@ from app.api.brand_proposals_routes_v2 import router as brand_proposals_v2_route
 app.include_router(superadmin_proposals_router, prefix="/api")
 app.include_router(brand_proposals_v2_router, prefix="/api")
 
+# Include Super Admin Dashboard Routes - COMPREHENSIVE ADMIN ACCESS
+from app.api.admin.superadmin_dashboard_routes import router as superadmin_dashboard_router
+from app.api.admin.superadmin_comprehensive_extension import router as superadmin_extension_router
+app.include_router(superadmin_dashboard_router, prefix="/api")
+app.include_router(superadmin_extension_router, prefix="/api")
+
 # Include CDN Media and Health routes
 from app.api.cdn_media_routes import router as cdn_media_router
 from app.api.cdn_health_routes import router as cdn_health_router

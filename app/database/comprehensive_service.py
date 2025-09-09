@@ -1384,7 +1384,7 @@ class ComprehensiveDataService:
                 )
                 team_count_query = select(func.count(TeamProfileAccess.id)).where(
                     TeamProfileAccess.team_id.in_(user_team_ids)
-                ) if user_team_ids else select(func.count().select_from(TeamProfileAccess)).where(False)
+                ) if user_team_ids else select(func.count()).select_from(TeamProfileAccess).where(False)
                 
                 user_count_result = await asyncio.wait_for(db.execute(user_count_query), timeout=30.0)
                 team_count_result = await asyncio.wait_for(db.execute(team_count_query), timeout=30.0)

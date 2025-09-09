@@ -1549,7 +1549,8 @@ class AdminBrandProposal(Base):
     # Proposal details
     proposal_title = Column(String(300), nullable=False)
     proposal_description = Column(Text, nullable=False)
-    proposal_type = Column(String(50), nullable=False, default='campaign')  # campaign, collaboration, partnership
+    # Note: service_type is the actual column that exists in the database
+    service_type = Column(String(50), nullable=False, default='campaign')  # campaign, collaboration, partnership
     priority_level = Column(String(20), default='medium')  # low, medium, high, urgent
     
     # Brand and campaign information
@@ -1619,7 +1620,7 @@ class AdminBrandProposal(Base):
         Index('idx_admin_brand_proposals_admin', 'created_by_admin_id', 'status'),
         Index('idx_admin_brand_proposals_brand', 'brand_user_id', 'status'),
         Index('idx_admin_brand_proposals_status', 'status', 'created_at'),
-        Index('idx_admin_brand_proposals_type', 'proposal_type', 'priority_level'),
+        # Index('idx_admin_brand_proposals_type', 'proposal_type', 'priority_level'),  # Removed - proposal_type doesn't exist
         Index('idx_admin_brand_proposals_timeline', 'brand_review_deadline', 'status'),
         Index('idx_admin_brand_proposals_performance', 'proposal_value_usd', 'expected_roi_percentage'),
         Index('idx_admin_brand_proposals_brand_response', 'brand_response_status', 'brand_response_at'),

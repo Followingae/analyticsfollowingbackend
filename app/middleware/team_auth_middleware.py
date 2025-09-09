@@ -106,8 +106,8 @@ async def get_team_context(
     try:
         logger.info(f"Team auth check for user: {current_user.email} (role: {getattr(current_user, 'role', 'UNKNOWN')})")
         
-        # ADMIN BYPASS: Admins get unlimited access without team restrictions
-        if hasattr(current_user, 'role') and current_user.role == 'admin':
+        # ADMIN BYPASS: Super admins get unlimited access without team restrictions
+        if hasattr(current_user, 'role') and current_user.role == 'super_admin':
             logger.info(f"Admin user {current_user.email} bypassing team restrictions")
             return TeamContext(
                 team_id=UUID('00000000-0000-0000-0000-000000000000'),  # Special admin team ID

@@ -153,21 +153,25 @@ async def init_database():
         # Create SQLAlchemy engines with network resilience
         async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
         
-        # Fixed connection configuration with proper timeouts
+        # Industry-standard connection configuration with proper timeouts and resilience
         async_engine = create_async_engine(
             async_url,
             pool_pre_ping=True,          # Enable pre-ping for connection health
-            pool_recycle=1800,           # 30 minutes recycle time
-            pool_size=5,                 # Smaller pool size to avoid connection issues
-            max_overflow=3,              # Smaller overflow
-            pool_timeout=30,             # 30 second timeout for getting connections
+            pool_recycle=3600,           # 1 hour recycle time for stability
+            pool_size=8,                 # Optimal pool size for concurrent requests
+            max_overflow=12,             # Higher overflow for peak loads
+            pool_timeout=20,             # 20 second timeout for getting connections
+            pool_reset_on_return='commit', # Reset connections on return
             echo=False,
             connect_args={
-                "command_timeout": 60,   # 60 second command timeout
+                "command_timeout": 30,   # 30 second command timeout
                 "server_settings": {
-                    "application_name": "analytics_backend_fixed",
-                    "statement_timeout": "60s",  # 60 second statement timeout
-                    "connect_timeout": "30"      # 30 second connect timeout
+                    "application_name": "analytics_backend_enterprise",
+                    "statement_timeout": "30s",  # 30 second statement timeout
+                    "connect_timeout": "15",     # 15 second connect timeout
+                    "tcp_keepalives_idle": "300",     # TCP keepalive
+                    "tcp_keepalives_interval": "30",   # TCP keepalive interval
+                    "tcp_keepalives_count": "3"        # TCP keepalive count
                 }
             }
         )
@@ -323,54 +327,90 @@ async def get_db():
             detail="Database temporarily unavailable - circuit breaker active. Please try again in a few moments."
         )
     
+    session = None
     try:
-        async with get_session() as session:
-            # Test the session with a simple query to detect network issues early
-            try:
-                # Increased timeout from 5s to 15s for more resilience
-                await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=15)
-                database_resilience.record_success()
-                yield session
-            except asyncio.TimeoutError:
-                logger.warning("DATABASE: Session timeout after 15s - network issues detected")
-                database_resilience.record_failure()
-                from fastapi import HTTPException
-                raise HTTPException(
-                    status_code=503,
-                    detail="Database response timeout - please try again in a moment"
-                )
-            except Exception as session_error:
-                logger.warning(f"DATABASE: Session error: {session_error}")
-                database_resilience.record_failure()
-                
-                # Check for network-specific errors
-                error_str = str(session_error).lower()
-                if any(net_error in error_str for net_error in 
-                       ["getaddrinfo failed", "name or service not known", "network is unreachable",
-                        "connection refused", "no route to host", "timeout"]):
-                    from fastapi import HTTPException
-                    raise HTTPException(
-                        status_code=503,
-                        detail="Database connection failed due to network issues - please check connectivity"
-                    )
-                else:
-                    # Re-raise non-network errors
-                    raise session_error
-                    
-    except Exception as connection_error:
-        logger.error(f"DATABASE: Connection error in get_db: {connection_error}")
-        database_resilience.record_failure()
+        # Create async session directly from SessionLocal
+        session = SessionLocal()
         
-        # Check for network-specific errors at connection level
-        error_str = str(connection_error).lower()
-        if any(net_error in error_str for net_error in 
-               ["getaddrinfo failed", "name or service not known", "network is unreachable",
-                "connection refused", "no route to host"]):
+        # Test the session with a simple query to detect network issues early
+        try:
+            # Increased timeout from 5s to 15s for more resilience
+            await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=15)
+            database_resilience.record_success()
+            
+            # SQLAlchemy AsyncSession automatically handles transactions
+            # No need to manually begin() - it starts automatically on first query
+            
+            try:
+                yield session
+                
+                # Commit any pending transaction if it exists and is active
+                if session.in_transaction():
+                    await session.commit()
+            except Exception as yield_error:
+                # If an error occurs during the yield, rollback and re-raise
+                if session and session.in_transaction():
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass  # Ignore rollback errors
+                raise yield_error
+            
+        except asyncio.TimeoutError:
+            logger.warning("DATABASE: Session timeout after 15s - network issues detected")
+            database_resilience.record_failure()
+            if session:
+                await session.rollback()
             from fastapi import HTTPException
             raise HTTPException(
                 status_code=503,
-                detail="Database service temporarily unavailable due to network connectivity issues"
+                detail="Database response timeout - please try again in a moment"
             )
-        else:
-            # Re-raise other errors
-            raise connection_error
+        except Exception as session_error:
+            # Log detailed error information for debugging
+            error_message = str(session_error) if session_error else "Unknown error"
+            error_type = type(session_error).__name__
+            logger.error(f"DATABASE: Session error [{error_type}]: {error_message}")
+            logger.error(f"DATABASE: Session error traceback:", exc_info=True)
+            database_resilience.record_failure()
+            
+            # Always rollback on error if transaction exists
+            if session and session.in_transaction():
+                try:
+                    await session.rollback()
+                except Exception as rollback_error:
+                    logger.warning(f"DATABASE: Rollback error: {rollback_error}")
+                    pass  # Ignore rollback errors
+            
+            # Check for network-specific errors
+            error_str = str(session_error).lower()
+            if any(net_error in error_str for net_error in 
+                   ["getaddrinfo failed", "name or service not known", "network is unreachable",
+                    "connection refused", "no route to host", "timeout"]):
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=503,
+                    detail="Database connection failed due to network issues - please check connectivity"
+                )
+            else:
+                # Re-raise non-network errors
+                raise session_error
+                
+    except Exception as outer_error:
+        # Handle session creation errors
+        logger.error(f"DATABASE: Outer session error: {outer_error}", exc_info=True)
+        if session and session.in_transaction():
+            try:
+                await session.rollback()
+            except Exception as outer_rollback_error:
+                logger.warning(f"DATABASE: Outer rollback error: {outer_rollback_error}")
+                pass
+        raise outer_error
+        
+    finally:
+        # Always close the session
+        if session:
+            try:
+                await session.close()
+            except Exception as close_error:
+                logger.warning(f"DATABASE: Session close error: {close_error}")
