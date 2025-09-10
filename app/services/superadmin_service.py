@@ -283,7 +283,7 @@ class SuperAdminService:
                 
                 # Get credit information
                 wallet_result = await db.execute(
-                    select(CreditWallet.current_balance, CreditWallet.total_spent)
+                    select(CreditWallet.current_balance, CreditWallet.lifetime_spent)
                     .where(CreditWallet.user_id == str(user.id))
                 )
                 wallet = wallet_result.first()
@@ -311,7 +311,7 @@ class SuperAdminService:
                     "teams": teams,
                     "credits": {
                         "balance": wallet.current_balance if wallet else 0,
-                        "total_spent": wallet.total_spent if wallet else 0
+                        "total_spent": wallet.lifetime_spent if wallet else 0
                     },
                     "activity_30d": activity_count
                 })

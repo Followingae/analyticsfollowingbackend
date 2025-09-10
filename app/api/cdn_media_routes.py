@@ -98,17 +98,15 @@ async def get_profile_media_urls(
             "profile_id": str(profile_uuid),
             "profile_identifier": profile_identifier,
             "avatar": {
-                "256": media_response.avatar_256 or f"{cdn_base_url}/placeholders/avatar-256.webp",
-                "512": media_response.avatar_512 or f"{cdn_base_url}/placeholders/avatar-512.webp",
-                "available": bool(media_response.avatar_256),
-                "placeholder": not bool(media_response.avatar_256)
+                "url": media_response.avatar_url or f"{cdn_base_url}/placeholders/avatar-512.webp",
+                "available": bool(media_response.avatar_url),
+                "placeholder": not bool(media_response.avatar_url)
             },
             "posts": [
                 {
                     "mediaId": post['media_id'],
                     "thumb": {
-                        "256": post['cdn_url_256'] or f"{cdn_base_url}/placeholders/post-256.webp",
-                        "512": post['cdn_url_512'] or f"{cdn_base_url}/placeholders/post-512.webp"
+                        "url": post['cdn_url'] or f"{cdn_base_url}/placeholders/post-512.webp"
                     },
                     "available": post['available'],
                     "placeholder": not post['available'],

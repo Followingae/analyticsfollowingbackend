@@ -346,7 +346,7 @@ class AIManagerSingleton:
     
     async def mandatory_startup_initialization(self) -> None:
         """
-        🚨 MANDATORY: Initialize ALL AI models during system startup
+        [ALERT] MANDATORY: Initialize ALL AI models during system startup
         System WILL NOT START if this fails
         NO FALLBACKS ALLOWED
         """

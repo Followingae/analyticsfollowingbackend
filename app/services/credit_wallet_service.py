@@ -501,6 +501,30 @@ class CreditWalletService:
         """
         try:
             async with get_session() as session:
+                # ADMIN BYPASS: Check if user is admin first
+                admin_check = await session.execute(
+                    text("""
+                        SELECT raw_user_meta_data->>'role' as role 
+                        FROM auth.users 
+                        WHERE id = :user_id
+                    """),
+                    {"user_id": str(user_id)}
+                )
+                
+                user_role = admin_check.scalar()
+                
+                # Admins bypass all credit checks
+                if user_role in ['admin', 'super_admin']:
+                    logger.info(f"Admin user {user_id} bypassing credit check for {action_type}")
+                    return CanPerformActionResponse(
+                        can_perform=True,
+                        reason="admin_bypass",
+                        credits_required=0,
+                        wallet_balance=999999,
+                        free_remaining=999999,
+                        credits_needed=0,
+                        message=f"Admin access granted for {action_type}"
+                    )
                 result = await session.execute(
                     text("""
                         SELECT public.can_perform_credit_action(:user_id, :action_type, :required_credits)

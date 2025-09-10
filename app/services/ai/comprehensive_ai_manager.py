@@ -118,7 +118,7 @@ class ComprehensiveAIManager:
         Initialize all 10 AI models with comprehensive error handling
         Returns status for each model
         """
-        logger.info("🚀 COMPREHENSIVE AI: Initializing ALL 10 models for complete analysis")
+        logger.info("[TRIGGER] COMPREHENSIVE AI: Initializing ALL 10 models for complete analysis")
         
         initialization_results = {}
         
@@ -129,11 +129,11 @@ class ComprehensiveAIManager:
                 # These are already loaded by ai_manager_singleton
                 self.model_loading_status[model_type] = True
                 initialization_results[model_type.value] = True
-                logger.info(f"✅ Core model {model_type.value} already loaded")
+                logger.info(f"[SUCCESS] Core model {model_type.value} already loaded")
             except Exception as e:
                 self.initialization_errors[model_type] = str(e)
                 initialization_results[model_type.value] = False
-                logger.error(f"❌ Core model {model_type.value} failed: {e}")
+                logger.error(f"[ERROR] Core model {model_type.value} failed: {e}")
         
         # Initialize new advanced models
         advanced_models = [
@@ -158,22 +158,22 @@ class ComprehensiveAIManager:
                 success = await task
                 initialization_results[model_type.value] = success
                 if success:
-                    logger.info(f"✅ Advanced model {model_type.value} loaded successfully")
+                    logger.info(f"[SUCCESS] Advanced model {model_type.value} loaded successfully")
                 else:
-                    logger.error(f"❌ Advanced model {model_type.value} failed to load")
+                    logger.error(f"[ERROR] Advanced model {model_type.value} failed to load")
             except Exception as e:
                 initialization_results[model_type.value] = False
                 self.initialization_errors[model_type] = str(e)
-                logger.error(f"❌ Advanced model {model_type.value} error: {e}")
+                logger.error(f"[ERROR] Advanced model {model_type.value} error: {e}")
         
         # Summary
         successful_models = sum(1 for success in initialization_results.values() if success)
         total_models = len(initialization_results)
         
-        logger.info(f"🎯 AI INITIALIZATION COMPLETE: {successful_models}/{total_models} models loaded")
+        logger.info(f"[TARGET] AI INITIALIZATION COMPLETE: {successful_models}/{total_models} models loaded")
         
         if successful_models < total_models:
-            logger.warning(f"⚠️ {total_models - successful_models} models failed - will use fallback strategies")
+            logger.warning(f"[WARNING] {total_models - successful_models} models failed - will use fallback strategies")
         
         return initialization_results
     
@@ -277,7 +277,7 @@ class ComprehensiveAIManager:
         Uses industry-standard retry mechanisms to ensure COMPLETE data population
         """
         job_id = str(uuid.uuid4())
-        logger.info(f"🎯 COMPREHENSIVE ANALYSIS START: Profile {profile_id} (Job: {job_id})")
+        logger.info(f"[TARGET] COMPREHENSIVE ANALYSIS START: Profile {profile_id} (Job: {job_id})")
         
         # Initialize job tracking
         job_status = {
@@ -296,7 +296,7 @@ class ComprehensiveAIManager:
         all_results = {}
         
         for model_type in AIModelType:
-            logger.info(f"🔄 Processing {model_type.value} for profile {profile_id}")
+            logger.info(f"[SYNC] Processing {model_type.value} for profile {profile_id}")
             
             # Attempt processing with retries
             result = await self._process_model_with_retry(
@@ -307,18 +307,18 @@ class ComprehensiveAIManager:
                 all_results[model_type.value] = result['data']
                 job_status['completed_models'] += 1
                 job_status['model_status'][model_type.value] = 'completed'
-                logger.info(f"✅ {model_type.value} completed for profile {profile_id}")
+                logger.info(f"[SUCCESS] {model_type.value} completed for profile {profile_id}")
             else:
                 job_status['failed_models'] += 1
                 job_status['model_status'][model_type.value] = 'failed'
-                logger.error(f"❌ {model_type.value} failed for profile {profile_id}: {result.get('error')}")
+                logger.error(f"[ERROR] {model_type.value} failed for profile {profile_id}: {result.get('error')}")
         
         # Final job status
         job_status['completed_at'] = datetime.now(timezone.utc)
         job_status['success_rate'] = job_status['completed_models'] / job_status['total_models']
         
         logger.info(f"🏁 COMPREHENSIVE ANALYSIS COMPLETE: Profile {profile_id}")
-        logger.info(f"📊 Success Rate: {job_status['success_rate']:.1%} ({job_status['completed_models']}/{job_status['total_models']} models)")
+        logger.info(f"[ANALYTICS] Success Rate: {job_status['success_rate']:.1%} ({job_status['completed_models']}/{job_status['total_models']} models)")
         
         return {
             'job_status': job_status,
@@ -340,7 +340,7 @@ class ComprehensiveAIManager:
         
         for attempt in range(max_retries + 1):  # +1 for initial attempt
             try:
-                logger.debug(f"🔄 Attempt {attempt + 1}/{max_retries + 1} for {model_type.value}")
+                logger.debug(f"[SYNC] Attempt {attempt + 1}/{max_retries + 1} for {model_type.value}")
                 
                 # Process the model
                 result = await self._process_single_model(model_type, profile_id, profile_data, posts_data)
@@ -355,7 +355,7 @@ class ComprehensiveAIManager:
                 
             except Exception as e:
                 error_msg = str(e)
-                logger.warning(f"⚠️ {model_type.value} attempt {attempt + 1} failed: {error_msg}")
+                logger.warning(f"[WARNING] {model_type.value} attempt {attempt + 1} failed: {error_msg}")
                 
                 # Track retry attempt
                 job_status['retry_attempts'][f"{model_type.value}_attempt_{attempt + 1}"] = {
@@ -365,7 +365,7 @@ class ComprehensiveAIManager:
                 
                 # If this was the last attempt, fail
                 if attempt == max_retries:
-                    logger.error(f"❌ {model_type.value} FINAL FAILURE after {max_retries + 1} attempts")
+                    logger.error(f"[ERROR] {model_type.value} FINAL FAILURE after {max_retries + 1} attempts")
                     return {
                         'success': False,
                         'error': error_msg,
@@ -376,7 +376,7 @@ class ComprehensiveAIManager:
                 
                 # Wait before retry (exponential backoff)
                 wait_time = (backoff_factor ** attempt) + (np.random.random() * 0.1)  # Add jitter
-                logger.info(f"⏳ Retrying {model_type.value} in {wait_time:.1f}s (attempt {attempt + 2})")
+                logger.info(f"[WAITING] Retrying {model_type.value} in {wait_time:.1f}s (attempt {attempt + 2})")
                 await asyncio.sleep(wait_time)
         
         # Should never reach here
@@ -595,7 +595,7 @@ class ComprehensiveAIManager:
     
     async def _analyze_audience_quality(self, profile_data: dict, posts_data: List[dict]) -> Dict[str, Any]:
         """Audience Quality Assessment - Fake follower detection, engagement analysis"""
-        logger.info("🔍 Analyzing audience quality and authenticity")
+        logger.info("[SEARCH] Analyzing audience quality and authenticity")
         
         # Extract engagement metrics
         engagement_data = []
@@ -665,7 +665,7 @@ class ComprehensiveAIManager:
     
     async def _analyze_visual_content(self, posts_data: List[dict]) -> Dict[str, Any]:
         """Visual Content Analysis - Image recognition, brand detection, aesthetic scoring"""
-        logger.info("🎨 Analyzing visual content and aesthetics")
+        logger.info("[VISUAL] Analyzing visual content and aesthetics")
         
         visual_results = {
             'visual_analysis': {},
@@ -682,7 +682,7 @@ class ComprehensiveAIManager:
         
         # Check if we have visual analysis capabilities
         if AIModelType.VISUAL_CONTENT not in self.models or self.models[AIModelType.VISUAL_CONTENT].get('fallback_mode'):
-            logger.info("🎨 Using fallback visual analysis (no computer vision models)")
+            logger.info("[VISUAL] Using fallback visual analysis (no computer vision models)")
             return self._get_fallback_visual_analysis(posts_data)
         
         try:
@@ -692,7 +692,14 @@ class ComprehensiveAIManager:
             color_analysis = []
             
             for post in posts_data[:10]:  # Limit to first 10 posts for performance
-                image_url = post.get('display_url') or post.get('thumbnail_url')
+                # CRITICAL FIX: Use CDN URLs for AI analysis instead of Instagram URLs
+                image_url = post.get('cdn_thumbnail_url') or post.get('display_url') or post.get('thumbnail_url')
+                
+                # Prioritize CDN URLs for better performance and reliability
+                if image_url and 'cdn.following.ae' in image_url:
+                    logger.info(f"[VISUAL] Using CDN URL for AI analysis: {image_url[:100]}...")
+                elif image_url:
+                    logger.warning(f"[WARNING] Falling back to Instagram URL (CDN not available): {image_url[:100]}...")
                 
                 if image_url:
                     try:
@@ -871,7 +878,7 @@ class ComprehensiveAIManager:
     
     async def _analyze_trend_detection(self, profile_data: dict, posts_data: List[dict]) -> Dict[str, Any]:
         """Trend Detection - Content trend analysis, viral potential, timing optimization"""
-        logger.info("📈 Analyzing content trends and viral potential")
+        logger.info("[ANALYTICS] Analyzing content trends and viral potential")
         
         try:
             # Analyze engagement trends over time
@@ -1175,7 +1182,7 @@ class ComprehensiveAIManager:
     
     async def _analyze_behavioral_patterns(self, profile_data: dict, posts_data: List[dict]) -> Dict[str, Any]:
         """Behavioral Patterns - User lifecycle analysis, posting patterns, engagement behavior"""
-        logger.info("🎯 Analyzing behavioral patterns and user lifecycle")
+        logger.info("[TARGET] Analyzing behavioral patterns and user lifecycle")
         
         try:
             # Analyze posting patterns

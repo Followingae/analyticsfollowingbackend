@@ -15,7 +15,7 @@ from app.models.auth import UserInDB
 from app.database.connection import get_db
 from app.database.unified_models import (
     Users, SubscriptionFeatures, UserLimits, FeatureUsageTracking,
-    CreditWallets, CreditTransactions, UnlockedInfluencers, Profiles
+    CreditWallet, CreditTransactions, UnlockedInfluencers, Profiles
 )
 from app.middleware.role_based_auth import (
     get_current_user_with_permissions, 
@@ -281,8 +281,8 @@ class BrandAccessControlService:
         """Check if user has sufficient credits for an action"""
         
         # Get user's credit wallet
-        wallet_query = select(CreditWallets).where(
-            CreditWallets.user_id == user_id
+        wallet_query = select(CreditWallet).where(
+            CreditWallet.user_id == user_id
         )
         
         wallet_result = await db.execute(wallet_query)
@@ -333,8 +333,8 @@ class BrandAccessControlService:
         
         try:
             # Get wallet
-            wallet_query = select(CreditWallets).where(
-                CreditWallets.user_id == user_id
+            wallet_query = select(CreditWallet).where(
+                CreditWallet.user_id == user_id
             )
             
             wallet_result = await db.execute(wallet_query)

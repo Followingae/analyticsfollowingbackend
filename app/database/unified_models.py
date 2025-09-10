@@ -1421,7 +1421,7 @@ class UnlockedInfluencer(Base):
     
     # ACTUAL DATABASE COLUMNS ONLY
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('auth.users.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
     username = Column(String(100), nullable=False)  # For quick lookup
     unlocked_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())

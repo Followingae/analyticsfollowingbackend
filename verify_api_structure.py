@@ -109,7 +109,7 @@ async def verify_api_structure():
             print(f"Post Thumbnails: {'✅ READY' if posts_have_urls else '❌ NOT READY'}")
             
             if profile_pic_available and posts_have_urls:
-                print(f"\n🎉 FRONTEND SHOULD NOW DISPLAY ALL IMAGES!")
+                print(f"\nFRONTEND SHOULD NOW DISPLAY ALL IMAGES!")
                 print(f"\nFrontend should use:")
                 print(f"  • response.profile.profile_pic_url (for 256px avatars)")
                 print(f"  • response.profile.profile_pic_url_hd (for 512px avatars)")

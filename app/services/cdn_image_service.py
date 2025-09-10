@@ -17,9 +17,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass 
 class ProfileMediaResponse:
-    """Response model for profile media URLs"""
-    avatar_256: Optional[str] = None
-    avatar_512: Optional[str] = None
+    """Response model for profile media URLs (OPTIMIZED: Single 512px size for quality and efficiency)"""
+    avatar_url: Optional[str] = None  # OPTIMIZED: Single 512px size instead of dual sizes
     posts: List[Dict[str, Any]] = None
     has_pending_jobs: bool = False
     total_assets: int = 0
@@ -45,16 +44,14 @@ class CDNImageService:
         self.cdn_base_url = "https://cdn.following.ae"
         self.max_posts_per_profile = 12
         
-        # Placeholder URLs for missing assets
-        self.placeholder_avatar_256 = f"{self.cdn_base_url}/placeholders/avatar-256.webp"
-        self.placeholder_avatar_512 = f"{self.cdn_base_url}/placeholders/avatar-512.webp"
-        self.placeholder_post_256 = f"{self.cdn_base_url}/placeholders/post-256.webp"
-        self.placeholder_post_512 = f"{self.cdn_base_url}/placeholders/post-512.webp"
+        # Placeholder URLs for missing assets (OPTIMIZED: Single 512px size)
+        self.placeholder_avatar = f"{self.cdn_base_url}/placeholders/avatar-512.webp"
+        self.placeholder_post = f"{self.cdn_base_url}/placeholders/post-512.webp"
         
         # Database session will be injected
         self.db = None
         
-        logger.info("🎯 CDN Image Service initialized")
+        logger.info("[TARGET] CDN Image Service initialized")
     
     def set_db_session(self, db: AsyncSession):
         """Set database session for this request"""
@@ -63,7 +60,7 @@ class CDNImageService:
     async def get_profile_media_urls(self, profile_id: UUID) -> ProfileMediaResponse:
         """Get CDN URLs for profile avatar and recent posts"""
         try:
-            logger.debug(f"🔍 Getting media URLs for profile: {profile_id}")
+            logger.debug(f"[SEARCH] Getting media URLs for profile: {profile_id}")
             
             # Get avatar URL
             avatar_asset = await self._get_asset('profile_avatar', profile_id, 'avatar')
@@ -76,8 +73,7 @@ class CDNImageService:
             for asset in post_assets:
                 post_data = {
                     'media_id': asset['media_id'],
-                    'cdn_url_256': asset.get('cdn_url_256'),  # Direct CDN URL from database
-                    'cdn_url_512': asset.get('cdn_url_512'),  # Direct CDN URL from database
+                    'cdn_url': asset.get('cdn_url_512'),  # FIXED: Use 512px only
                     'available': asset.get('processing_status') == 'completed',
                     'processing_status': asset.get('processing_status', 'unknown')
                 }
@@ -91,26 +87,25 @@ class CDNImageService:
             completed_assets = len([p for p in post_urls if p['available']]) + (1 if avatar_urls else 0)
             
             response = ProfileMediaResponse(
-                avatar_256=avatar_urls['256'] if avatar_urls else None,
-                avatar_512=avatar_urls['512'] if avatar_urls else None,
+                avatar_url=avatar_urls['512'] if avatar_urls else None,  # FIXED: Single URL
                 posts=post_urls,
                 has_pending_jobs=pending_jobs > 0,
                 total_assets=total_assets,
                 completed_assets=completed_assets
             )
             
-            logger.debug(f"✅ Retrieved {len(post_urls)} post assets, {pending_jobs} pending jobs")
+            logger.debug(f"[SUCCESS] Retrieved {len(post_urls)} post assets, {pending_jobs} pending jobs")
             return response
             
         except Exception as e:
-            logger.error(f"❌ Error getting profile media URLs: {e}")
+            logger.error(f"[ERROR] Error getting profile media URLs: {e}")
             raise CDNServiceError(f"Failed to get media URLs: {e}")
     
     async def enqueue_profile_assets(self, profile_id: UUID, decodo_data: Dict, db: AsyncSession = None) -> EnqueueResult:
         """Enqueue profile assets for CDN processing"""
         try:
             logger.info(f"📥 Enqueuing assets for profile: {profile_id}")
-            print(f"📸 CDN: Starting CDN asset enqueue for profile {profile_id}")
+            print(f"[CDN] CDN: Starting CDN asset enqueue for profile {profile_id}")
             
             # Set database session if provided
             if db:
@@ -119,17 +114,17 @@ class CDNImageService:
             jobs_created = 0
             
             # Enqueue avatar from Decodo data
-            print(f"📸 CDN: Looking for profile avatar URL in Decodo data...")
+            print(f"[CDN] CDN: Looking for profile avatar URL in Decodo data...")
             avatar_url = None
             if 'profile_pic_url_hd' in decodo_data and decodo_data['profile_pic_url_hd']:
                 avatar_url = decodo_data['profile_pic_url_hd']
-                print(f"📸 CDN: Found HD avatar URL: {avatar_url[:80]}...")
+                print(f"[CDN] CDN: Found HD avatar URL: {avatar_url[:80]}...")
             elif 'profile_pic_url' in decodo_data and decodo_data['profile_pic_url']:
                 avatar_url = decodo_data['profile_pic_url']
-                print(f"📸 CDN: Found standard avatar URL: {avatar_url[:80]}...")
+                print(f"[CDN] CDN: Found standard avatar URL: {avatar_url[:80]}...")
             
             if avatar_url:
-                print(f"📸 CDN: Enqueuing profile avatar for processing (HIGH priority)...")
+                print(f"[CDN] CDN: Enqueuing profile avatar for processing (HIGH priority)...")
                 await self._enqueue_asset(
                     source_type='profile_avatar',
                     source_id=profile_id,
@@ -139,13 +134,13 @@ class CDNImageService:
                 )
                 jobs_created += 1
                 logger.info(f"Enqueued avatar from Decodo: {avatar_url[:80]}...")
-                print(f"✅ CDN: Profile avatar enqueued successfully")
+                print(f"[SUCCESS] CDN: Profile avatar enqueued successfully")
             else:
                 logger.warning(f"No avatar URL found in Decodo data for profile {profile_id}")
-                print(f"⚠️  CDN: No profile avatar URL found in Decodo data")
+                print(f"[WARNING]  CDN: No profile avatar URL found in Decodo data")
             
             # Enqueue recent posts from DATABASE (more reliable than Decodo structure parsing)
-            print(f"📸 CDN: Getting recent posts from database for profile {profile_id}...")
+            print(f"[CDN] CDN: Getting recent posts from database for profile {profile_id}...")
             
             if self.db:
                 from sqlalchemy import select, desc
@@ -163,7 +158,7 @@ class CDNImageService:
                 posts_result = await self.db.execute(posts_query)
                 db_posts = posts_result.fetchall()
                 
-                print(f"📸 CDN: Found {len(db_posts)} posts with display URLs in database")
+                print(f"[CDN] CDN: Found {len(db_posts)} posts with display URLs in database")
                 logger.info(f"Found {len(db_posts)} recent posts with display URLs from database")
                 
                 # Process posts from database
@@ -171,10 +166,10 @@ class CDNImageService:
                     media_id = post_row[0] or f'post_{i}'  # instagram_post_id
                     display_url = post_row[1]  # display_url
                     
-                    print(f"📸 CDN: Processing post {i}/{len(db_posts)} (media_id: {media_id})")
+                    print(f"[CDN] CDN: Processing post {i}/{len(db_posts)} (media_id: {media_id})")
                     
                     if display_url:
-                        print(f"📸 CDN: Enqueuing post thumbnail: {display_url[:80]}...")
+                        print(f"[CDN] CDN: Enqueuing post thumbnail: {display_url[:80]}...")
                         await self._enqueue_asset(
                             source_type='post_thumbnail',
                             source_id=profile_id,
@@ -183,16 +178,16 @@ class CDNImageService:
                             priority=5  # Normal priority for posts
                         )
                         jobs_created += 1
-                        print(f"✅ CDN: Post {i} thumbnail enqueued successfully")
+                        print(f"[SUCCESS] CDN: Post {i} thumbnail enqueued successfully")
                     else:
-                        print(f"⚠️  CDN: Post {i} has no display_url, skipping")
+                        print(f"[WARNING]  CDN: Post {i} has no display_url, skipping")
             else:
-                print(f"⚠️  CDN: No database session available, cannot get posts")
+                print(f"[WARNING]  CDN: No database session available, cannot get posts")
                 logger.warning(f"No database session available for CDN post processing")
             
-            logger.info(f"✅ Enqueued {jobs_created} assets for processing")
-            print(f"✅ CDN: Successfully enqueued {jobs_created} assets for CDN processing")
-            print(f"📸 CDN: CDN jobs will be processed in background by workers")
+            logger.info(f"[SUCCESS] Enqueued {jobs_created} assets for processing")
+            print(f"[SUCCESS] CDN: Successfully enqueued {jobs_created} assets for CDN processing")
+            print(f"[CDN] CDN: CDN jobs will be processed in background by workers")
             
             return EnqueueResult(
                 success=True,
@@ -201,10 +196,10 @@ class CDNImageService:
             )
             
         except Exception as e:
-            logger.error(f"❌ Error enqueuing profile assets: {e}")
-            print(f"❌ CDN: Error enqueuing profile assets - {str(e)}")
+            logger.error(f"[ERROR] Error enqueuing profile assets: {e}")
+            print(f"[ERROR] CDN: Error enqueuing profile assets - {str(e)}")
             # Add more detailed error info for debugging
-            print(f"❌ CDN: Error details - profile_id: {profile_id}, db session: {self.db is not None}")
+            print(f"[ERROR] CDN: Error details - profile_id: {profile_id}, db session: {self.db is not None}")
             return EnqueueResult(
                 success=False,
                 jobs_created=0,
@@ -243,7 +238,7 @@ class CDNImageService:
                     'job_type': 'ingest' if asset['processing_status'] == 'pending' else 'update',
                     'source_url': source_url,
                     'priority': priority,
-                    'target_sizes': [256, 512],
+                    'target_sizes': [512],  # FIXED: Only generate 512px to save 50% storage costs
                     'output_format': 'webp'
                 }
             )
@@ -251,12 +246,25 @@ class CDNImageService:
             await self.db.commit()
             job_id = result.scalar()
             
-            logger.debug(f"🎯 Created job {job_id} for asset {asset['id']}")
+            logger.debug(f"[TARGET] Created job {job_id} for asset {asset['id']}")
+            
+            # Trigger Celery task for background processing
+            try:
+                from app.workers.simple_cdn_worker import app as celery_app
+                celery_app.send_task(
+                    'simple_cdn_worker.process_image_job',
+                    args=[str(job_id)]
+                )
+                logger.info(f"[TRIGGER] Triggered CDN processing for job {job_id}")
+            except Exception as celery_error:
+                logger.warning(f"[WARNING] Failed to trigger CDN processing for job {job_id}: {celery_error}")
+                # Job is still created in database, can be processed later
+            
             return asset['id']
             
         except Exception as e:
             await self.db.rollback()
-            logger.error(f"❌ Failed to enqueue asset: {e}")
+            logger.error(f"[ERROR] Failed to enqueue asset: {e}")
             raise
     
     async def _get_or_create_asset(self, source_type: str, source_id: UUID, 
@@ -332,7 +340,7 @@ class CDNImageService:
                 
         except Exception as e:
             await self.db.rollback()
-            logger.error(f"❌ Failed to get/create asset: {e}")
+            logger.error(f"[ERROR] Failed to get/create asset: {e}")
             raise
     
     async def _get_asset(self, source_type: str, source_id: UUID, media_id: str) -> Optional[Dict[str, Any]]:
@@ -361,7 +369,7 @@ class CDNImageService:
             return dict(row._mapping) if row else None
             
         except Exception as e:
-            logger.error(f"❌ Failed to get asset: {e}")
+            logger.error(f"[ERROR] Failed to get asset: {e}")
             return None
     
     async def _get_recent_post_assets(self, profile_id: UUID, limit: int = 12) -> List[Dict[str, Any]]:
@@ -386,7 +394,7 @@ class CDNImageService:
             return [dict(row._mapping) for row in rows]
             
         except Exception as e:
-            logger.error(f"❌ Failed to get recent post assets: {e}")
+            logger.error(f"[ERROR] Failed to get recent post assets: {e}")
             return []
     
     async def _count_pending_jobs(self, profile_id: UUID) -> int:
@@ -405,7 +413,7 @@ class CDNImageService:
             return result.scalar() or 0
             
         except Exception as e:
-            logger.error(f"❌ Failed to count pending jobs: {e}")
+            logger.error(f"[ERROR] Failed to count pending jobs: {e}")
             return 0
     
     def _build_cdn_urls(self, asset: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -413,15 +421,13 @@ class CDNImageService:
         if not asset:
             return None
             
-        # Use direct CDN URLs from database (not paths)
-        cdn_256 = asset.get('cdn_url_256')
+        # Use direct CDN URLs from database (FIXED: 512px only)
         cdn_512 = asset.get('cdn_url_512')
         
-        if not cdn_256 or not cdn_512:
+        if not cdn_512:
             return None
         
         return {
-            '256': cdn_256,
             '512': cdn_512
         }
     
@@ -463,7 +469,7 @@ class CDNImageService:
     async def sync_with_existing_profiles(self, batch_size: int = 100) -> Dict[str, Any]:
         """Sync existing profiles with CDN system"""
         try:
-            logger.info(f"🔄 Syncing existing profiles with CDN system (batch size: {batch_size})")
+            logger.info(f"[SYNC] Syncing existing profiles with CDN system (batch size: {batch_size})")
             
             # Get profiles that need CDN processing
             profiles_sql = """
@@ -515,11 +521,11 @@ class CDNImageService:
                         'error': str(e)
                     })
             
-            logger.info(f"✅ Sync completed: {sync_stats['profiles_processed']} profiles, {sync_stats['jobs_created']} jobs created")
+            logger.info(f"[SUCCESS] Sync completed: {sync_stats['profiles_processed']} profiles, {sync_stats['jobs_created']} jobs created")
             return sync_stats
             
         except Exception as e:
-            logger.error(f"❌ Profile sync failed: {e}")
+            logger.error(f"[ERROR] Profile sync failed: {e}")
             return {'error': str(e)}
     
     async def get_processing_stats(self) -> Dict[str, Any]:
@@ -554,7 +560,7 @@ class CDNImageService:
             }
             
         except Exception as e:
-            logger.error(f"❌ Failed to get processing stats: {e}")
+            logger.error(f"[ERROR] Failed to get processing stats: {e}")
             return {'error': str(e)}
     
     async def health_check(self) -> Dict[str, Any]:

@@ -94,7 +94,7 @@ class CDNQueueManager:
             'recovery_timeout': 60  # seconds
         }
         
-        logger.info(f"🎯 CDN Queue Manager initialized with {self.config.max_concurrent_jobs} concurrent jobs")
+        logger.info(f"[TARGET] CDN Queue Manager initialized with {self.config.max_concurrent_jobs} concurrent jobs")
     
     async def enqueue_job(self, 
                          job_id: str,
@@ -114,12 +114,12 @@ class CDNQueueManager:
         try:
             # Check if job is already being processed globally
             if job_id in _processing_jobs_global:
-                logger.debug(f"⚠️ Job {job_id} is already being processed, skipping")
+                logger.debug(f"[WARNING] Job {job_id} is already being processed, skipping")
                 return False
                 
             # Check if job is already in our queue
             if job_id in self.processing_jobs or job_id in self.completed_jobs:
-                logger.debug(f"⚠️ Job {job_id} already exists in queue, skipping")
+                logger.debug(f"[WARNING] Job {job_id} already exists in queue, skipping")
                 return False
             
             job_item = {
@@ -142,7 +142,7 @@ class CDNQueueManager:
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to enqueue job {job_id}: {e}")
+            logger.error(f"[ERROR] Failed to enqueue job {job_id}: {e}")
             return False
     
     async def process_queue(self) -> Dict[str, Any]:
@@ -152,7 +152,7 @@ class CDNQueueManager:
         Returns:
             Processing results and statistics
         """
-        logger.info(f"🚀 Starting queue processing - {self.stats.pending_jobs} jobs pending")
+        logger.info(f"[TRIGGER] Starting queue processing - {self.stats.pending_jobs} jobs pending")
         processing_start = datetime.utcnow()
         
         # Create worker tasks for concurrent processing
@@ -186,11 +186,11 @@ class CDNQueueManager:
                 'stats': self.stats
             }
             
-            logger.info(f"✅ Queue processing completed in {processing_time:.2f}s - {self.stats.completed_jobs} successful, {self.stats.failed_jobs} failed")
+            logger.info(f"[SUCCESS] Queue processing completed in {processing_time:.2f}s - {self.stats.completed_jobs} successful, {self.stats.failed_jobs} failed")
             return results
             
         except Exception as e:
-            logger.error(f"❌ Queue processing failed: {e}")
+            logger.error(f"[ERROR] Queue processing failed: {e}")
             return {'success': False, 'error': str(e)}
     
     async def _worker(self, worker_name: str):
@@ -213,7 +213,7 @@ class CDNQueueManager:
                 
                 # Check circuit breaker
                 if self._is_circuit_breaker_open():
-                    logger.warning(f"⚡ Circuit breaker open - re-queuing job {job_item['id']}")
+                    logger.warning(f"[FAST] Circuit breaker open - re-queuing job {job_item['id']}")
                     self._queue_counter += 1
                     await self.job_queue.put((priority, self._queue_counter, job_item))
                     self.job_queue.task_done()
@@ -233,7 +233,7 @@ class CDNQueueManager:
                 logger.info(f"🛑 Worker {worker_name} cancelled")
                 break
             except Exception as e:
-                logger.error(f"❌ Worker {worker_name} error: {e}")
+                logger.error(f"[ERROR] Worker {worker_name} error: {e}")
                 self.job_queue.task_done()
     
     async def _process_single_job(self, worker_name: str, job_item: Dict[str, Any]):
@@ -248,7 +248,7 @@ class CDNQueueManager:
         job_start = datetime.utcnow()
         
         try:
-            logger.info(f"🔄 {worker_name} processing job {job_id}")
+            logger.info(f"[SYNC] {worker_name} processing job {job_id}")
             
             # Update job status
             job_item['status'] = JobStatus.PROCESSING
@@ -287,7 +287,7 @@ class CDNQueueManager:
                 self._reset_circuit_breaker()
                 
                 processing_time = (datetime.utcnow() - job_start).total_seconds()
-                logger.info(f"✅ {worker_name} completed job {job_id} in {processing_time:.2f}s")
+                logger.info(f"[SUCCESS] {worker_name} completed job {job_id} in {processing_time:.2f}s")
                 
             else:
                 # Job failed - handle retry logic
@@ -295,11 +295,11 @@ class CDNQueueManager:
                 await self._handle_job_failure(job_item, error_msg)
                 
         except asyncio.TimeoutError:
-            logger.error(f"⏱️ Job {job_id} timed out after {self.config.timeout_seconds}s")
+            logger.error(f"[TIMEOUT] Job {job_id} timed out after {self.config.timeout_seconds}s")
             await self._handle_job_failure(job_item, "Job timeout")
             
         except Exception as e:
-            logger.error(f"❌ Job {job_id} processing error: {e}")
+            logger.error(f"[ERROR] Job {job_id} processing error: {e}")
             await self._handle_job_failure(job_item, str(e))
             
         finally:
@@ -325,7 +325,7 @@ class CDNQueueManager:
             # Retry with exponential backoff
             delay = self.config.retry_delay_seconds * (2 ** (job_item['retry_count'] - 1))
             
-            logger.warning(f"🔄 Retrying job {job_id} in {delay}s (attempt {job_item['retry_count']}/{self.config.retry_attempts})")
+            logger.warning(f"[SYNC] Retrying job {job_id} in {delay}s (attempt {job_item['retry_count']}/{self.config.retry_attempts})")
             
             job_item['status'] = JobStatus.RETRY
             
@@ -341,7 +341,7 @@ class CDNQueueManager:
             self.failed_jobs[job_id] = job_item
             self.stats.failed_jobs += 1
             
-            logger.error(f"❌ Job {job_id} permanently failed after {self.config.retry_attempts} attempts: {error_message}")
+            logger.error(f"[ERROR] Job {job_id} permanently failed after {self.config.retry_attempts} attempts: {error_message}")
     
     async def _requeue_with_delay(self, job_item: Dict[str, Any], delay_seconds: int):
         """Re-queue job after delay for retry"""
@@ -360,7 +360,7 @@ class CDNQueueManager:
             
         # Check if recovery timeout has passed
         if (datetime.utcnow() - self.circuit_breaker['last_failure']).total_seconds() > self.circuit_breaker['recovery_timeout']:
-            logger.info("⚡ Circuit breaker half-open - allowing test request")
+            logger.info("[FAST] Circuit breaker half-open - allowing test request")
             self.circuit_breaker['is_open'] = False
             return False
             
@@ -373,14 +373,14 @@ class CDNQueueManager:
         
         if self.circuit_breaker['failures'] >= self.circuit_breaker['failure_threshold']:
             self.circuit_breaker['is_open'] = True
-            logger.warning(f"⚡ Circuit breaker OPEN - too many failures ({self.circuit_breaker['failures']})")
+            logger.warning(f"[FAST] Circuit breaker OPEN - too many failures ({self.circuit_breaker['failures']})")
     
     def _reset_circuit_breaker(self):
         """Reset circuit breaker on successful operation"""
         if self.circuit_breaker['failures'] > 0:
             self.circuit_breaker['failures'] = 0
             self.circuit_breaker['is_open'] = False
-            logger.info("⚡ Circuit breaker reset - service healthy")
+            logger.info("[FAST] Circuit breaker reset - service healthy")
     
     def _update_stats(self, processing_time: float):
         """Update processing statistics"""

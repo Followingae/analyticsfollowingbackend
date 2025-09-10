@@ -35,7 +35,11 @@
       "Bash(py:*)",
       "mcp__supabase__get_project_url",
       "Bash(del:*)",
-      "mcp__supabase__list_tables"
+      "mcp__supabase__list_tables",
+      "mcp__cloudflare__r2_list_buckets",
+      "mcp__cloudflare__r2_list_objects",
+      "mcp__supabase__get_logs",
+      "Bash(git rm:*)"
     ],
     "deny": [],
     "ask": [],

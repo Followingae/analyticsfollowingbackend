@@ -429,13 +429,13 @@ async def get_credits_overview(
         
         # Get total spent
         total_spent_result = await db.execute(
-            select(func.sum(CreditWallet.total_spent))
+            select(func.sum(CreditWallet.lifetime_spent))
         )
         total_spent_all_time = float(total_spent_result.scalar() or 0)
         
         # Get total earned
         total_earned_result = await db.execute(
-            select(func.sum(CreditWallet.total_earned))
+            select(func.sum(CreditWallet.lifetime_earned))
         )
         total_earned_all_time = float(total_earned_result.scalar() or 0)
         
@@ -458,11 +458,11 @@ async def get_credits_overview(
             select(
                 User.email,
                 User.full_name,
-                CreditWallet.total_spent,
+                CreditWallet.lifetime_spent,
                 CreditWallet.current_balance
             ).select_from(
                 CreditWallet.join(User, CreditWallet.user_id == User.id.cast(Text))
-            ).order_by(desc(CreditWallet.total_spent)).limit(10)
+            ).order_by(desc(CreditWallet.lifetime_spent)).limit(10)
         )
         
         top_spenders = []
@@ -470,7 +470,7 @@ async def get_credits_overview(
             top_spenders.append({
                 "email": spender.email,
                 "full_name": spender.full_name,
-                "total_spent": float(spender.total_spent),
+                "total_spent": float(spender.lifetime_spent),
                 "current_balance": float(spender.current_balance)
             })
         
@@ -565,7 +565,7 @@ async def adjust_user_credits(
         if operation_data.operation == "add":
             new_balance = old_balance + operation_data.amount
             transaction_amount = operation_data.amount
-            wallet.total_earned += operation_data.amount
+            wallet.lifetime_earned += operation_data.amount
         else:  # deduct
             if old_balance < operation_data.amount:
                 raise HTTPException(
@@ -574,7 +574,7 @@ async def adjust_user_credits(
                 )
             new_balance = old_balance - operation_data.amount
             transaction_amount = -operation_data.amount
-            wallet.total_spent += operation_data.amount
+            wallet.lifetime_spent += operation_data.amount
         
         # Update wallet
         wallet.current_balance = new_balance

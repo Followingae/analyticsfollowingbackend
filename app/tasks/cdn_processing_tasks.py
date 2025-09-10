@@ -87,7 +87,7 @@ def process_cdn_image_job(self, job_id: str):
 async def _process_cdn_image_job_async(task_self, job_id: str):
     """Async implementation of CDN image job processing"""
     try:
-        logger.info(f"🚀 Starting CDN job {job_id}")
+        logger.info(f"[TRIGGER] Starting CDN job {job_id}")
         
         # Initialize services
         r2_client, transcoder = get_services()
@@ -110,7 +110,7 @@ async def _process_cdn_image_job_async(task_self, job_id: str):
             job = result.fetchone()
             
             if not job:
-                logger.error(f"❌ Job {job_id} not found")
+                logger.error(f"[ERROR] Job {job_id} not found")
                 return {'success': False, 'error': 'Job not found'}
             
             # Update job status to processing
@@ -162,7 +162,7 @@ async def _process_cdn_image_job_async(task_self, job_id: str):
                 )
                 await db_session.commit()
                 
-                logger.info(f"✅ Job {job_id} completed successfully")
+                logger.info(f"[SUCCESS] Job {job_id} completed successfully")
                 return {
                     'success': True,
                     'processing_stats': processing_result.processing_stats,
@@ -173,11 +173,11 @@ async def _process_cdn_image_job_async(task_self, job_id: str):
                 # Handle failure
                 await _handle_job_failure(db_session, job_id, processing_result.error)
                 
-                logger.error(f"❌ Job {job_id} failed: {processing_result.error}")
+                logger.error(f"[ERROR] Job {job_id} failed: {processing_result.error}")
                 return {'success': False, 'error': processing_result.error}
     
     except Exception as e:
-        logger.error(f"❌ CDN job {job_id} processing failed: {e}")
+        logger.error(f"[ERROR] CDN job {job_id} processing failed: {e}")
         return {'success': False, 'error': str(e)}
 
 async def _update_asset_with_results(db_session: AsyncSession, asset_id: UUID, result):
@@ -236,11 +236,11 @@ async def _update_asset_with_results(db_session: AsyncSession, asset_id: UUID, r
         )
         
         await db_session.commit()
-        logger.debug(f"✅ Asset {asset_id} updated with processing results")
+        logger.debug(f"[SUCCESS] Asset {asset_id} updated with processing results")
         
     except Exception as e:
         await db_session.rollback()
-        logger.error(f"❌ Failed to update asset {asset_id}: {e}")
+        logger.error(f"[ERROR] Failed to update asset {asset_id}: {e}")
         raise
 
 async def _handle_job_failure(db_session: AsyncSession, job_id: str, error_message: str):
@@ -284,7 +284,7 @@ async def _handle_job_failure(db_session: AsyncSession, job_id: str, error_messa
         
     except Exception as e:
         await db_session.rollback()
-        logger.error(f"❌ Failed to handle job failure for {job_id}: {e}")
+        logger.error(f"[ERROR] Failed to handle job failure for {job_id}: {e}")
         raise
 
 @app.task(bind=True, name="batch_enqueue_profile_assets")
@@ -332,7 +332,7 @@ async def _batch_enqueue_profile_assets_async(profile_data_list: List[Dict]):
         failed = len(results) - successful
         total_jobs = sum(r['jobs_created'] for r in results)
         
-        logger.info(f"✅ Batch completed: {successful}/{len(results)} profiles, {total_jobs} jobs created")
+        logger.info(f"[SUCCESS] Batch completed: {successful}/{len(results)} profiles, {total_jobs} jobs created")
         
         return {
             'total_profiles': len(profile_data_list),
@@ -343,7 +343,7 @@ async def _batch_enqueue_profile_assets_async(profile_data_list: List[Dict]):
         }
     
     except Exception as e:
-        logger.error(f"❌ Batch enqueue failed: {e}")
+        logger.error(f"[ERROR] Batch enqueue failed: {e}")
         return {'error': str(e)}
     
     finally:
@@ -415,7 +415,7 @@ async def _cleanup_failed_jobs_async():
         }
     
     except Exception as e:
-        logger.error(f"❌ Job cleanup failed: {e}")
+        logger.error(f"[ERROR] Job cleanup failed: {e}")
         if db_session:
             await db_session.rollback()
         return {'error': str(e)}
@@ -490,7 +490,7 @@ async def _generate_processing_stats_async():
         
         await db_session.commit()
         
-        logger.info(f"📊 Generated stats for {current_hour}: {stats.jobs_processed} processed")
+        logger.info(f"[STATS] Generated stats for {current_hour}: {stats.jobs_processed} processed")
         
         return {
             'hour': current_hour.isoformat(),
@@ -504,7 +504,7 @@ async def _generate_processing_stats_async():
         }
     
     except Exception as e:
-        logger.error(f"❌ Stats generation failed: {e}")
+        logger.error(f"[ERROR] Stats generation failed: {e}")
         if db_session:
             await db_session.rollback()
         return {'error': str(e)}
@@ -540,7 +540,7 @@ async def _nightly_freshness_check_async():
         
         await db_session.commit()
         
-        logger.info(f"✅ Marked {marked_count} assets for freshness check")
+        logger.info(f"[SUCCESS] Marked {marked_count} assets for freshness check")
         
         return {
             'marked_for_refresh': marked_count,
@@ -548,7 +548,7 @@ async def _nightly_freshness_check_async():
         }
     
     except Exception as e:
-        logger.error(f"❌ Nightly freshness check failed: {e}")
+        logger.error(f"[ERROR] Nightly freshness check failed: {e}")
         if db_session:
             await db_session.rollback()
         return {'error': str(e)}

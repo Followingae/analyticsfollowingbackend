@@ -95,6 +95,23 @@ class AIBackgroundTaskManager:
                 "message": f"Failed to schedule AI analysis for {profile_username}"
             }
     
+    def schedule_comprehensive_profile_analysis(self, profile_id: str, profile_username: str, comprehensive_analysis: bool = True) -> Dict[str, Any]:
+        """
+        Schedule comprehensive AI analysis for all posts of a profile with all 10 AI models
+        
+        Args:
+            profile_id: UUID of the profile
+            profile_username: Username for logging/tracking
+            comprehensive_analysis: Enable all 10 AI models (ignored for compatibility)
+            
+        Returns:
+            Task information including task_id
+        """
+        # For now, this is identical to schedule_profile_analysis
+        # In the future, this could enable additional AI models or processing
+        logger.info(f"Scheduling COMPREHENSIVE AI analysis for {profile_username} with all 10 models")
+        return self.schedule_profile_analysis(profile_id, profile_username)
+    
     def get_task_status(self, task_id: str) -> Dict[str, Any]:
         """
         Get current status of a background task
@@ -301,17 +318,13 @@ class AIBackgroundTaskManager:
                 status = task_info.get('status', 'UNKNOWN')
                 status_counts[status] = status_counts.get(status, 0) + 1
             
-            # Add enterprise stats to legacy format
-            enterprise_stats = self.get_enterprise_stats()
-            
             return {
                 "active_workers": len(active_workers) if active_workers else 0,
                 "active_tasks_count": len(self.active_tasks),
                 "task_status_breakdown": status_counts,
                 "celery_broker": "redis://localhost:6379/0",
                 "system_healthy": len(active_workers) > 0 if active_workers else False,
-                "last_check": datetime.now(timezone.utc).isoformat(),
-                "enterprise_stats": enterprise_stats
+                "last_check": datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
@@ -357,22 +370,46 @@ class AIBackgroundTaskManager:
         logger.info(f"SYNC AI: Starting synchronous AI analysis for {profile_username} (task: {task_id})")
         
         try:
-            # Import the async AI analysis function directly
-            from app.workers.ai_background_worker import _async_analyze_profile_posts
-            
-            # Run the AI analysis synchronously
-            result = asyncio.run(_async_analyze_profile_posts(profile_id, profile_username, task_id))
-            
-            logger.info(f"SYNC AI: Successfully completed AI analysis for {profile_username}")
-            return {
-                "success": True,
-                "task_id": task_id,
-                "status": "completed",
-                "profile_id": profile_id,
-                "profile_username": profile_username,
-                "processing_type": "synchronous",
-                "result": result
-            }
+            # Check if we're already in an event loop
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an event loop - create a task instead
+                logger.info(f"SYNC AI: Running in existing event loop, creating task for {profile_username}")
+                
+                # Import the async AI analysis function directly  
+                from app.workers.ai_background_worker import _async_analyze_profile_posts
+                
+                # Create task for immediate execution
+                task = asyncio.create_task(_async_analyze_profile_posts(profile_id, profile_username, task_id))
+                
+                # Return immediately with task info - the analysis will run in background
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "status": "running_in_background",
+                    "profile_id": profile_id,
+                    "profile_username": profile_username,
+                    "processing_type": "async_task",
+                    "message": "AI analysis started in background task"
+                }
+                
+            except RuntimeError:
+                # No event loop - we can use asyncio.run()
+                logger.info(f"SYNC AI: No event loop detected, using asyncio.run() for {profile_username}")
+                
+                from app.workers.ai_background_worker import _async_analyze_profile_posts
+                result = asyncio.run(_async_analyze_profile_posts(profile_id, profile_username, task_id))
+                
+                logger.info(f"SYNC AI: Successfully completed AI analysis for {profile_username}")
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "status": "completed",
+                    "profile_id": profile_id,
+                    "profile_username": profile_username,
+                    "processing_type": "synchronous",
+                    "result": result
+                }
             
         except Exception as e:
             logger.error(f"SYNC AI: Failed AI analysis for {profile_username}: {e}")
@@ -459,18 +496,40 @@ class AIBackgroundTaskManager:
                 }
         
         try:
-            result = asyncio.run(_run_alt_analysis())
-            logger.info(f"ALT AI: Successfully completed alternative AI analysis for {profile_username}")
-            
-            return {
-                "success": True,
-                "task_id": task_id,
-                "status": "completed",
-                "profile_id": profile_id,
-                "profile_username": profile_username,
-                "processing_type": "alternative_sync",
-                "result": result
-            }
+            # Check if we're already in an event loop
+            try:
+                loop = asyncio.get_running_loop()
+                # We're in an event loop - create a task instead
+                logger.info(f"ALT AI: Running in existing event loop, creating task for {profile_username}")
+                
+                # Create task for immediate execution
+                task = asyncio.create_task(_run_alt_analysis())
+                
+                # Return immediately with task info - the analysis will run in background
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "status": "running_in_background",
+                    "profile_id": profile_id,
+                    "profile_username": profile_username,
+                    "processing_type": "alternative_async_task",
+                    "message": "Alternative AI analysis started in background task"
+                }
+                
+            except RuntimeError:
+                # No event loop - we can use asyncio.run()
+                result = asyncio.run(_run_alt_analysis())
+                logger.info(f"ALT AI: Successfully completed alternative AI analysis for {profile_username}")
+                
+                return {
+                    "success": True,
+                    "task_id": task_id,
+                    "status": "completed",
+                    "profile_id": profile_id,
+                    "profile_username": profile_username,
+                    "processing_type": "alternative_sync",
+                    "result": result
+                }
             
         except Exception as e:
             logger.error(f"ALT AI: Alternative analysis failed for {profile_username}: {e}")

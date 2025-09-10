@@ -216,7 +216,7 @@ class BulletproofContentIntelligence:
                 return self._create_error_response(f"AI service not initialized: {self.initialization_error}")
         
         analysis_start_time = datetime.now(timezone.utc)
-        logger.info(f"🚀 COMPREHENSIVE PROFILE ANALYSIS START: Profile {profile_id}")
+        logger.info(f"[TRIGGER] COMPREHENSIVE PROFILE ANALYSIS START: Profile {profile_id}")
         
         try:
             # Use comprehensive AI manager for complete analysis
@@ -275,19 +275,19 @@ class BulletproofContentIntelligence:
                     }
                 }
                 
-                logger.info(f"✅ COMPREHENSIVE ANALYSIS SUCCESS: Profile {profile_id} - {comprehensive_analysis.get('success_rate', 0):.1%} models completed")
+                logger.info(f"[SUCCESS] COMPREHENSIVE ANALYSIS SUCCESS: Profile {profile_id} - {comprehensive_analysis.get('success_rate', 0):.1%} models completed")
                 return comprehensive_response
                 
             else:
-                logger.warning(f"⚠️ COMPREHENSIVE ANALYSIS INCOMPLETE: Profile {profile_id}")
+                logger.warning(f"[WARNING] COMPREHENSIVE ANALYSIS INCOMPLETE: Profile {profile_id}")
                 return self._create_error_response("Comprehensive analysis incomplete")
                 
         except Exception as e:
-            logger.error(f"❌ COMPREHENSIVE ANALYSIS ERROR: Profile {profile_id}: {e}")
+            logger.error(f"[ERROR] COMPREHENSIVE ANALYSIS ERROR: Profile {profile_id}: {e}")
             
             # Fallback to basic analysis
             try:
-                logger.info(f"🔄 FALLBACK: Attempting basic analysis for profile {profile_id}")
+                logger.info(f"[SYNC] FALLBACK: Attempting basic analysis for profile {profile_id}")
                 
                 # Analyze a sample of posts for basic insights
                 sample_posts = posts_data[:5] if len(posts_data) > 5 else posts_data
@@ -333,7 +333,7 @@ class BulletproofContentIntelligence:
                 }
                 
             except Exception as fallback_error:
-                logger.error(f"❌ FALLBACK ANALYSIS ALSO FAILED: Profile {profile_id}: {fallback_error}")
+                logger.error(f"[ERROR] FALLBACK ANALYSIS ALSO FAILED: Profile {profile_id}: {fallback_error}")
                 return self._create_error_response(f"All analysis methods failed: {str(e)}")
     
     def _aggregate_basic_sentiment(self, basic_results: List[dict]) -> dict:
@@ -734,11 +734,11 @@ class BulletproofContentIntelligence:
             )
             await db.commit()
             
-            logger.info(f"✅ Profile AI aggregates updated: {primary_content_type}, sentiment: {avg_sentiment:.2f}")
+            logger.info(f"[SUCCESS] Profile AI aggregates updated: {primary_content_type}, sentiment: {avg_sentiment:.2f}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to update profile AI aggregates: {e}")
+            logger.error(f"[ERROR] Failed to update profile AI aggregates: {e}")
             await db.rollback()
             return False
 

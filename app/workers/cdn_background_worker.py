@@ -92,7 +92,7 @@ def process_cdn_image_job(self, job_id: str) -> Dict[str, Any]:
         Processing results
     """
     task_id = self.request.id
-    logger.info(f"🎬 Starting CDN image processing task {task_id} for job {job_id}")
+    logger.info(f"[CDN] Starting CDN image processing task {task_id} for job {job_id}")
     
     try:
         # Run the async processing in the background thread

@@ -92,7 +92,7 @@ class MasterInfluencerResponse(BaseModel):
     """Master influencer database response"""
     influencers: List[Dict[str, Any]]
     total_count: int
-    pagination: Dict[str, int]
+    pagination: Dict[str, Any]
     statistics: Dict[str, Any]
     top_performers: List[Dict[str, Any]]
 
@@ -428,7 +428,7 @@ async def get_user_management(
             
             # Get credit wallet info
             wallet_query = await db.execute(
-                select(CreditWallet.current_balance, CreditWallet.total_spent)
+                select(CreditWallet.current_balance, CreditWallet.lifetime_spent)
                 .where(CreditWallet.user_id == str(user.id))
             )
             wallet = wallet_query.first()
@@ -456,7 +456,7 @@ async def get_user_management(
                 "teams": teams,
                 "credits": {
                     "balance": wallet.current_balance if wallet else 0,
-                    "spent": wallet.total_spent if wallet else 0
+                    "spent": wallet.lifetime_spent if wallet else 0
                 },
                 "recent_activity": recent_activity
             })

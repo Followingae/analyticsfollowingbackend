@@ -22,7 +22,7 @@ from app.middleware.role_based_auth import (
 )
 from app.database.connection import get_db
 from app.database.unified_models import (
-    Users, CreditWallets, CreditTransactions, CreditAdjustments,
+    Users, CreditWallet, CreditTransactions, CreditAdjustments,
     SubscriptionHistory, RevenueAttribution, PlatformMetrics
 )
 
@@ -194,10 +194,10 @@ async def get_financial_overview(
     
     # Credit usage statistics
     credit_stats_query = select(
-        func.sum(CreditWallets.balance).label('total_balance'),
-        func.sum(CreditWallets.total_purchased).label('total_purchased'),
-        func.sum(CreditWallets.total_spent).label('total_spent'),
-        func.count(CreditWallets.id).label('wallet_count')
+        func.sum(CreditWallet.current_balance).label('total_balance'),
+        func.sum(CreditWallet.total_purchased_this_cycle).label('total_purchased'),
+        func.sum(CreditWallet.lifetime_spent).label('total_spent'),
+        func.count(CreditWallet.id).label('wallet_count')
     )
     
     credit_stats_result = await db.execute(credit_stats_query)
@@ -242,8 +242,8 @@ async def get_all_credit_wallets(
     """Get all credit wallets with filtering"""
     
     # Build query with join to Users
-    query = select(CreditWallets, Users.email).join(
-        Users, CreditWallets.user_id == Users.id
+    query = select(CreditWallet, Users.email).join(
+        Users, CreditWallet.user_id == Users.id
     )
     
     # Apply filters
@@ -253,10 +253,10 @@ async def get_all_credit_wallets(
         conditions.append(Users.email.icontains(user_email))
     
     if min_balance is not None:
-        conditions.append(CreditWallets.balance >= min_balance)
+        conditions.append(CreditWallet.current_balance >= min_balance)
     
     if max_balance is not None:
-        conditions.append(CreditWallets.balance <= max_balance)
+        conditions.append(CreditWallet.current_balance <= max_balance)
     
     if subscription_tier:
         conditions.append(Users.subscription_tier == subscription_tier)
@@ -266,7 +266,7 @@ async def get_all_credit_wallets(
     
     # Apply pagination
     offset = (page - 1) * per_page
-    query = query.order_by(desc(CreditWallets.created_at)).offset(offset).limit(per_page)
+    query = query.order_by(desc(CreditWallet.created_at)).offset(offset).limit(per_page)
     
     # Execute query
     result = await db.execute(query)
@@ -314,7 +314,7 @@ async def adjust_user_credits(
         )
     
     # Get user's credit wallet
-    wallet_query = select(CreditWallets).where(CreditWallets.user_id == adjustment.user_id)
+    wallet_query = select(CreditWallet).where(CreditWallet.user_id == adjustment.user_id)
     wallet_result = await db.execute(wallet_query)
     wallet = wallet_result.scalar()
     
@@ -400,9 +400,9 @@ async def bulk_adjust_credits(
     
     try:
         # Get all wallets for the users
-        wallets_query = select(CreditWallets, Users.email).join(
-            Users, CreditWallets.user_id == Users.id
-        ).where(CreditWallets.user_id.in_(bulk_adjustment.user_ids))
+        wallets_query = select(CreditWallet, Users.email).join(
+            Users, CreditWallet.user_id == Users.id
+        ).where(CreditWallet.user_id.in_(bulk_adjustment.user_ids))
         
         wallets_result = await db.execute(wallets_query)
         wallets_data = wallets_result.all()

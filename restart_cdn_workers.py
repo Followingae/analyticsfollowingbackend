@@ -29,11 +29,11 @@ class CDNWorkerManager:
             
             r = redis.from_url(settings.REDIS_URL)
             r.ping()
-            logger.info("✅ Redis connection successful")
+            logger.info("[SUCCESS] Redis connection successful")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Redis connection failed: {e}")
+            logger.error(f"[ERROR] Redis connection failed: {e}")
             return False
     
     async def get_queue_stats(self) -> Dict[str, Any]:
@@ -73,7 +73,7 @@ class CDNWorkerManager:
     def start_celery_worker(self) -> bool:
         """Start Celery worker for CDN processing"""
         try:
-            logger.info("🚀 Starting Celery worker for CDN processing")
+            logger.info("[TRIGGER] Starting Celery worker for CDN processing")
             
             # Command to start Celery worker
             cmd = [
@@ -95,17 +95,17 @@ class CDNWorkerManager:
                 text=True
             )
             
-            logger.info(f"✅ Celery worker started with PID: {process.pid}")
+            logger.info(f"[SUCCESS] Celery worker started with PID: {process.pid}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to start Celery worker: {e}")
+            logger.error(f"[ERROR] Failed to start Celery worker: {e}")
             return False
     
     def start_celery_beat(self) -> bool:
         """Start Celery beat scheduler"""
         try:
-            logger.info("⏰ Starting Celery beat scheduler")
+            logger.info("[SCHEDULE] Starting Celery beat scheduler")
             
             cmd = [
                 sys.executable, "-m", "celery",
@@ -122,11 +122,11 @@ class CDNWorkerManager:
                 text=True
             )
             
-            logger.info(f"✅ Celery beat started with PID: {process.pid}")
+            logger.info(f"[SUCCESS] Celery beat started with PID: {process.pid}")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to start Celery beat: {e}")
+            logger.error(f"[ERROR] Failed to start Celery beat: {e}")
             return False
     
     async def process_queued_jobs_manually(self, limit: int = 10) -> Dict[str, Any]:
@@ -157,7 +157,7 @@ class CDNWorkerManager:
                 result = await db_session.execute(text(jobs_sql), {'limit': limit})
                 job_ids = [row[0] for row in result.fetchall()]
                 
-                logger.info(f"🔧 Manually processing {len(job_ids)} queued jobs")
+                logger.info(f"[REPAIR] Manually processing {len(job_ids)} queued jobs")
                 
                 for job_id in job_ids:
                     try:
@@ -183,16 +183,16 @@ class CDNWorkerManager:
                         })
                         logger.error(f"Error processing job {job_id}: {e}")
             
-            logger.info(f"✅ Manual processing complete: {results['successful']} successful, {results['failed']} failed")
+            logger.info(f"[SUCCESS] Manual processing complete: {results['successful']} successful, {results['failed']} failed")
             return results
             
         except Exception as e:
-            logger.error(f"❌ Manual job processing failed: {e}")
+            logger.error(f"[ERROR] Manual job processing failed: {e}")
             return {'error': str(e)}
     
     async def monitor_queue_processing(self, duration_seconds: int = 300):
         """Monitor queue processing for a specified duration"""
-        logger.info(f"👀 Monitoring queue processing for {duration_seconds} seconds")
+        logger.info(f"[MONITOR] Monitoring queue processing for {duration_seconds} seconds")
         
         import time
         start_time = time.time()
@@ -202,7 +202,7 @@ class CDNWorkerManager:
             
             if 'error' not in stats:
                 logger.info(
-                    f"📊 Queue Stats: {stats['queued']} queued, "
+                    f"[STATS] Queue Stats: {stats['queued']} queued, "
                     f"{stats['processing']} processing, "
                     f"{stats['completed']} completed, "
                     f"{stats['failed']} failed"
@@ -211,7 +211,7 @@ class CDNWorkerManager:
             # Wait 30 seconds before next check
             await asyncio.sleep(30)
         
-        logger.info("✅ Monitoring complete")
+        logger.info("[SUCCESS] Monitoring complete")
 
 async def main():
     """Main worker management function"""
@@ -220,32 +220,32 @@ async def main():
         
         # 1. Check Redis connection
         if not await manager.check_redis_connection():
-            print("❌ Redis not available. Please start Redis first.")
+            print("[ERROR] Redis not available. Please start Redis first.")
             return
         
         # 2. Get initial queue stats
         initial_stats = await manager.get_queue_stats()
-        print(f"📊 Initial Queue Stats: {initial_stats}")
+        print(f"[STATS] Initial Queue Stats: {initial_stats}")
         
         # 3. Process a few jobs manually to test the pipeline
         if initial_stats.get('queued', 0) > 0:
-            print("🔧 Testing pipeline with manual job processing...")
+            print("[TEST] Testing pipeline with manual job processing...")
             manual_results = await manager.process_queued_jobs_manually(limit=5)
-            print(f"🔧 Manual Processing Results: {manual_results}")
+            print(f"[TEST] Manual Processing Results: {manual_results}")
         
         # 4. Start Celery worker (optional - user should run this separately)
-        print("\n📝 To start the CDN processing workers, run these commands:")
+        print("\n[DOCS] To start the CDN processing workers, run these commands:")
         print("   celery -A app.tasks.cdn_processing_tasks worker --loglevel=info --queues=cdn_processing")
         print("   celery -A app.tasks.cdn_processing_tasks beat --loglevel=info")
         
         # 5. Get final stats
         final_stats = await manager.get_queue_stats()
-        print(f"📊 Final Queue Stats: {final_stats}")
+        print(f"[STATS] Final Queue Stats: {final_stats}")
         
-        print("✅ CDN worker management completed!")
+        print("[SUCCESS] CDN worker management completed!")
         
     except Exception as e:
-        print(f"❌ Worker management failed: {e}")
+        print(f"[ERROR] Worker management failed: {e}")
         raise
 
 if __name__ == "__main__":

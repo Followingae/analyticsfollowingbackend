@@ -136,7 +136,7 @@ class StartupInitializationService:
     async def _validate_infrastructure(self):
         """Validate Critical Infrastructure (Celery/Redis) - MANDATORY"""
         try:
-            logger.info("🔧 Validating Celery/Redis infrastructure...")
+            logger.info("[REPAIR] Validating Celery/Redis infrastructure...")
             
             # Test Redis connection
             redis_available = await self._test_redis_connection()
@@ -158,12 +158,12 @@ class StartupInitializationService:
                 "message": "All critical infrastructure validated"
             }
             
-            logger.info("✅ SUCCESS: Critical infrastructure validated (Redis + Celery)")
+            logger.info("[SUCCESS] Critical infrastructure validated (Redis + Celery)")
             
         except Exception as e:
-            logger.critical(f"❌ ERROR: Infrastructure validation FAILED: {e}")
-            logger.critical("🚨 CRITICAL: System cannot operate without Redis and Celery")
-            logger.critical("📋 SOLUTION: Start Redis server and ensure proper configuration")
+            logger.critical(f"[ERROR] Infrastructure validation FAILED: {e}")
+            logger.critical("[CRITICAL] System cannot operate without Redis and Celery")
+            logger.critical("[SOLUTION] Start Redis server and ensure proper configuration")
             self.critical_failures.append(f"Infrastructure: {str(e)}")
             self.initialization_results["infrastructure"] = {
                 "status": "critical_failure",
@@ -184,11 +184,11 @@ class StartupInitializationService:
             await asyncio.wait_for(redis_client.ping(), timeout=5.0)
             await redis_client.close()
             
-            logger.info("✅ Redis connection successful")
+            logger.info("[SUCCESS] Redis connection successful")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Redis connection failed: {e}")
+            logger.error(f"[ERROR] Redis connection failed: {e}")
             return False
     
     async def _test_celery_broker(self) -> bool:
@@ -206,11 +206,11 @@ class StartupInitializationService:
             active_tasks = inspect.active()
             
             # If we get here, broker is available
-            logger.info("✅ Celery broker connection successful")
+            logger.info("[SUCCESS] Celery broker connection successful")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Celery broker connection failed: {e}")
+            logger.error(f"[ERROR] Celery broker connection failed: {e}")
             return False
     
     async def _initialize_content_intelligence(self):
@@ -268,10 +268,10 @@ class StartupInitializationService:
             if comprehensive_service.pool:
                 logger.info("SUCCESS: Database connection pool initialized")
             else:
-                logger.warning("⚠️ Database pool not initialized - service will use fallback connections")
+                logger.warning("[WARNING] Database pool not initialized - service will use fallback connections")
             
         except Exception as e:
-            logger.warning(f"⚠️ Database services initialization warning: {e}")
+            logger.warning(f"[WARNING] Database services initialization warning: {e}")
             self.initialization_results["database_services"] = {
                 "status": "warning",
                 "error": str(e),

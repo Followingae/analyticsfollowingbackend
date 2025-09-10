@@ -579,14 +579,14 @@ class ComprehensiveDataService:
             print(f"📝 DATABASE: Committing {posts_created} new posts to database...")
             await db.commit()
             logger.info(f"Created {posts_created} new posts for profile {profile_id}")
-            print(f"✅ DATABASE: Successfully committed {posts_created} posts ({posts_skipped} skipped as duplicates)")
+            logger.info(f"DATABASE: Successfully committed {posts_created} posts ({posts_skipped} skipped as duplicates)")
             
             # Update profile's overall engagement rate after adding posts
             if posts_created > 0:
-                print(f"📊 DATABASE: Updating overall engagement rate for profile...")
+                logger.info("DATABASE: Updating overall engagement rate for profile...")
                 await EngagementRateService.update_profile_engagement_rate(db, str(profile_id))
                 logger.info(f"Updated overall engagement rate for profile {profile_id}")
-                print(f"✅ DATABASE: Profile engagement rate updated")
+                logger.info("DATABASE: Profile engagement rate updated")
             
             return posts_created
             
@@ -1330,41 +1330,17 @@ class ComprehensiveDataService:
             # Get current time for consistent timestamp comparison
             current_time = datetime.now(timezone.utc)
             
-            # CRITICAL FIX: Get profiles from BOTH user access AND team access
-            # First, get user's team memberships
-            from app.database.unified_models import TeamMember, TeamProfileAccess
-            team_query = select(TeamMember.team_id).where(
-                TeamMember.user_id == user_uuid
-            )
-            team_result = await db_session.execute(team_query)
-            user_team_ids = [row[0] for row in team_result.fetchall()]
+            # CRITICAL FIX: Get profiles from unlocked_influencers table (where actual unlocks are stored)
+            from app.database.unified_models import UnlockedInfluencer
             
-            # Get profiles from direct user access
-            user_access_query = select(UserProfileAccess, Profile).join(
-                Profile, UserProfileAccess.profile_id == Profile.id
+            # Query unlocked_influencers table directly - this is where profile unlocks are actually stored
+            unlocked_query = select(UnlockedInfluencer, Profile).join(
+                Profile, UnlockedInfluencer.profile_id == Profile.id
             ).where(
-                and_(
-                    UserProfileAccess.user_id == user_uuid,
-                    or_(
-                        UserProfileAccess.expires_at.is_(None),
-                        UserProfileAccess.expires_at > current_time
-                    )
-                )
-            )
+                UnlockedInfluencer.user_id == user_uuid
+            ).order_by(UnlockedInfluencer.unlocked_at.desc()).offset(offset).limit(page_size)
             
-            # Get profiles from team access
-            team_access_query = select(TeamProfileAccess, Profile).join(
-                Profile, TeamProfileAccess.profile_id == Profile.id
-            ).where(
-                TeamProfileAccess.team_id.in_(user_team_ids)
-            ) if user_team_ids else select(TeamProfileAccess, Profile).where(False)  # Empty query if no teams
-            
-            # Combine both queries using UNION
-            from sqlalchemy import union_all
-            combined_query = union_all(
-                user_access_query.with_only_columns(Profile),
-                team_access_query.with_only_columns(Profile)
-            ).order_by(Profile.updated_at.desc()).offset(offset).limit(page_size)
+            combined_query = unlocked_query
             
             # Execute queries with retry and timeout protection
             async def execute_queries():
@@ -1372,26 +1348,13 @@ class ComprehensiveDataService:
                 result = await asyncio.wait_for(db.execute(combined_query), timeout=30.0)
                 profiles_data = result.all()
                 
-                # Count total accessible profiles from both sources
-                user_count_query = select(func.count(UserProfileAccess.id)).where(
-                    and_(
-                        UserProfileAccess.user_id == user_uuid,
-                        or_(
-                            UserProfileAccess.expires_at.is_(None),
-                            UserProfileAccess.expires_at > current_time
-                        )
-                    )
+                # Count total unlocked profiles for this user
+                count_query = select(func.count(UnlockedInfluencer.id)).where(
+                    UnlockedInfluencer.user_id == user_uuid
                 )
-                team_count_query = select(func.count(TeamProfileAccess.id)).where(
-                    TeamProfileAccess.team_id.in_(user_team_ids)
-                ) if user_team_ids else select(func.count()).select_from(TeamProfileAccess).where(False)
                 
-                user_count_result = await asyncio.wait_for(db.execute(user_count_query), timeout=30.0)
-                team_count_result = await asyncio.wait_for(db.execute(team_count_query), timeout=30.0)
-                
-                user_count = user_count_result.scalar() or 0
-                team_count = team_count_result.scalar() or 0
-                total_count = user_count + team_count
+                count_result = await asyncio.wait_for(db.execute(count_query), timeout=30.0)
+                total_count = count_result.scalar() or 0
                 
                 return profiles_data, total_count
             
@@ -1408,10 +1371,9 @@ class ComprehensiveDataService:
             # Format response
             profiles = []
             
-            for profile in profiles_data:
-                # For combined user+team access, we'll use default access info
-                # since the query only returns Profile objects without access details
-                current_time = datetime.now(timezone.utc)
+            for row in profiles_data:
+                # The query returns (UnlockedInfluencer, Profile) tuples
+                unlocked_record, profile = row
                 
                 profile_data = {
                     "username": profile.username,
@@ -1428,12 +1390,21 @@ class ComprehensiveDataService:
                     "engagement_rate": float(profile.engagement_rate or 0),
                     "influence_score": float(profile.influence_score or 0),
                     
-                    # Access information (simplified since we combine user+team access)
-                    "access_granted_at": current_time.isoformat(),
-                    "access_expires_at": None,  # Team access doesn't expire
+                    # Access information from UnlockedInfluencer record
+                    "access_granted_at": unlocked_record.unlocked_at.isoformat() if unlocked_record.unlocked_at else None,
+                    "access_expires_at": None,  # Unlocked profiles don't expire
                     "days_remaining": None,
                     "profile_id": str(profile.id),
+                    "credits_spent": unlocked_record.credits_spent,
                     
+                    # Add AI analysis data if available
+                    "ai_analysis": {
+                        "primary_content_type": profile.ai_primary_content_type,
+                        "avg_sentiment_score": profile.ai_avg_sentiment_score,
+                        "content_distribution": profile.ai_content_distribution,
+                        "language_distribution": profile.ai_language_distribution,
+                        "content_quality_score": profile.ai_content_quality_score
+                    }
                 }
                 profiles.append(profile_data)
             
