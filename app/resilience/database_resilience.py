@@ -24,14 +24,18 @@ class DatabaseResilience:
         self.connection_failures = 0
         self.last_failure_time = None
         self.circuit_breaker_open = False
-        self.circuit_breaker_threshold = 3  # failures before opening
-        self.circuit_breaker_timeout = 60  # seconds to wait before retry
-        self.retry_delays = [1, 2, 4, 8, 16]  # exponential backoff
-        self.max_retries = 5
+        self.circuit_breaker_threshold = 15  # Higher threshold for production
+        self.circuit_breaker_timeout = 30  # Shorter timeout for faster recovery
+        self.retry_delays = [0.5, 1, 2, 4, 8]  # Faster initial retries
+        self.max_retries = 3  # Fewer retries per operation
         
         # Connection pool health
         self.pool_health_check_interval = 30  # seconds
         self.last_pool_check = None
+        
+        # Operation-specific failure tracking (more granular than global circuit breaking)
+        self.operation_failures = {}  # Track failures per operation type
+        self.operation_threshold = 10  # Per-operation failure threshold
         
     def is_network_available(self) -> bool:
         """Check if basic network connectivity is available"""
@@ -58,8 +62,10 @@ class DatabaseResilience:
         # Check if timeout has passed
         time_since_failure = time.time() - self.last_failure_time
         if time_since_failure > self.circuit_breaker_timeout:
-            logger.info("CIRCUIT BREAKER: Timeout passed, allowing retry attempt")
+            logger.info("CIRCUIT BREAKER: Recovery timeout passed, attempting gradual reconnection")
             self.circuit_breaker_open = False
+            # Reset failure count partially for gradual recovery
+            self.connection_failures = max(0, self.connection_failures - 5)
             return False
             
         return True
@@ -71,7 +77,7 @@ class DatabaseResilience:
         
         if self.connection_failures >= self.circuit_breaker_threshold:
             if not self.circuit_breaker_open:
-                logger.error(f"CIRCUIT BREAKER: Opening circuit after {self.connection_failures} failures")
+                logger.warning(f"CIRCUIT BREAKER: Opening circuit after {self.connection_failures} consecutive failures - allowing graceful degradation")
                 self.circuit_breaker_open = True
     
     def record_success(self):
@@ -95,6 +101,42 @@ class DatabaseResilience:
         """Get current failure count"""
         return self.connection_failures
     
+    def should_skip_operation(self, operation_name: str) -> bool:
+        """Check if specific operation should be skipped due to repeated failures"""
+        if operation_name not in self.operation_failures:
+            return False
+        
+        failure_info = self.operation_failures[operation_name]
+        failure_count = failure_info.get('count', 0)
+        last_failure = failure_info.get('last_failure', 0)
+        
+        # Only skip if operation has failed repeatedly AND recently
+        if failure_count >= self.operation_threshold:
+            time_since_failure = time.time() - last_failure
+            if time_since_failure < self.circuit_breaker_timeout:
+                logger.warning(f"OPERATION THROTTLE: Skipping {operation_name} due to {failure_count} recent failures")
+                return True
+            else:
+                # Reset operation failures after timeout
+                self.operation_failures[operation_name]['count'] = max(0, failure_count - 3)
+                
+        return False
+    
+    def record_operation_failure(self, operation_name: str):
+        """Record a failure for specific operation type"""
+        if operation_name not in self.operation_failures:
+            self.operation_failures[operation_name] = {'count': 0, 'last_failure': 0}
+        
+        self.operation_failures[operation_name]['count'] += 1
+        self.operation_failures[operation_name]['last_failure'] = time.time()
+    
+    def record_operation_success(self, operation_name: str):
+        """Record success for specific operation type"""
+        if operation_name in self.operation_failures:
+            # Reduce failure count on success
+            current_count = self.operation_failures[operation_name]['count']
+            self.operation_failures[operation_name]['count'] = max(0, current_count - 2)
+    
     def get_status(self) -> Dict[str, Any]:
         """Get current resilience status"""
         return {
@@ -102,7 +144,8 @@ class DatabaseResilience:
             "failure_count": self.connection_failures,
             "last_failure_time": self.last_failure_time,
             "network_available": self.is_network_available(),
-            "status": "open" if self.circuit_breaker_open else "closed"
+            "status": "open" if self.circuit_breaker_open else "closed",
+            "operation_failures": self.operation_failures
         }
     
     async def execute_with_resilience(
@@ -116,14 +159,21 @@ class DatabaseResilience:
         """
         Execute database operation with comprehensive resilience
         """
+        # Check operation-specific throttling first
+        if self.should_skip_operation(operation_name):
+            logger.warning(f"OPERATION THROTTLE: Temporarily skipping {operation_name} due to repeated failures")
+            raise ConnectionError(f"Operation {operation_name} temporarily throttled due to repeated failures")
+        
+        # Check global circuit breaker for severe system issues
         if self.should_circuit_break():
-            logger.warning(f"CIRCUIT BREAKER: Blocking {operation_name} - circuit open")
+            logger.warning(f"CIRCUIT BREAKER: Blocking {operation_name} - circuit open for severe system issues")
             raise ConnectionError(f"Circuit breaker open for {operation_name}")
         
         # Check network connectivity first
         if not self.is_network_available():
             logger.error(f"NETWORK: No network connectivity for {operation_name}")
             self.record_failure()
+            self.record_operation_failure(operation_name)
             raise ConnectionError(f"No network connectivity for {operation_name}")
         
         # Attempt operation with retries
@@ -138,6 +188,7 @@ class DatabaseResilience:
                 
                 # Success!
                 self.record_success()
+                self.record_operation_success(operation_name)
                 return result
                 
             except (asyncpg.PostgresConnectionError, 
@@ -160,6 +211,7 @@ class DatabaseResilience:
                     # Final attempt failed
                     logger.error(f"RESILIENCE: All {self.max_retries} attempts failed for {operation_name}")
                     self.record_failure()
+                    self.record_operation_failure(operation_name)
             
             except Exception as e:
                 # Non-network error, don't retry

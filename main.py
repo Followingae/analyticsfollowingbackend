@@ -5,7 +5,7 @@ import httpx
 import io
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import uvicorn
 import asyncio
 import os
@@ -343,6 +343,63 @@ from app.core.config import settings
 
 # Initialize logger for bulletproof endpoints
 bulletproof_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
+
+async def _trigger_background_processing_if_needed(profile, username: str) -> dict:
+    """Trigger AI analysis and CDN processing for existing profiles that need it"""
+    try:
+        processing_triggered = {"ai_analysis": False, "cdn_processing": False}
+        
+        # Check if AI analysis is needed - only if profile has never been analyzed
+        needs_ai_analysis = profile.ai_profile_analyzed_at is None
+        
+        # Check if CDN processing is needed - check if we have CDN assets in database
+        cdn_assets_query = text("SELECT COUNT(*) FROM cdn_image_assets WHERE source_id = :profile_id AND source_type = 'instagram_profile'")
+        cdn_assets_result = await db.execute(cdn_assets_query, {'profile_id': str(profile.id)})
+        existing_cdn_assets = cdn_assets_result.scalar()
+        needs_cdn_processing = existing_cdn_assets == 0
+        
+        if needs_ai_analysis:
+            logger.info(f"[SEARCH] BACKGROUND: Profile {username} needs AI analysis")
+            try:
+                from app.services.ai_background_task_manager import AIBackgroundTaskManager
+                ai_task_manager = AIBackgroundTaskManager()
+                
+                task_result = ai_task_manager.schedule_comprehensive_profile_analysis(
+                    profile_id=str(profile.id),
+                    profile_username=username,
+                    comprehensive_analysis=True
+                )
+                
+                if task_result.get("success"):
+                    processing_triggered["ai_analysis"] = True
+                    logger.info(f"[SUCCESS] BACKGROUND: AI analysis scheduled for {username}")
+                
+            except Exception as e:
+                logger.error(f"[ERROR] BACKGROUND: AI analysis failed for {username}: {e}")
+        
+        if needs_cdn_processing:
+            logger.info(f"[SEARCH] BACKGROUND: Profile {username} needs CDN processing")
+            try:
+                from app.services.cdn_image_service import cdn_image_service
+                
+                # Get database session from existing context
+                from app.database.connection import get_session
+                async with get_session() as db_session:
+                    cdn_result = await cdn_image_service.enqueue_profile_assets(profile.id, {}, db_session)
+                
+                if cdn_result.get("success"):
+                    processing_triggered["cdn_processing"] = True
+                    logger.info(f"[SUCCESS] BACKGROUND: CDN processing completed for {username}")
+                
+            except Exception as e:
+                logger.error(f"[ERROR] BACKGROUND: CDN processing failed for {username}: {e}")
+        
+        return processing_triggered
+        
+    except Exception as e:
+        logger.error(f"[ERROR] BACKGROUND: Processing check failed for {username}: {e}")
+        return {"ai_analysis": False, "cdn_processing": False}
 
 @app.post("/api/v1/simple/creator/search/{username}")
 @atomic_requires_credits(
@@ -358,14 +415,14 @@ async def bulletproof_creator_search(
 ):
     """Bulletproof Creator Search - Credit-gated profile analysis with COMPLETE data retrieval"""
     try:
-        from sqlalchemy import select
+        from sqlalchemy import select, text
         from app.database.unified_models import Profile, Post
         
-        print(f"\n🔍 ==================== CREATOR SEARCH START ====================")
-        print(f"🔍 SEARCH REQUEST: Username='{username}', User='{current_user.email}'")
+        print(f"\n[SEARCH] ==================== CREATOR SEARCH START ====================")
+        logger.info(f"[SEARCH] SEARCH REQUEST: Username='{username}', User='{current_user.email}'")
         bulletproof_logger.info(f"BULLETPROOF: Creator search for {username}")
         
-        print(f"🔍 STEP 1: Checking if profile exists in database...")
+        logger.info(f"[SEARCH] STEP 1: Checking if profile exists in database...")
         # Check if profile exists in database first
         profile_query = select(Profile).where(Profile.username == username)
         profile_result = await db.execute(profile_query)
@@ -373,13 +430,28 @@ async def bulletproof_creator_search(
         
         if existing_profile:
             # RETURN COMPLETE EXISTING PROFILE DATA (NOT JUST BASIC FIELDS)
-            print(f"✅ STEP 1 RESULT: Profile '{username}' EXISTS in database")
-            print(f"📊 Profile ID: {existing_profile.id}")
-            print(f"📊 Followers: {existing_profile.followers_count:,}")
-            print(f"📊 Posts: {existing_profile.posts_count:,}")
-            print(f"🔍 STEP 1.1: Retrieving COMPLETE stored data (posts + AI + analytics)...")
+            logger.info(f"[SUCCESS] STEP 1 RESULT: Profile '{username}' EXISTS in database")
+            logger.info(f"[ANALYTICS] Profile ID: {existing_profile.id}")
+            logger.info(f"[ANALYTICS] Followers: {existing_profile.followers_count:,}")
+            logger.info(f"[ANALYTICS] Posts: {existing_profile.posts_count:,}")
+            logger.info(f"[SEARCH] STEP 1.1: Retrieving COMPLETE stored data (posts + AI + analytics)...")
             
             bulletproof_logger.info(f"BULLETPROOF: Profile {username} exists - returning COMPLETE stored data")
+            
+            # ONLY CDN URLs - get from cdn_image_assets table (profile avatar)
+            profile_cdn_query = text("""
+                SELECT cdn_url_512 
+                FROM cdn_image_assets 
+                WHERE source_id = :profile_id 
+                AND source_type = 'instagram_profile'
+                AND cdn_url_512 IS NOT NULL
+                LIMIT 1
+            """)
+            profile_cdn_result = await db.execute(profile_cdn_query, {'profile_id': str(existing_profile.id)})
+            profile_cdn_row = profile_cdn_result.fetchone()
+            
+            # Use CDN URL from database for profile picture
+            profile_pic_url = profile_cdn_row[0] if profile_cdn_row else None
             
             # Get ALL posts with AI analysis
             posts_query = select(Post).where(
@@ -388,9 +460,23 @@ async def bulletproof_creator_search(
             posts_result = await db.execute(posts_query)
             posts = posts_result.scalars().all()
             
-            # Build complete posts data with AI analysis
+            # Get CDN URLs for all posts in one query
+            posts_cdn_query = text("""
+                SELECT media_id, cdn_url_512 
+                FROM cdn_image_assets 
+                WHERE source_id = :profile_id 
+                AND source_type = 'post_thumbnail'
+                AND cdn_url_512 IS NOT NULL
+            """)
+            posts_cdn_result = await db.execute(posts_cdn_query, {'profile_id': str(existing_profile.id)})
+            posts_cdn_urls = {row[0]: row[1] for row in posts_cdn_result.fetchall()}
+            
+            # Build complete posts data with AI analysis and CDN URLs
             posts_data = []
             for post in posts:
+                # Get CDN URL for this specific post
+                post_cdn_url = posts_cdn_urls.get(post.instagram_post_id)
+                
                 posts_data.append({
                     "id": post.instagram_post_id,
                     "shortcode": post.shortcode,
@@ -398,8 +484,9 @@ async def bulletproof_creator_search(
                     "likes_count": post.likes_count,
                     "comments_count": post.comments_count,
                     "engagement_rate": post.engagement_rate,
-                    "display_url": post.display_url,
-                    "taken_at": post.taken_at.isoformat() if post.taken_at else None,
+                    "display_url": post_cdn_url or post.display_url,  # CDN first, Instagram fallback
+                    "cdn_thumbnail_url": post_cdn_url,  # CRITICAL: Actual CDN URL from database
+                    "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
                     "ai_analysis": {
                         "content_category": post.ai_content_category,
                         "category_confidence": post.ai_category_confidence,
@@ -412,7 +499,7 @@ async def bulletproof_creator_search(
                     }
                 })
             
-            print(f"✅ STEP 1.1 RESULT: Retrieved {len(posts_data)} posts with complete AI analysis")
+            logger.info(f"[SUCCESS] STEP 1.1 RESULT: Retrieved {len(posts_data)} posts with complete AI analysis")
             
             # Return COMPLETE profile data (everything we have stored)
             return {
@@ -429,20 +516,19 @@ async def bulletproof_creator_search(
                     "is_verified": existing_profile.is_verified,
                     "is_private": existing_profile.is_private,
                     "is_business_account": existing_profile.is_business_account,
-                    "profile_pic_url": existing_profile.profile_pic_url,
-                    "profile_pic_url_hd": existing_profile.profile_pic_url_hd,
+                    "profile_pic_url": profile_pic_url,  # CDN first, Instagram fallback for speed
                     "external_url": existing_profile.external_url,
-                    "business_category_name": existing_profile.business_category_name,
-                    "business_email": existing_profile.business_email,
-                    "business_phone_number": existing_profile.business_phone_number,
+                    "business_category_name": existing_profile.category or existing_profile.instagram_business_category,
+                    "business_email": getattr(existing_profile, 'business_email', None),
+                    "business_phone_number": getattr(existing_profile, 'business_phone_number', None),
                     
                     # Analytics data
                     "engagement_rate": existing_profile.engagement_rate,
-                    "avg_likes": existing_profile.avg_likes,
-                    "avg_comments": existing_profile.avg_comments,
-                    "influence_score": existing_profile.influence_score,
-                    "content_quality_score": existing_profile.content_quality_score,
-                    "follower_growth_rate": existing_profile.follower_growth_rate,
+                    "avg_likes": getattr(existing_profile, 'avg_likes', None),
+                    "avg_comments": getattr(existing_profile, 'avg_comments', None),
+                    "influence_score": getattr(existing_profile, 'influence_score', None),
+                    "content_quality_score": getattr(existing_profile, 'content_quality_score', None),
+                    "follower_growth_rate": getattr(existing_profile, 'follower_growth_rate', None),
                     
                     # Complete AI analysis (ALL 10 MODELS)
                     "ai_analysis": {
@@ -497,34 +583,36 @@ async def bulletproof_creator_search(
                     "avg_engagement_rate": existing_profile.engagement_rate,
                     "content_categories_found": len(existing_profile.ai_top_10_categories) if existing_profile.ai_top_10_categories else 0
                 },
+                # CRITICAL: Trigger AI analysis for existing profiles that need it
+                "ai_analysis_triggered": await _trigger_background_processing_if_needed(existing_profile, username),
                 "message": "Complete profile data loaded from database",
                 "data_source": "database_complete",
                 "cached": True
             }
         else:
             # Fetch new profile from Decodo with COMPLETE data population
-            print(f"❌ STEP 1 RESULT: Profile '{username}' NOT FOUND in database")
-            print(f"🔍 STEP 2: Fetching COMPLETE data from Decodo API...")
+            logger.info(f"[ERROR] STEP 1 RESULT: Profile '{username}' NOT FOUND in database")
+            logger.info(f"[SEARCH] STEP 2: Fetching COMPLETE data from Decodo API...")
             bulletproof_logger.info(f"BULLETPROOF: New profile {username} - fetching COMPLETE data from Decodo")
             
             async with EnhancedDecodoClient(
                 settings.SMARTPROXY_USERNAME,
                 settings.SMARTPROXY_PASSWORD
             ) as decodo_client:
-                print(f"📡 Calling Decodo API for '{username}' with COMPREHENSIVE settings...")
+                logger.info(f"[API] Calling Decodo API for '{username}' with COMPREHENSIVE settings...")
                 
                 # Use the PERFECT original Decodo client
                 decodo_data = await decodo_client.get_instagram_profile_comprehensive(username)
                 
                 if not decodo_data:
-                    print(f"❌ STEP 2 RESULT: Decodo returned NO DATA for '{username}'")
+                    logger.error(f"[ERROR] STEP 2 RESULT: Decodo returned NO DATA for '{username}'")
                     raise HTTPException(status_code=404, detail="Profile not found")
                 
-                print(f"✅ STEP 2 RESULT: Decodo data received for '{username}'")
-                print(f"📊 Decodo followers: {decodo_data.get('followers_count', 0):,}")
-                print(f"📊 Decodo posts: {decodo_data.get('posts_count', 0):,}")
+                logger.info(f"[SUCCESS] STEP 2 RESULT: Decodo data received for '{username}'")
+                logger.info(f"[ANALYTICS] Decodo followers: {decodo_data.get('followers_count', 0):,}")
+                logger.info(f"[ANALYTICS] Decodo posts: {decodo_data.get('posts_count', 0):,}")
             
-            print(f"🔍 STEP 3: Storing COMPLETE profile data in database...")
+            logger.info(f"[SEARCH] STEP 3: Storing COMPLETE profile data in database...")
             comprehensive_service = ComprehensiveDataService()
             
             # Store new profile with enhanced retry mechanisms  
@@ -532,12 +620,12 @@ async def bulletproof_creator_search(
                 db, username, decodo_data
             )
             
-            print(f"✅ STEP 3 RESULT: Profile stored (new: {is_new})")
-            print(f"📊 Profile ID: {profile.id}")
+            logger.info(f"[SUCCESS] STEP 3 RESULT: Profile stored (new: {is_new})")
+            logger.info(f"[ANALYTICS] Profile ID: {profile.id}")
             
             # Start REAL AI analysis in background (non-blocking)
             if is_new:
-                print(f"🔍 STEP 4: Starting background AI analysis...")
+                logger.info(f"[SEARCH] STEP 4: Starting background AI analysis...")
                 bulletproof_logger.info(f"BULLETPROOF: Starting background AI analysis for {username}")
                 
                 try:
@@ -552,18 +640,41 @@ async def bulletproof_creator_search(
                     )
                     
                     if task_result.get("success"):
-                        print(f"✅ STEP 4 RESULT: AI analysis queued for background processing (Task ID: {task_result.get('task_id', 'N/A')})")
+                        logger.info(f"[SUCCESS] STEP 4 RESULT: AI analysis queued for background processing (Task ID: {task_result.get('task_id', 'N/A')})")
                         bulletproof_logger.info(f"BULLETPROOF: AI analysis task scheduled for {username}: {task_result.get('task_id')}")
                     else:
-                        print(f"⚠️ STEP 4 RESULT: AI analysis scheduling failed: {task_result.get('error', 'Unknown error')}")
+                        logger.warning(f"[WARNING] STEP 4 RESULT: AI analysis scheduling failed: {task_result.get('error', 'Unknown error')}")
                         bulletproof_logger.warning(f"BULLETPROOF: AI analysis failed to schedule for {username}: {task_result.get('error')}")
                         
                 except Exception as ai_error:
-                    print(f"❌ STEP 4 RESULT: AI analysis error: {ai_error}")
+                    logger.error(f"[ERROR] STEP 4 RESULT: AI analysis error: {ai_error}")
                     bulletproof_logger.error(f"BULLETPROOF: AI analysis error for {username}: {ai_error}")
                     # Don't fail the entire request if AI fails
             else:
                 print(f"⏩ STEP 4: AI analysis skipped (profile not new)")
+            
+            # CRITICAL: Start CDN processing for ALL profiles (new and existing without CDN)
+            logger.info(f"[SEARCH] STEP 5: Starting CDN image processing...")
+            bulletproof_logger.info(f"BULLETPROOF: Starting CDN processing for {username}")
+            
+            try:
+                from app.services.cdn_image_service import cdn_image_service
+                
+                # Start CDN processing in background (non-blocking) 
+                cdn_result = await cdn_image_service.enqueue_profile_assets(profile.id, decodo_data, db)
+                
+                if cdn_result.get("success"):
+                    logger.info(f"[SUCCESS] STEP 5 RESULT: CDN processing completed successfully")
+                    logger.info(f"[CDN] Avatar CDN URL: {cdn_result.get('avatar_url', 'N/A')}")
+                    bulletproof_logger.info(f"BULLETPROOF: CDN processing successful for {username}")
+                else:
+                    logger.warning(f"[WARNING] STEP 5 RESULT: CDN processing failed: {cdn_result.get('error', 'Unknown error')}")
+                    bulletproof_logger.warning(f"BULLETPROOF: CDN processing failed for {username}: {cdn_result.get('error')}")
+                
+            except Exception as cdn_error:
+                logger.error(f"[ERROR] STEP 5 RESULT: CDN processing error: {cdn_error}")
+                bulletproof_logger.error(f"BULLETPROOF: CDN processing error for {username}: {cdn_error}")
+                # Don't fail the entire request if CDN fails
             
             return {
                 "success": True,
@@ -575,18 +686,18 @@ async def bulletproof_creator_search(
                     "following_count": profile.following_count,
                     "posts_count": profile.posts_count,
                     "is_verified": profile.is_verified,
-                    "profile_pic_url": profile.profile_pic_url
+                    "profile_pic_url": None  # ONLY CDN URLs - CDN processing needs to be fixed first
                 },
                 "message": "New profile fetched and stored",
                 "cached": False
             }
         
-        print(f"🎉 COMPREHENSIVE CREATOR SEARCH SUCCESS for '{username}'")
-        print(f"🔍 ==================== CREATOR SEARCH END ====================\n")
+        print(f"COMPREHENSIVE CREATOR SEARCH SUCCESS for '{username}'")
+        print(f"==================== CREATOR SEARCH END ====================\n")
             
     except Exception as e:
-        print(f"💥 COMPREHENSIVE CREATOR SEARCH ERROR for '{username}': {e}")
-        print(f"🔍 ==================== CREATOR SEARCH FAILED ====================\n")
+        print(f"COMPREHENSIVE CREATOR SEARCH ERROR for '{username}': {e}")
+        print(f"==================== CREATOR SEARCH FAILED ====================\n")
         bulletproof_logger.error(f"BULLETPROOF: Comprehensive creator search failed for {username}: {e}")
         raise HTTPException(status_code=500, detail=f"Comprehensive search failed: {str(e)}")
 
@@ -884,7 +995,7 @@ async def nuclear_unlocked_profiles(
                     "followers_count": profile.get('followers_count', 0),
                     "following_count": profile.get('following_count', 0),
                     "posts_count": profile.get('posts_count', 0),
-                    "profile_pic_url": profile.get('profile_pic_url'),
+                    "profile_pic_url": None,  # Only CDN URLs - no Instagram fallbacks!
                     "unlocked_at": profile.get('unlocked_at'),
                     "ai_analysis": {
                         "primary_content_type": profile.get('ai_primary_content_type'),
@@ -899,7 +1010,7 @@ async def nuclear_unlocked_profiles(
                     "followers_count": getattr(profile, 'followers_count', 0) or 0,
                     "following_count": getattr(profile, 'following_count', 0) or 0,
                     "posts_count": getattr(profile, 'posts_count', 0) or 0,
-                    "profile_pic_url": getattr(profile, 'profile_pic_url', None),
+                    "profile_pic_url": None,  # Only CDN URLs - no Instagram fallbacks!
                     "unlocked_at": getattr(profile, 'unlocked_at', None),
                     "ai_analysis": {
                         "primary_content_type": getattr(profile, 'ai_primary_content_type', None),
@@ -975,7 +1086,7 @@ async def bulletproof_get_profile(
                 "following_count": profile.following_count,
                 "posts_count": profile.posts_count,
                 "is_verified": profile.is_verified,
-                "profile_pic_url": profile.profile_pic_url
+                "profile_pic_url": None  # Only CDN URLs - no Instagram fallbacks!
             },
             "message": "Profile data loaded"
         }
