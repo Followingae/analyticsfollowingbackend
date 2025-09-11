@@ -18,13 +18,14 @@ try:
     print(f"- Concurrency: {celery_app.conf.worker_concurrency}")
     print(f"- Max tasks per child: {celery_app.conf.worker_max_tasks_per_child}")
     
-    # Start the worker
+    # Start the worker - Windows compatible
     celery_app.worker_main([
         'worker',
         '--loglevel=info',
-        '--concurrency=2',
+        '--concurrency=1',
         '--max-tasks-per-child=50',
-        '--pool=prefork'
+        '--pool=solo',
+        '--queues=celery,ai_analysis,health_checks'
     ])
     
 except KeyboardInterrupt:

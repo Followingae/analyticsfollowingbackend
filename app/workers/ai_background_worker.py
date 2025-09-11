@@ -29,7 +29,7 @@ celery_app = Celery(
     backend='redis://localhost:6379/0'  # Redis as result backend
 )
 
-# Celery configuration for production
+# Celery configuration for production - Windows compatible
 celery_app.conf.update(
     task_serializer='json',
     accept_content=['json'],
@@ -44,8 +44,10 @@ celery_app.conf.update(
     worker_disable_rate_limits=False,
     task_default_retry_delay=60,  # 1 minute retry delay
     task_max_retries=3,
-    # Performance tuning
-    worker_concurrency=2,  # Limit concurrent tasks to prevent memory issues
+    # Windows compatible settings - FIXED
+    task_always_eager=False,
+    task_eager_propagates=True,
+    # Remove worker-specific settings from app config - these should be in worker startup only
     worker_max_tasks_per_child=50,  # Restart worker after 50 tasks to prevent memory leaks
 )
 
@@ -303,22 +305,48 @@ async def _update_profile_ai_insights(db: AsyncSession, profile_id: str, profile
             content_distribution, avg_sentiment_score, len(sentiment_scores), total_analyzed
         )
         
-        # Update profile with insights
-        await db.execute(
-            update(Profile)
-            .where(Profile.id == profile_id)
-            .values(
-                ai_primary_content_type=primary_content_type,
-                ai_content_distribution=content_distribution,
-                ai_avg_sentiment_score=avg_sentiment_score,
-                ai_language_distribution=language_distribution,
-                ai_content_quality_score=content_quality_score,
-                ai_profile_analyzed_at=datetime.now(timezone.utc),
-                # NEW: Store top 3 and top 10 categories
-                ai_top_3_categories=ai_top_3_categories if ai_top_3_categories else None,
-                ai_top_10_categories=ai_top_10_categories if ai_top_10_categories else None
+        # CRITICAL DEBUG: Log aggregation results before database update
+        logger.error(f"[CRITICAL-DEBUG] Profile aggregation for {profile_username}:")
+        logger.error(f"  Primary content type: '{primary_content_type}'")
+        logger.error(f"  Content distribution: {content_distribution}")
+        logger.error(f"  Avg sentiment score: {avg_sentiment_score}")
+        logger.error(f"  Language distribution: {language_distribution}")
+        logger.error(f"  Content quality score: {content_quality_score}")
+        logger.error(f"  Top 3 categories: {ai_top_3_categories}")
+        logger.error(f"  Top 10 categories: {ai_top_10_categories}")
+        logger.error(f"  Profile ID: {profile_id}")
+        
+        # CRITICAL: Check if values are null before update
+        if primary_content_type is None:
+            logger.error(f"[CRITICAL-BUG] PRIMARY_CONTENT_TYPE IS NULL for {profile_username}!")
+        if not content_distribution:
+            logger.error(f"[CRITICAL-BUG] CONTENT_DISTRIBUTION IS EMPTY for {profile_username}!")
+        if not language_distribution:
+            logger.error(f"[CRITICAL-BUG] LANGUAGE_DISTRIBUTION IS EMPTY for {profile_username}!")
+        
+        # Update profile with insights - add explicit error handling
+        try:
+            logger.error(f"[CRITICAL-DEBUG] Executing database update for {profile_username}...")
+            update_result = await db.execute(
+                update(Profile)
+                .where(Profile.id == profile_id)
+                .values(
+                    ai_primary_content_type=primary_content_type,
+                    ai_content_distribution=content_distribution,
+                    ai_avg_sentiment_score=avg_sentiment_score,
+                    ai_language_distribution=language_distribution,
+                    ai_content_quality_score=content_quality_score,
+                    ai_profile_analyzed_at=datetime.now(timezone.utc),
+                    # NEW: Store top 3 and top 10 categories
+                    ai_top_3_categories=ai_top_3_categories if ai_top_3_categories else None,
+                    ai_top_10_categories=ai_top_10_categories if ai_top_10_categories else None
+                )
             )
-        )
+            
+            logger.error(f"[CRITICAL-DEBUG] Database update result: {update_result.rowcount} rows affected")
+        except Exception as update_error:
+            logger.error(f"[CRITICAL-ERROR] Database update failed for {profile_username}: {update_error}")
+            raise update_error
         
         await db.commit()
         

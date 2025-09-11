@@ -57,8 +57,9 @@ async def get_user_dashboard_stats(
                 "role": team_member.role
             }
         else:
-            # Individual subscription
-            subscription_tier = user.subscription_tier if user.subscription_tier in ["free", "standard", "premium"] else "free"
+            # Individual subscription - CRITICAL FIX: Accept all valid subscription tiers
+            valid_tiers = ["free", "standard", "premium", "professional", "enterprise", "brand_free", "brand_standard", "brand_premium", "brand_enterprise"]
+            subscription_tier = user.subscription_tier if user.subscription_tier in valid_tiers else "free"
             team_info = None
         
         # Get subscription limits
@@ -163,7 +164,9 @@ async def get_subscription_status(
         team_result = await db.execute(team_query)
         team_tier = team_result.scalar_one_or_none()
         
-        subscription_tier = team_tier or (user.subscription_tier if user.subscription_tier in ["free", "standard", "premium"] else "free")
+        # CRITICAL FIX: Accept all valid subscription tiers
+        valid_tiers = ["free", "standard", "premium", "professional", "enterprise", "brand_free", "brand_standard", "brand_premium", "brand_enterprise"]
+        subscription_tier = team_tier or (user.subscription_tier if user.subscription_tier in valid_tiers else "free")
         
         return {
             "subscription_tier": subscription_tier,

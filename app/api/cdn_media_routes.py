@@ -49,16 +49,10 @@ def get_transcoder_service() -> ImageTranscoderService:
         _transcoder_service = ImageTranscoderService(get_r2_client())
     return _transcoder_service
 
-async def get_cdn_service(db: AsyncSession = Depends(get_db)):
-    """Get CDN image service with database dependency"""
-    cdn_image_service.set_db_session(db)
-    return cdn_image_service
-
 @router.get("/creators/ig/{profile_identifier}/media")
 async def get_profile_media_urls(
     profile_identifier: str,
     current_user=Depends(get_current_active_user),
-    cdn_service: CDNImageService = Depends(get_cdn_service),
     db: AsyncSession = Depends(get_db)
 ):
     """Get CDN URLs for profile images (avatar + recent posts)"""
@@ -88,8 +82,9 @@ async def get_profile_media_urls(
             
             logger.info(f"📱 Found UUID for {profile_identifier}: {profile_uuid}")
         
-        # Get media URLs from CDN service
-        media_response = await cdn_service.get_profile_media_urls(profile_uuid)
+        # Get media URLs from CDN service - use per-request session pattern
+        cdn_service = CDNImageService()
+        media_response = await cdn_service.get_profile_media_urls_with_session(profile_uuid, db)
         
         # Build response with placeholders for missing assets
         cdn_base_url = settings.CDN_BASE_URL
@@ -157,7 +152,7 @@ async def refresh_profile_media(
     profile_id: str,
     background_tasks: BackgroundTasks,
     current_user=Depends(get_current_active_user),
-    cdn_service: CDNImageService = Depends(get_cdn_service)
+    db: AsyncSession = Depends(get_db)
 ):
     """Refresh profile media by re-fetching from Decodo and updating CDN"""
     try:
@@ -229,6 +224,8 @@ async def refresh_profile_media(
                 )
         
         # Enqueue for CDN processing
+        cdn_service = CDNImageService()
+        cdn_service.set_db_session(db)
         result = await cdn_service.enqueue_profile_assets(profile_uuid, decodo_data)
         
         if result.success:
@@ -277,13 +274,15 @@ async def _monitor_processing_completion(profile_id: UUID, jobs_count: int):
 @router.get("/cdn/processing-status")
 async def get_processing_status(
     current_user=Depends(get_current_active_user),
-    cdn_service: CDNImageService = Depends(get_cdn_service)
+    db: AsyncSession = Depends(get_db)
 ):
     """Get overall CDN processing system status"""
     try:
         logger.debug("📊 Getting CDN processing status")
         
         # Get processing statistics
+        cdn_service = CDNImageService()
+        cdn_service.set_db_session(db)
         stats = await cdn_service.get_processing_stats()
         
         # Get R2 storage statistics
@@ -345,7 +344,7 @@ async def get_processing_status(
 async def sync_existing_profiles(
     batch_size: int = 100,
     current_user=Depends(get_current_active_user),
-    cdn_service: CDNImageService = Depends(get_cdn_service)
+    db: AsyncSession = Depends(get_db)
 ):
     """Sync existing profiles with CDN system (admin operation)"""
     try:
@@ -366,6 +365,8 @@ async def sync_existing_profiles(
             )
         
         # Perform sync
+        cdn_service = CDNImageService()
+        cdn_service.set_db_session(db)
         sync_result = await cdn_service.sync_with_existing_profiles(batch_size)
         
         if 'error' in sync_result:
@@ -399,7 +400,7 @@ async def sync_existing_profiles(
 async def get_cdn_metrics(
     hours: int = 24,
     current_user=Depends(get_current_active_user),
-    cdn_service: CDNImageService = Depends(get_cdn_service)
+    db: AsyncSession = Depends(get_db)
 ):
     """Comprehensive CDN metrics for monitoring (admin endpoint)"""
     try:
@@ -413,13 +414,14 @@ async def get_cdn_metrics(
         logger.debug(f"📊 Getting CDN metrics for last {hours} hours")
         
         # Get comprehensive statistics
+        cdn_service = CDNImageService()
+        cdn_service.set_db_session(db)
         processing_stats = await cdn_service.get_processing_stats()
         r2_client = get_r2_client()
         storage_stats = r2_client.get_storage_stats()
         transcoder_stats = get_transcoder_service().get_processing_stats()
         
         # Get historical data from database
-        db = cdn_service.db
         historical_sql = f"""
             SELECT 
                 date, hour,

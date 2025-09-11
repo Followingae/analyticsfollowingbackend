@@ -1,8 +1,12 @@
 # AI/ML Content Classification Dependencies
 # Core ML/AI Libraries
 torch>=1.13.0
+torchvision>=0.14.0
 transformers>=4.25.0
 sentencepiece>=0.1.97
+
+# Computer Vision Libraries
+opencv-python>=4.8.0
 
 # For category classification (optional - loaded on demand)
 scipy>=1.9.0

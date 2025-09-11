@@ -1,8 +1,10 @@
 import asyncio
-# Using SQLAlchemy async only, databases library removed
-from sqlalchemy import create_engine, MetaData, text
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from typing import AsyncGenerator
+# Enterprise-grade SQLAlchemy async with connection pooling
+from sqlalchemy import create_engine, MetaData, text, pool
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool, NullPool
 from supabase import create_client, Client
 import logging
 
@@ -93,16 +95,38 @@ async def _test_connection_with_resilience(engine):
     database_resilience.record_failure()
     return False
 
+# Enterprise-grade database configuration
+class DatabaseConfig:
+    """Enterprise database configuration for hundreds of concurrent users"""
+    
+    # Connection Pool Settings (Optimized for enterprise scale)
+    POOL_SIZE = 20                    # Base connections (per process)
+    MAX_OVERFLOW = 40                 # Additional connections under load  
+    POOL_TIMEOUT = 30                 # Wait time for connection (seconds)
+    POOL_RECYCLE = 3600              # Recycle connections every hour
+    POOL_PRE_PING = True             # Validate connections before use
+    
+    # Session Management
+    SESSION_EXPIRE_ON_COMMIT = False  # Keep objects accessible after commit
+    SESSION_AUTOFLUSH = True         # Auto-flush before queries
+    SESSION_AUTOCOMMIT = False       # Explicit transaction control
+    
+    # Connection Health
+    CONNECT_TIMEOUT = 10             # Initial connection timeout
+    QUERY_TIMEOUT = 30               # Query execution timeout
+    HEALTH_CHECK_INTERVAL = 5        # Health check frequency
+
 # Database instances  
 database = None
 engine = None
 async_engine = None
 SessionLocal = None
+AsyncSessionLocal = None
 supabase: Client = None
 
 async def init_database():
-    """Initialize database connections with network resilience"""
-    global database, engine, async_engine, SessionLocal, supabase
+    """Initialize enterprise-grade database connections with advanced pooling"""
+    global database, engine, async_engine, SessionLocal, AsyncSessionLocal, supabase
     
     # CHECK: If already initialized, return immediately (single connection pool pattern)
     if async_engine is not None and SessionLocal is not None:
@@ -127,9 +151,9 @@ async def init_database():
                 async_url,
                 pool_pre_ping=True,
                 pool_recycle=600,
-                pool_size=10,  # Increased pool size for concurrent requests
-                max_overflow=5,
-                pool_timeout=10,  # Shorter timeout for network issues
+                pool_size=25,  # Much higher pool size for concurrent requests
+                max_overflow=50,  # Higher overflow for peak loads
+                pool_timeout=30,  # Longer timeout to handle load
                 echo=False,
                 connect_args={
                     "command_timeout": 30,
@@ -158,9 +182,9 @@ async def init_database():
             async_url,
             pool_pre_ping=True,          # Enable pre-ping for connection health
             pool_recycle=3600,           # 1 hour recycle time for stability
-            pool_size=8,                 # Optimal pool size for concurrent requests
-            max_overflow=12,             # Higher overflow for peak loads
-            pool_timeout=20,             # 20 second timeout for getting connections
+            pool_size=25,                # Much higher pool size for concurrent requests
+            max_overflow=50,             # Higher overflow for peak loads
+            pool_timeout=30,             # 30 second timeout for getting connections
             pool_reset_on_return='commit', # Reset connections on return
             echo=False,
             connect_args={
@@ -332,29 +356,24 @@ async def get_db():
         # Create async session directly from SessionLocal
         session = SessionLocal()
         
-        # Test the session with a simple query to detect network issues early
+        # Skip health check to avoid transaction conflicts - rely on pool_pre_ping instead
+        database_resilience.record_success()
+        
+        # Direct session yield - let SQLAlchemy handle everything
         try:
-            # Increased timeout from 5s to 15s for more resilience
-            await asyncio.wait_for(session.execute(text("SELECT 1")), timeout=15)
-            database_resilience.record_success()
+            yield session
             
-            # SQLAlchemy AsyncSession automatically handles transactions
-            # No need to manually begin() - it starts automatically on first query
-            
-            try:
-                yield session
-                
-                # Commit any pending transaction if it exists and is active
-                if session.in_transaction():
-                    await session.commit()
-            except Exception as yield_error:
-                # If an error occurs during the yield, rollback and re-raise
-                if session and session.in_transaction():
-                    try:
-                        await session.rollback()
-                    except Exception:
-                        pass  # Ignore rollback errors
-                raise yield_error
+            # Only commit if there's an active transaction
+            if session.in_transaction():
+                await session.commit()
+        except Exception as yield_error:
+            # Always rollback on any error
+            if session and session.in_transaction():
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass  # Ignore rollback errors during cleanup
+            raise yield_error
             
         except asyncio.TimeoutError:
             logger.warning("DATABASE: Session timeout after 15s - network issues detected")

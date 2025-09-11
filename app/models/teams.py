@@ -292,6 +292,16 @@ SUBSCRIPTION_TIER_LIMITS = {
         "price_per_month": 499,
         "topup_discount": 0.2,  # 20% discount
         "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"]
+    },
+    # CRITICAL FIX: Add professional tier for existing users
+    "professional": {
+        "max_team_members": 5,
+        "monthly_profile_limit": 2000,
+        "monthly_email_limit": 800,
+        "monthly_posts_limit": 300,
+        "price_per_month": 499,
+        "topup_discount": 0.2,  # 20% discount
+        "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"]
     }
 }
 

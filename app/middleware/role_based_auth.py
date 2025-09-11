@@ -108,6 +108,7 @@ class RoleBasedAuthService:
             'free': 0,
             'standard': 1,
             'premium': 2,
+            'professional': 2,  # CRITICAL FIX: Same level as premium
             'enterprise': 3,
             'admin': 4,
             'super_admin': 5
@@ -201,6 +202,7 @@ class RoleBasedAuthService:
         feature_access = {
             "unlimited": ["all"],  # Admin access
             "professional": ["advanced_analytics", "bulk_export", "api_access"],
+            "premium": ["advanced_analytics", "bulk_export", "api_access"],  # CRITICAL FIX: Same as professional
             "standard": ["basic_analytics", "limited_export"],
             "free": ["basic_view"]
         }
@@ -222,7 +224,13 @@ class RoleBasedAuthService:
             "brand_free": "brand_standard",
             "brand_standard": "brand_premium", 
             "brand_premium": "brand_enterprise",
-            "brand_enterprise": "brand_enterprise"
+            "brand_enterprise": "brand_enterprise",
+            # CRITICAL FIX: Add professional tier mapping
+            "professional": "brand_enterprise",
+            "free": "standard",
+            "standard": "premium",
+            "premium": "enterprise",
+            "enterprise": "enterprise"
         }
         return tier_hierarchy.get(current_tier, "brand_premium")
     

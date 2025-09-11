@@ -57,46 +57,55 @@ class CDNImageService:
         """Set database session for this request"""
         self.db = db
     
-    async def get_profile_media_urls(self, profile_id: UUID) -> ProfileMediaResponse:
-        """Get CDN URLs for profile avatar and recent posts"""
+    async def get_profile_media_urls_with_session(self, profile_id: UUID, db_session) -> ProfileMediaResponse:
+        """Get CDN URLs for profile avatar and recent posts (with explicit session)"""
         try:
             logger.debug(f"[SEARCH] Getting media URLs for profile: {profile_id}")
             
-            # Get avatar URL
-            avatar_asset = await self._get_asset('profile_avatar', profile_id, 'avatar')
-            avatar_urls = self._build_cdn_urls(avatar_asset) if avatar_asset else None
+            # Temporarily set session for this request only
+            old_db = self.db
+            self.db = db_session
             
-            # Get recent post thumbnails (limit based on config)
-            post_assets = await self._get_recent_post_assets(profile_id, limit=self.max_posts_per_profile)
-            post_urls = []
-            
-            for asset in post_assets:
-                post_data = {
-                    'media_id': asset['media_id'],
-                    'cdn_url': asset.get('cdn_url_512'),  # FIXED: Use 512px only
-                    'available': asset.get('processing_status') == 'completed',
-                    'processing_status': asset.get('processing_status', 'unknown')
-                }
-                post_urls.append(post_data)
-            
-            # Check for pending jobs
-            pending_jobs = await self._count_pending_jobs(profile_id)
-            
-            # Calculate completion stats
-            total_assets = len(post_urls) + (1 if avatar_urls else 0)
-            completed_assets = len([p for p in post_urls if p['available']]) + (1 if avatar_urls else 0)
-            
-            response = ProfileMediaResponse(
-                avatar_url=avatar_urls['512'] if avatar_urls else None,  # FIXED: Single URL
-                posts=post_urls,
-                has_pending_jobs=pending_jobs > 0,
-                total_assets=total_assets,
-                completed_assets=completed_assets
-            )
-            
-            logger.debug(f"[SUCCESS] Retrieved {len(post_urls)} post assets, {pending_jobs} pending jobs")
-            return response
-            
+            try:
+                # Get avatar URL
+                avatar_asset = await self._get_asset('profile_avatar', profile_id, 'avatar')
+                avatar_urls = self._build_cdn_urls(avatar_asset) if avatar_asset else None
+                
+                # Get recent post thumbnails (limit based on config)
+                post_assets = await self._get_recent_post_assets(profile_id, limit=self.max_posts_per_profile)
+                post_urls = []
+                
+                for asset in post_assets:
+                    post_data = {
+                        'media_id': asset['media_id'],
+                        'cdn_url': asset.get('cdn_url_512'),  # FIXED: Use 512px only
+                        'available': asset.get('processing_status') == 'completed',
+                        'processing_status': asset.get('processing_status', 'unknown')
+                    }
+                    post_urls.append(post_data)
+                
+                # Check for pending jobs
+                pending_jobs = await self._count_pending_jobs(profile_id)
+                
+                # Calculate completion stats
+                total_assets = len(post_urls) + (1 if avatar_urls else 0)
+                completed_assets = len([p for p in post_urls if p['available']]) + (1 if avatar_urls else 0)
+                
+                response = ProfileMediaResponse(
+                    avatar_url=avatar_urls['512'] if avatar_urls else None,  # FIXED: Single URL
+                    posts=post_urls,
+                    has_pending_jobs=pending_jobs > 0,
+                    total_assets=total_assets,
+                    completed_assets=completed_assets
+                )
+                
+                logger.debug(f"[SUCCESS] Retrieved {len(post_urls)} post assets, {pending_jobs} pending jobs")
+                return response
+                
+            finally:
+                # Restore original session
+                self.db = old_db
+                
         except Exception as e:
             logger.error(f"[ERROR] Error getting profile media URLs: {e}")
             raise CDNServiceError(f"Failed to get media URLs: {e}")
@@ -248,17 +257,27 @@ class CDNImageService:
             
             logger.debug(f"[TARGET] Created job {job_id} for asset {asset['id']}")
             
-            # Trigger Celery task for background processing
+            # CRITICAL FIX: Process CDN job IMMEDIATELY instead of background Celery
+            logger.info(f"[IMMEDIATE] Processing CDN job {job_id} immediately for fast results")
+            try:
+                immediate_result = await self._process_cdn_job_immediately(job_id, source_url)
+                if immediate_result.get("success"):
+                    logger.info(f"[SUCCESS] Immediate CDN processing completed for job {job_id}")
+                else:
+                    logger.warning(f"[WARNING] Immediate CDN processing failed for job {job_id}: {immediate_result.get('error')}")
+            except Exception as immediate_error:
+                logger.warning(f"[WARNING] Immediate CDN processing failed for job {job_id}: {immediate_error}")
+                
+            # Fallback: Still trigger Celery task for retry if immediate processing failed
             try:
                 from app.workers.simple_cdn_worker import app as celery_app
                 celery_app.send_task(
                     'simple_cdn_worker.process_image_job',
                     args=[str(job_id)]
                 )
-                logger.info(f"[TRIGGER] Triggered CDN processing for job {job_id}")
+                logger.info(f"[TRIGGER] Triggered fallback CDN processing for job {job_id}")
             except Exception as celery_error:
-                logger.warning(f"[WARNING] Failed to trigger CDN processing for job {job_id}: {celery_error}")
-                # Job is still created in database, can be processed later
+                logger.warning(f"[WARNING] Failed to trigger fallback CDN processing for job {job_id}: {celery_error}")
             
             return asset['id']
             
@@ -608,6 +627,150 @@ class CDNImageService:
             return result.scalar() or 0
         except Exception:
             return -1
+    
+    async def _process_cdn_job_immediately(self, job_id: str, source_url: str) -> Dict[str, Any]:
+        """Process CDN job immediately for fast results"""
+        try:
+            from sqlalchemy import text
+            import httpx
+            import io
+            from app.core.config import settings
+            from app.infrastructure.r2_storage_client import R2StorageClient
+            from app.services.image_transcoder_service import ImageTranscoderService
+            
+            logger.info(f"[IMMEDIATE] Starting immediate CDN processing for job {job_id}")
+            
+            # Get job details from database
+            job_sql = text("""
+                SELECT j.*, a.source_id, a.media_id, a.source_type, a.source_url
+                FROM cdn_image_jobs j
+                JOIN cdn_image_assets a ON j.asset_id = a.id
+                WHERE j.id = :job_id
+            """)
+            
+            result = await self.db.execute(job_sql, {'job_id': job_id})
+            job = result.fetchone()
+            
+            if not job:
+                return {"success": False, "error": "Job not found"}
+            
+            # Update job status to processing
+            update_sql = text("""
+                UPDATE cdn_image_jobs 
+                SET status = 'processing', started_at = NOW()
+                WHERE id = :job_id
+            """)
+            await self.db.execute(update_sql, {'job_id': job_id})
+            await self.db.commit()
+            
+            # Download image from source URL
+            logger.info(f"[IMMEDIATE] Downloading image from: {source_url[:80]}...")
+            
+            timeout = httpx.Timeout(30.0, connect=10.0)  # 30s total, 10s connect
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(source_url)
+                if response.status_code != 200:
+                    raise Exception(f"Failed to download image: HTTP {response.status_code}")
+                
+                image_data = response.content
+                if len(image_data) == 0:
+                    raise Exception("Downloaded image is empty")
+                
+                logger.info(f"[IMMEDIATE] Downloaded {len(image_data)} bytes")
+            
+            # Initialize R2 and transcoder services
+            r2_client = R2StorageClient(
+                account_id=settings.CF_ACCOUNT_ID,
+                access_key=settings.R2_ACCESS_KEY_ID,
+                secret_key=settings.R2_SECRET_ACCESS_KEY,
+                bucket_name=settings.R2_BUCKET_NAME
+            )
+            transcoder = ImageTranscoderService(r2_client)
+            
+            # Process image to 512px WebP
+            logger.info(f"[IMMEDIATE] Processing image to 512px WebP...")
+            processed_images = await transcoder.process_image(
+                image_data, 
+                target_sizes=[512],
+                output_format='webp'
+            )
+            
+            if not processed_images or 512 not in processed_images:
+                raise Exception("Failed to process image to 512px")
+            
+            # Generate unique filename
+            from uuid import uuid4
+            unique_id = str(uuid4())[:8]
+            filename = f"{job.source_type}_{job.source_id}_{job.media_id}_{unique_id}.webp"
+            
+            # Upload to R2
+            logger.info(f"[IMMEDIATE] Uploading to R2: {filename}")
+            upload_result = await r2_client.upload_object(
+                filename,
+                processed_images[512],
+                content_type='image/webp'
+            )
+            
+            if not upload_result.get('success'):
+                raise Exception(f"Failed to upload to R2: {upload_result.get('error')}")
+            
+            cdn_url = f"https://cdn.following.ae/{filename}"
+            
+            # Update asset with CDN URL
+            asset_update_sql = text("""
+                UPDATE cdn_image_assets 
+                SET cdn_url_512 = :cdn_url,
+                    processing_status = 'completed',
+                    processed_at = NOW()
+                WHERE id = :asset_id
+            """)
+            await self.db.execute(asset_update_sql, {
+                'cdn_url': cdn_url,
+                'asset_id': job.asset_id
+            })
+            
+            # Update job status to completed
+            job_complete_sql = text("""
+                UPDATE cdn_image_jobs 
+                SET status = 'completed',
+                    completed_at = NOW(),
+                    result = :result
+                WHERE id = :job_id
+            """)
+            await self.db.execute(job_complete_sql, {
+                'job_id': job_id,
+                'result': {'cdn_url_512': cdn_url, 'processed_immediately': True}
+            })
+            
+            await self.db.commit()
+            
+            logger.info(f"[SUCCESS] Immediate CDN processing completed: {cdn_url}")
+            return {
+                "success": True,
+                "cdn_url_512": cdn_url,
+                "message": "Image processed immediately"
+            }
+            
+        except Exception as e:
+            # Mark job as failed
+            try:
+                fail_sql = text("""
+                    UPDATE cdn_image_jobs 
+                    SET status = 'failed',
+                        completed_at = NOW(),
+                        error = :error
+                    WHERE id = :job_id
+                """)
+                await self.db.execute(fail_sql, {
+                    'job_id': job_id,
+                    'error': str(e)
+                })
+                await self.db.commit()
+            except Exception:
+                pass
+            
+            logger.error(f"[ERROR] Immediate CDN processing failed for job {job_id}: {e}")
+            return {"success": False, "error": str(e)}
 
 
 class CDNServiceError(Exception):

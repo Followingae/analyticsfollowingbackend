@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from sqlalchemy import text
 import httpx
 import io
 from fastapi.staticfiles import StaticFiles
@@ -97,6 +98,17 @@ async def lifespan(app: FastAPI):
         r = redis.from_url(redis_url)
         r.ping()
         print("Redis connection successful - Background AI processing available")
+        
+        # CRITICAL AUTO-START: Start background workers automatically
+        print("CRITICAL: Starting background workers automatically...")
+        from app.services.worker_manager import worker_manager
+        
+        worker_startup_success = worker_manager.start_all_workers()
+        if worker_startup_success:
+            print("SUCCESS: All background workers started automatically")
+        else:
+            print("WARNING: Some background workers failed to start")
+        
     except Exception as e:
         print(f"WARNING: Redis not available: {e}")
         print("Background AI processing will not be available")
@@ -106,6 +118,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     print("Shutting down Analytics Following Backend...")
     try:
+        # Stop background workers first
+        print("Stopping background workers...")
+        from app.services.worker_manager import worker_manager
+        worker_manager.stop_all_workers()
+        
         await close_database()
         await comprehensive_service.close_pool()
     except Exception as e:
@@ -345,7 +362,7 @@ from app.core.config import settings
 bulletproof_logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
-async def _trigger_background_processing_if_needed(profile, username: str) -> dict:
+async def _trigger_background_processing_if_needed(profile, username: str, db) -> dict:
     """Trigger AI analysis and CDN processing for existing profiles that need it"""
     try:
         processing_triggered = {"ai_analysis": False, "cdn_processing": False}
@@ -360,23 +377,29 @@ async def _trigger_background_processing_if_needed(profile, username: str) -> di
         needs_cdn_processing = existing_cdn_assets == 0
         
         if needs_ai_analysis:
-            logger.info(f"[SEARCH] BACKGROUND: Profile {username} needs AI analysis")
+            logger.info(f"[CRITICAL] BACKGROUND: Profile {username} NEEDS AI analysis - TRIGGERING NOW")
             try:
-                from app.services.ai_background_task_manager import AIBackgroundTaskManager
-                ai_task_manager = AIBackgroundTaskManager()
+                # DIRECT CELERY TASK TRIGGERING - NO DELAYS, NO FAILURES
+                from app.workers.ai_background_worker import celery_app
+                import uuid
                 
-                task_result = ai_task_manager.schedule_comprehensive_profile_analysis(
-                    profile_id=str(profile.id),
-                    profile_username=username,
-                    comprehensive_analysis=True
+                task_id = str(uuid.uuid4())
+                logger.info(f"[AI] FORCING AI analysis task for {username} with task_id: {task_id}")
+                
+                task_result = celery_app.send_task(
+                    'ai_worker.analyze_profile_posts',
+                    args=[str(profile.id), username],
+                    task_id=task_id
                 )
                 
-                if task_result.get("success"):
-                    processing_triggered["ai_analysis"] = True
-                    logger.info(f"[SUCCESS] BACKGROUND: AI analysis scheduled for {username}")
+                processing_triggered["ai_analysis"] = True
+                processing_triggered["ai_task_id"] = task_id
+                logger.error(f"[SUCCESS] FORCED AI ANALYSIS TASK SENT! Task ID: {task_id} for {username}")
                 
             except Exception as e:
-                logger.error(f"[ERROR] BACKGROUND: AI analysis failed for {username}: {e}")
+                logger.error(f"[CRITICAL-ERROR] FAILED TO TRIGGER AI ANALYSIS for {username}: {e}")
+                import traceback
+                traceback.print_exc()
         
         if needs_cdn_processing:
             logger.info(f"[SEARCH] BACKGROUND: Profile {username} needs CDN processing")
@@ -584,7 +607,7 @@ async def bulletproof_creator_search(
                     "content_categories_found": len(existing_profile.ai_top_10_categories) if existing_profile.ai_top_10_categories else 0
                 },
                 # CRITICAL: Trigger AI analysis for existing profiles that need it
-                "ai_analysis_triggered": await _trigger_background_processing_if_needed(existing_profile, username),
+                "ai_analysis_triggered": await _trigger_background_processing_if_needed(existing_profile, username, db),
                 "message": "Complete profile data loaded from database",
                 "data_source": "database_complete",
                 "cached": True
@@ -629,26 +652,25 @@ async def bulletproof_creator_search(
                 bulletproof_logger.info(f"BULLETPROOF: Starting background AI analysis for {username}")
                 
                 try:
-                    from app.services.ai_background_task_manager import AIBackgroundTaskManager
-                    ai_task_manager = AIBackgroundTaskManager()
+                    # DIRECT CELERY TASK TRIGGERING - NO DELAYS, NO FAILURES
+                    from app.workers.ai_background_worker import celery_app
+                    import uuid
                     
-                    # Schedule COMPREHENSIVE AI analysis with all 10 models
-                    task_result = ai_task_manager.schedule_comprehensive_profile_analysis(
-                        profile_id=str(profile.id),
-                        profile_username=username,
-                        comprehensive_analysis=True  # Enable all 10 AI models
+                    task_id = str(uuid.uuid4())
+                    logger.info(f"[AI] FORCING AI analysis task for NEW PROFILE {username} with task_id: {task_id}")
+                    
+                    task_result = celery_app.send_task(
+                        'ai_worker.analyze_profile_posts',
+                        args=[str(profile.id), username],
+                        task_id=task_id
                     )
                     
-                    if task_result.get("success"):
-                        logger.info(f"[SUCCESS] STEP 4 RESULT: AI analysis queued for background processing (Task ID: {task_result.get('task_id', 'N/A')})")
-                        bulletproof_logger.info(f"BULLETPROOF: AI analysis task scheduled for {username}: {task_result.get('task_id')}")
-                    else:
-                        logger.warning(f"[WARNING] STEP 4 RESULT: AI analysis scheduling failed: {task_result.get('error', 'Unknown error')}")
-                        bulletproof_logger.warning(f"BULLETPROOF: AI analysis failed to schedule for {username}: {task_result.get('error')}")
-                        
+                    logger.error(f"[SUCCESS] FORCED AI ANALYSIS TASK SENT FOR NEW PROFILE! Task ID: {task_id} for {username}")
+                    bulletproof_logger.info(f"BULLETPROOF: DIRECT AI analysis task triggered for {username}: {task_id}")
+                    
                 except Exception as ai_error:
-                    logger.error(f"[ERROR] STEP 4 RESULT: AI analysis error: {ai_error}")
-                    bulletproof_logger.error(f"BULLETPROOF: AI analysis error for {username}: {ai_error}")
+                    logger.error(f"[CRITICAL] FAILED to trigger AI analysis for NEW PROFILE {username}: {ai_error}")
+                    bulletproof_logger.error(f"BULLETPROOF: AI analysis trigger FAILED for {username}: {ai_error}")
                     # Don't fail the entire request if AI fails
             else:
                 print(f"⏩ STEP 4: AI analysis skipped (profile not new)")
@@ -1401,6 +1423,273 @@ async def database_health_check():
 
 
 
+# CRITICAL FIX: Frontend Instagram Profile Endpoint with Stage 1/Stage 2 Processing
+@app.get("/api/v1/instagram/profile/{username}")
+async def instagram_profile_endpoint(
+    username: str,
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """
+    Frontend Instagram Profile Endpoint - Simplified Analytics
+    Returns all available data immediately - no staging system
+    """
+    try:
+        from sqlalchemy import select, text
+        from app.database.unified_models import Profile, Post
+        
+        logger.info(f"[INSTAGRAM] Profile request for {username}")
+        bulletproof_logger.info(f"INSTAGRAM: Profile endpoint for {username}")
+        
+        # Get profile from database
+        profile_query = select(Profile).where(Profile.username == username)
+        profile_result = await db.execute(profile_query)
+        profile = profile_result.scalar_one_or_none()
+        
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        
+        # Check if AI analysis is available
+        has_ai_analysis = profile.ai_profile_analyzed_at is not None
+        
+        # Get CDN URLs for profile picture
+        profile_cdn_query = text("""
+            SELECT cdn_url_512 
+            FROM cdn_image_assets 
+            WHERE source_id = :profile_id 
+            AND source_type = 'instagram_profile'
+            AND cdn_url_512 IS NOT NULL
+            LIMIT 1
+        """)
+        profile_cdn_result = await db.execute(profile_cdn_query, {'profile_id': str(profile.id)})
+        profile_cdn_row = profile_cdn_result.fetchone()
+        cdn_url_512 = profile_cdn_row[0] if profile_cdn_row else None
+        
+        # Build simplified response - show all available data
+        response = {
+            "success": True,
+            # Basic profile data
+            "username": profile.username,
+            "full_name": profile.full_name,
+            "biography": profile.biography,
+            "is_private": profile.is_private,
+            "is_verified": profile.is_verified,
+            "external_url": profile.external_url,
+            "profile_pic_url": cdn_url_512,  # Only use CDN URLs
+            "profile_pic_url_hd": cdn_url_512,  # Only use CDN URLs
+            "cdn_url_512": cdn_url_512,
+            
+            # Metrics
+            "followers_count": profile.followers_count,
+            "following_count": profile.following_count,
+            "posts_count": profile.posts_count,
+            
+            # Analytics
+            "engagement_rate": profile.engagement_rate,
+            "avg_likes": getattr(profile, 'avg_likes', None),
+            "avg_comments": getattr(profile, 'avg_comments', None),
+            
+            # AI Analysis (if available)
+            "ai_analysis": {
+                "available": has_ai_analysis,
+                "primary_content_type": profile.ai_primary_content_type,
+                "content_distribution": profile.ai_content_distribution,
+                "avg_sentiment_score": profile.ai_avg_sentiment_score,
+                "language_distribution": profile.ai_language_distribution,
+                "content_quality_score": profile.ai_content_quality_score,
+                "profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None
+            },
+            
+            # Unlock status
+            "is_unlocked": True,
+            
+            # Metadata
+            "last_refreshed": profile.last_refreshed.isoformat() if profile.last_refreshed else None,
+            "created_at": profile.created_at.isoformat() if profile.created_at else None,
+            "updated_at": profile.updated_at.isoformat() if profile.updated_at else None
+        }
+        
+        # CRITICAL FIX: Trigger background AI and CDN processing if needed
+        if not has_ai_analysis:
+            logger.info(f"[INSTAGRAM] Profile {username} needs AI analysis - triggering background processing")
+            try:
+                processing_result = await _trigger_background_processing_if_needed(profile, username, db)
+                response["processing_triggered"] = processing_result
+                logger.info(f"[INSTAGRAM] Background processing triggered: {processing_result}")
+            except Exception as e:
+                logger.warning(f"[INSTAGRAM] Background processing trigger failed: {e}")
+                response["processing_triggered"] = {"ai_analysis": False, "cdn_processing": False}
+        
+        logger.info(f"[INSTAGRAM] Response for {username}: ai_available={has_ai_analysis}, cdn_available={bool(cdn_url_512)}")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[INSTAGRAM] Error for {username}: {e}")
+        bulletproof_logger.error(f"INSTAGRAM: Error for {username}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get profile: {str(e)}")
+
+@app.get("/api/v1/instagram/profile/{username}/posts")
+async def instagram_profile_posts(
+    username: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(12, ge=1, le=50),
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """Get posts for Instagram profile with CDN URLs and AI analysis"""
+    try:
+        from sqlalchemy import select, text
+        from app.database.unified_models import Profile, Post
+        
+        logger.info(f"[INSTAGRAM] Posts request for {username}, page={page}")
+        
+        # Get profile
+        profile_query = select(Profile).where(Profile.username == username)
+        profile_result = await db.execute(profile_query)
+        profile = profile_result.scalar_one_or_none()
+        
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        
+        # Get posts with pagination
+        offset = (page - 1) * page_size
+        posts_query = select(Post).where(
+            Post.profile_id == profile.id
+        ).order_by(Post.created_at.desc()).offset(offset).limit(page_size)
+        
+        posts_result = await db.execute(posts_query)
+        posts = posts_result.scalars().all()
+        
+        # Get CDN URLs for all posts in one query
+        posts_cdn_query = text("""
+            SELECT media_id, cdn_url_512 
+            FROM cdn_image_assets 
+            WHERE source_id = :profile_id 
+            AND source_type = 'post_thumbnail'
+            AND cdn_url_512 IS NOT NULL
+        """)
+        posts_cdn_result = await db.execute(posts_cdn_query, {'profile_id': str(profile.id)})
+        posts_cdn_urls = {row[0]: row[1] for row in posts_cdn_result.fetchall()}
+        
+        # Build posts response
+        posts_data = []
+        for post in posts:
+            # Get CDN URL for this specific post
+            post_cdn_url = posts_cdn_urls.get(post.instagram_post_id)
+            
+            posts_data.append({
+                "id": post.instagram_post_id,
+                "shortcode": post.shortcode,
+                "caption": post.caption,
+                "likes_count": post.likes_count,
+                "comments_count": post.comments_count,
+                "engagement_rate": post.engagement_rate,
+                "display_url": post_cdn_url or post.display_url,  # CDN first, fallback to Instagram
+                "cdn_thumbnail_url": post_cdn_url,  # Actual CDN URL
+                "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
+                "is_video": post.is_video,
+                "ai_analysis": {
+                    "content_category": post.ai_content_category,
+                    "category_confidence": post.ai_category_confidence,
+                    "sentiment": post.ai_sentiment,
+                    "sentiment_score": post.ai_sentiment_score,
+                    "sentiment_confidence": post.ai_sentiment_confidence,
+                    "language_code": post.ai_language_code,
+                    "language_confidence": post.ai_language_confidence,
+                    "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None
+                }
+            })
+        
+        # Get total count for pagination
+        total_query = select(Post.id).where(Post.profile_id == profile.id)
+        total_result = await db.execute(total_query)
+        total_count = len(total_result.fetchall())
+        
+        return {
+            "success": True,
+            "username": username,
+            "posts": posts_data,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total_count,
+                "has_next": offset + page_size < total_count
+            },
+            "message": f"Retrieved {len(posts_data)} posts for {username}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[INSTAGRAM] Posts error for {username}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get posts: {str(e)}")
+
+# CRITICAL FIX: Add AI Verification endpoints that frontend expects
+@app.get("/api/v1/ai/verify")
+async def verify_ai_system_status():
+    """AI System Verification - Health check for AI analysis system"""
+    try:
+        from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
+        
+        system_health = bulletproof_content_intelligence.get_system_health()
+        
+        return {
+            "success": True,
+            "ai_system_status": "healthy" if system_health.get("overall_health", 0) > 0.8 else "degraded",
+            "models_loaded": system_health.get("models_loaded", 0),
+            "system_health": system_health,
+            "message": "AI verification system operational"
+        }
+    except Exception as e:
+        logger.error(f"AI verification failed: {e}")
+        return {
+            "success": False,
+            "ai_system_status": "unhealthy",
+            "error": str(e),
+            "message": "AI verification system unavailable"
+        }
+
+@app.get("/api/v1/instagram/profile/{username}/ai-status")
+async def instagram_profile_ai_status(
+    username: str,
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """Check AI analysis status for specific Instagram profile"""
+    try:
+        from sqlalchemy import select, text
+        from app.database.unified_models import Profile
+        
+        # Get profile
+        profile_query = select(Profile).where(Profile.username == username)
+        profile_result = await db.execute(profile_query)
+        profile = profile_result.scalar_one_or_none()
+        
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        
+        # Check AI analysis status
+        has_ai_analysis = profile.ai_profile_analyzed_at is not None
+        
+        return {
+            "success": True,
+            "username": username,
+            "ai_analysis_completed": has_ai_analysis,
+            "ai_analysis_date": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+            "primary_content_type": profile.ai_primary_content_type,
+            "content_quality_score": profile.ai_content_quality_score,
+            "analysis_available": has_ai_analysis,
+            "message": "AI analysis completed" if has_ai_analysis else "AI analysis pending"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"AI status check failed for {username}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to check AI status: {str(e)}")
+
 @app.get("/api/test")
 async def test_endpoint():
     """Test endpoint"""
@@ -1422,6 +1711,47 @@ async def api_info():
         "backend_port": 8000
     }
 
+
+# CRITICAL FIX: Auto-start background workers on application launch
+@app.on_event("startup")
+async def startup_event():
+    """Start critical background workers automatically"""
+    import subprocess
+    import os
+    import threading
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    def start_celery_worker():
+        """Start Celery AI worker in background thread"""
+        try:
+            logger.info("🚀 STARTUP: Starting Celery AI worker automatically...")
+            
+            # Start Celery worker for AI processing
+            celery_cmd = [
+                "py", "-m", "celery", "-A", "app.workers.ai_background_worker", 
+                "worker", "--loglevel=info", "--pool=solo", "--concurrency=1"
+            ]
+            
+            # Start in background
+            subprocess.Popen(
+                celery_cmd,
+                cwd=os.getcwd(),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            
+            logger.info("✅ STARTUP: Celery AI worker started successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ STARTUP: Failed to start Celery worker: {e}")
+    
+    # Start Celery worker in background thread to avoid blocking startup
+    worker_thread = threading.Thread(target=start_celery_worker, daemon=True)
+    worker_thread.start()
+    
+    logger.info("🎯 STARTUP: Application startup complete with background workers")
 
 if __name__ == "__main__":
     uvicorn.run(
