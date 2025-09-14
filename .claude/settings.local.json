@@ -5,7 +5,17 @@
       "Bash(/c/Users/user/AppData/Local/Programs/Python/Python312/python.exe -c \"\nimport redis\nr = redis.Redis(host=''localhost'', port=6379, db=0)\nprint(''Redis queue length before:'', r.llen(''celery''))\nr.delete(''celery'')  # Clear the queue\nprint(''Redis queue length after:'', r.llen(''celery''))\nprint(''Queue cleared!'')\n\")",
       "Bash(/c/Users/user/AppData/Local/Programs/Python/Python312/python.exe:*)",
       "Bash(pkill:*)",
-      "mcp__playwright__browser_press_key"
+      "mcp__playwright__browser_press_key",
+      "Bash(where npx)",
+      "mcp__playwright__browser_navigate",
+      "mcp__playwright__browser_wait_for",
+      "mcp__playwright__browser_type",
+      "mcp__playwright__browser_click",
+      "mcp__supabase__execute_sql",
+      "mcp__playwright__browser_console_messages",
+      "mcp__playwright__browser_fill_form",
+      "Bash(curl:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": [],
