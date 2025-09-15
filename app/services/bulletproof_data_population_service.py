@@ -3,7 +3,7 @@ Bulletproof Data Population Service
 Industry-Standard Retry Mechanisms for Complete Creator Data Population
 
 CORE PRINCIPLE: On initial search, we MUST populate ALL tables with ALL data
-- Decodo API data + ALL 10 AI models = COMPLETE profile
+- Apify API data + ALL 10 AI models = COMPLETE profile
 - If anything fails, retry seamlessly until SUCCESS
 - EXISTING searches return EVERYTHING from database (no partial data)
 """
@@ -24,7 +24,7 @@ from app.database.unified_models import Profile, Post
 # AI and Services
 from app.services.ai.comprehensive_ai_manager import comprehensive_ai_manager, AIModelType
 from app.services.ai.comprehensive_ai_models_part2 import AdvancedAIModelImplementations
-from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient
+from app.scrapers.enhanced_apify_client import EnhancedApifyClient
 from app.core.config import settings
 from app.services.redis_cache_service import redis_cache
 
@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 class DataPopulationStatus(Enum):
     """Status tracking for complete data population"""
     PENDING = "pending"
-    DECODO_IN_PROGRESS = "decodo_in_progress" 
-    DECODO_COMPLETED = "decodo_completed"
+    APIFY_IN_PROGRESS = "apify_in_progress" 
+    APIFY_COMPLETED = "apify_completed"
     AI_IN_PROGRESS = "ai_in_progress"
     AI_COMPLETED = "ai_completed"
     COMPLETED = "completed"
@@ -59,7 +59,7 @@ class BulletproofDataPopulationService:
         
         Process:
         1. Check if data exists and is complete
-        2. If not, use Decodo + ALL AI models with retry mechanisms
+        2. If not, use Apify + ALL AI models with retry mechanisms
         3. Return EVERYTHING from database only after COMPLETE population
         
         Args:
@@ -90,7 +90,7 @@ class BulletproofDataPopulationService:
                 'username': username,
                 'status': DataPopulationStatus.PENDING,
                 'started_at': start_time,
-                'decodo_status': 'pending',
+                'apify_status': 'pending',
                 'ai_models_status': {model.value: 'pending' for model in AIModelType},
                 'retry_attempts': 0,
                 'component_retries': {},
@@ -132,7 +132,7 @@ class BulletproofDataPopulationService:
     async def _populate_with_retry_mechanisms(self, job_status: Dict[str, Any]) -> Dict[str, Any]:
         """
         Core population logic with bulletproof retry mechanisms
-        Ensures BOTH Decodo AND all AI models succeed
+        Ensures BOTH Apify AND all AI models succeed
         """
         username = job_status['username']
         
@@ -140,16 +140,16 @@ class BulletproofDataPopulationService:
             try:
                 logger.info(f"🔄 POPULATION ATTEMPT {overall_attempt + 1}/{self.max_overall_retries} for @{username}")
                 
-                # Phase 1: DECODO DATA POPULATION (with retries)
-                decodo_result = await self._populate_decodo_with_retry(job_status)
-                if not decodo_result['success']:
-                    raise Exception(f"Decodo population failed: {decodo_result['error']}")
+                # Phase 1: APIFY DATA POPULATION (with retries)
+                apify_result = await self._populate_apify_with_retry(job_status)
+                if not apify_result['success']:
+                    raise Exception(f"Apify population failed: {apify_result['error']}")
                 
-                profile_id = decodo_result['profile_id']
-                profile_data = decodo_result['profile_data']
-                posts_data = decodo_result['posts_data']
+                profile_id = apify_result['profile_id']
+                profile_data = apify_result['profile_data']
+                posts_data = apify_result['posts_data']
                 
-                logger.info(f"✅ DECODO SUCCESS: @{username} profile and {len(posts_data)} posts populated")
+                logger.info(f"✅ APIFY SUCCESS: @{username} profile and {len(posts_data)} posts populated")
                 
                 # Phase 2: AI MODELS POPULATION (with retries for each model)
                 ai_result = await self._populate_ai_models_with_retry(
@@ -207,23 +207,23 @@ class BulletproofDataPopulationService:
         # Should never reach here
         return {'success': False, 'error': 'Unexpected retry loop exit'}
     
-    async def _populate_decodo_with_retry(self, job_status: Dict[str, Any]) -> Dict[str, Any]:
+    async def _populate_apify_with_retry(self, job_status: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Populate Decodo data with bulletproof retry mechanism
-        Uses existing perfect Decodo client with enhanced retry logic
+        Populate Apify data with bulletproof retry mechanism
+        Uses existing perfect Apify client with enhanced retry logic
         """
         username = job_status['username']
         
         for attempt in range(self.max_component_retries):
             try:
-                logger.info(f"🔄 DECODO Attempt {attempt + 1}/{self.max_component_retries} for @{username}")
+                logger.info(f"🔄 APIFY Attempt {attempt + 1}/{self.max_component_retries} for @{username}")
                 
-                job_status['decodo_status'] = 'in_progress'
+                job_status['apify_status'] = 'in_progress'
                 
-                # Use existing PERFECT Decodo client with proper initialization
-                async with EnhancedDecodoClient(settings.SMARTPROXY_USERNAME, settings.SMARTPROXY_PASSWORD) as decodo_client:
+                # Use existing PERFECT Apify client with proper initialization
+                async with EnhancedApifyClient(settings.SMARTPROXY_USERNAME, settings.SMARTPROXY_PASSWORD) as apify_client:
                     # First get comprehensive profile data
-                    profile_result = await decodo_client.get_instagram_profile_comprehensive(username)
+                    profile_result = await apify_client.get_instagram_profile_comprehensive(username)
                     
                     if not profile_result or not profile_result.get('success'):
                         raise Exception(f"Profile fetch failed: {profile_result.get('error', 'Unknown error')}")
@@ -231,7 +231,7 @@ class BulletproofDataPopulationService:
                     profile_data = profile_result['profile_data']
                     
                     # Then get posts data  
-                    posts_result = await decodo_client.get_instagram_posts_only(username)
+                    posts_result = await apify_client.get_instagram_posts_only(username)
                     
                     if not posts_result or not posts_result.get('success'):
                         raise Exception(f"Posts fetch failed: {posts_result.get('error', 'Unknown error')}")
@@ -248,10 +248,10 @@ class BulletproofDataPopulationService:
                     
                     await session.commit()
                 
-                job_status['decodo_status'] = 'completed'
-                job_status['completed_components'].append('decodo')
+                job_status['apify_status'] = 'completed'
+                job_status['completed_components'].append('apify')
                 
-                logger.info(f"✅ DECODO SUCCESS: @{username} profile ({profile_id}) and {len(posts_data)} posts stored")
+                logger.info(f"✅ APIFY SUCCESS: @{username} profile ({profile_id}) and {len(posts_data)} posts stored")
                 
                 return {
                     'success': True,
@@ -263,13 +263,13 @@ class BulletproofDataPopulationService:
                 
             except Exception as e:
                 error_msg = str(e)
-                logger.warning(f"⚠️ DECODO attempt {attempt + 1} failed: {error_msg}")
+                logger.warning(f"⚠️ APIFY attempt {attempt + 1} failed: {error_msg}")
                 
                 # Track component retry
-                if 'decodo' not in job_status['component_retries']:
-                    job_status['component_retries']['decodo'] = []
+                if 'apify' not in job_status['component_retries']:
+                    job_status['component_retries']['apify'] = []
                 
-                job_status['component_retries']['decodo'].append({
+                job_status['component_retries']['apify'].append({
                     'attempt': attempt + 1,
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'error': error_msg
@@ -277,19 +277,19 @@ class BulletproofDataPopulationService:
                 
                 # If this is the last attempt, fail
                 if attempt == self.max_component_retries - 1:
-                    job_status['decodo_status'] = 'failed'
+                    job_status['apify_status'] = 'failed'
                     return {
                         'success': False,
-                        'error': f"Decodo failed after {self.max_component_retries} attempts: {error_msg}",
+                        'error': f"Apify failed after {self.max_component_retries} attempts: {error_msg}",
                         'attempts': attempt + 1
                     }
                 
                 # Wait before retry
                 wait_time = (self.backoff_base ** attempt) + (await self._get_jitter())
-                logger.info(f"⏳ Retrying Decodo in {wait_time:.1f}s...")
+                logger.info(f"⏳ Retrying Apify in {wait_time:.1f}s...")
                 await asyncio.sleep(wait_time)
         
-        return {'success': False, 'error': 'Unexpected Decodo retry loop exit'}
+        return {'success': False, 'error': 'Unexpected Apify retry loop exit'}
     
     async def _populate_ai_models_with_retry(self, profile_id: str, profile_data: dict, 
                                            posts_data: List[dict], job_status: Dict[str, Any]) -> Dict[str, Any]:
@@ -660,7 +660,7 @@ class BulletproofDataPopulationService:
     
     # Helper methods for database operations
     async def _store_profile_data(self, session: AsyncSession, profile_data: dict) -> str:
-        """Store profile data in database with complete Decodo integration"""
+        """Store profile data in database with complete Apify integration"""
         from app.database.unified_models import Profile
         from sqlalchemy import select
         from sqlalchemy.dialects.postgresql import insert
@@ -682,7 +682,7 @@ class BulletproofDataPopulationService:
                 logger.info(f"📝 PROFILE UPDATED: @{profile_data['username']} ({existing_profile.id})")
                 return str(existing_profile.id)
             else:
-                # Create new profile with all Decodo data
+                # Create new profile with all Apify data
                 new_profile = Profile(
                     username=profile_data['username'],
                     instagram_user_id=profile_data.get('instagram_user_id'),
@@ -708,7 +708,7 @@ class BulletproofDataPopulationService:
                     business_email=profile_data.get('business_email'),
                     business_address=profile_data.get('business_address'),
                     
-                    # Additional Decodo fields
+                    # Additional Apify fields
                     pronouns=profile_data.get('pronouns'),
                     highlight_reel_count=profile_data.get('highlight_reel_count', 0),
                     
@@ -734,7 +734,7 @@ class BulletproofDataPopulationService:
             raise
     
     async def _store_posts_data(self, session: AsyncSession, posts_data: List[dict], profile_id: str):
-        """Store posts data in database with complete Decodo integration"""
+        """Store posts data in database with complete Apify integration"""
         from app.database.unified_models import Post
         from sqlalchemy.dialects.postgresql import insert
         
@@ -743,7 +743,7 @@ class BulletproofDataPopulationService:
             
             for post_data in posts_data:
                 try:
-                    # Create comprehensive post record with ALL Decodo fields
+                    # Create comprehensive post record with ALL Apify fields
                     post = Post(
                         profile_id=profile_id,
                         
@@ -781,7 +781,7 @@ class BulletproofDataPopulationService:
                         typename=post_data.get('typename', post_data.get('__typename')),
                         media_type=post_data.get('media_type'),
                         
-                        # Advanced Decodo fields
+                        # Advanced Apify fields
                         accessibility_caption=post_data.get('accessibility_caption'),
                         edge_liked_by_count=post_data.get('edge_liked_by', {}).get('count', 0),
                         edge_media_to_comment_count=post_data.get('edge_media_to_comment', {}).get('count', 0),

@@ -150,7 +150,7 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
             # Prepare COMPREHENSIVE posts data for advanced analysis
             posts_data = []
             for post in posts:
-                # ENHANCED: Extract more data from Decodo raw data for comprehensive analysis
+                # ENHANCED: Extract more data from Apify raw data for comprehensive analysis
                 raw_data = post.raw_data or {}
                 
                 post_data = {

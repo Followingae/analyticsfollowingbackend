@@ -1,7 +1,7 @@
 """
 FINAL UNIFIED DATABASE MODELS - Complete Instagram Analytics Platform
-Contains ALL tables required for the platform with real Decodo integration
-Includes campaigns, all Decodo datapoints, and proper relationships
+Contains ALL tables required for the platform with real Apify integration
+Includes campaigns, all Apify datapoints, and proper relationships
 """
 from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, Text, Float, ARRAY, ForeignKey, Date, Index, CheckConstraint, UniqueConstraint, text
 from sqlalchemy.ext.declarative import declarative_base
@@ -276,7 +276,7 @@ class UserFavorite(Base):
 
 
 # =============================================================================
-# INSTAGRAM DATA TABLES (From Decodo API)
+# INSTAGRAM DATA TABLES (From Apify API)
 # =============================================================================
 
 class Profile(Base):
@@ -359,7 +359,7 @@ class Profile(Base):
 
 
 class Post(Base):
-    """COMPREHENSIVE Instagram post with ALL Decodo post datapoints"""
+    """COMPREHENSIVE Instagram post with ALL Apify post datapoints"""
     __tablename__ = "posts"
     
     # Primary identification
@@ -461,11 +461,11 @@ class Post(Base):
 
 
 # =============================================================================
-# ANALYTICS & INSIGHTS TABLES (Enhanced from Decodo data)
+# ANALYTICS & INSIGHTS TABLES (Enhanced from Apify data)
 # =============================================================================
 
 class AudienceDemographics(Base):
-    """Enhanced audience demographics (computed from Decodo follower data)"""
+    """Enhanced audience demographics (computed from Apify follower data)"""
     __tablename__ = "audience_demographics"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
@@ -480,7 +480,7 @@ class AudienceDemographics(Base):
     sample_size = Column(Integer)  # Number of followers analyzed
     confidence_score = Column(Float)  # Analysis confidence
     last_sampled = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    analysis_method = Column(Text)  # 'decodo_enhanced', 'manual', 'estimated'
+    analysis_method = Column(Text)  # 'apify_enhanced', 'manual', 'estimated'
     
     # Relationship
     profile = relationship("Profile", back_populates="audience_demographics")
@@ -491,7 +491,7 @@ class AudienceDemographics(Base):
 
 
 class CreatorMetadata(Base):
-    """Enhanced creator metadata (extracted from Decodo profile data)"""
+    """Enhanced creator metadata (extracted from Apify profile data)"""
     __tablename__ = "creator_metadata"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
@@ -549,7 +549,7 @@ class CommentSentiment(Base):
 
 
 class RelatedProfile(Base):
-    """Related/similar profiles (from Decodo suggestions)"""
+    """Related/similar profiles (from Apify suggestions)"""
     __tablename__ = "related_profiles"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
@@ -569,7 +569,7 @@ class RelatedProfile(Base):
     
     # Discovery details
     discovered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    source = Column(String(50))  # 'decodo', 'manual', 'algorithm'
+    source = Column(String(50))  # 'apify', 'manual', 'algorithm'
     
     # Relationship
     profile = relationship("Profile", back_populates="related_profiles")

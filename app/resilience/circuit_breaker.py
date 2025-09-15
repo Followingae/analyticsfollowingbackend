@@ -310,9 +310,9 @@ class CircuitBreakerManager:
     
     def _initialize_default_breakers(self):
         """Initialize circuit breakers for known services"""
-        # Decodo API circuit breaker (external service)
-        self.circuit_breakers["decodo_api"] = CircuitBreaker(
-            name="decodo_api",
+        # Apify API circuit breaker (external service)
+        self.circuit_breakers["apify_api"] = CircuitBreaker(
+            name="apify_api",
             failure_threshold=3,
             failure_rate_threshold=0.6,
             recovery_timeout=120,  # 2 minutes

@@ -7,9 +7,8 @@ load_dotenv()
 
 
 class Settings(BaseSettings):
-    # SmartProxy credentials
-    SMARTPROXY_USERNAME: str = os.getenv("SMARTPROXY_USERNAME", "")
-    SMARTPROXY_PASSWORD: str = os.getenv("SMARTPROXY_PASSWORD", "")
+    # Apify credentials (SmartProxy removed)
+    # Legacy SmartProxy credentials removed - now using Apify exclusively
     
     # API Configuration
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
@@ -23,7 +22,10 @@ class Settings(BaseSettings):
     # Instagram settings
     INSTAGRAM_POST_ANALYSIS_LIMIT: int = int(os.getenv("INSTAGRAM_POST_ANALYSIS_LIMIT", "50"))
     INSTAGRAM_FOLLOWER_SAMPLE_SIZE: int = int(os.getenv("INSTAGRAM_FOLLOWER_SAMPLE_SIZE", "1000"))
-    
+
+    # Apify Integration
+    APIFY_API_TOKEN: str = os.getenv("APIFY_API_TOKEN", "")
+
     # Redis (optional)
     REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
     
@@ -37,9 +39,9 @@ class Settings(BaseSettings):
     # Authentication Configuration
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "change-this-to-a-secure-secret-key-in-production")
     
-    # SmartProxy/Decodo API endpoints
-    SMARTPROXY_BASE_URL: str = "https://scraper-api.decodo.com/v2"
-    SMARTPROXY_INSTAGRAM_ENDPOINT: str = f"{SMARTPROXY_BASE_URL}/scrape"
+    # Apify API endpoints
+    APIFY_BASE_URL: str = "https://api.apify.com/v2"
+    APIFY_INSTAGRAM_ACTOR: str = "apify/instagram-scraper"
     
     # AI/ML Configuration
     AI_MODELS_CACHE_DIR: str = os.getenv("AI_MODELS_CACHE_DIR", "./ai_models")

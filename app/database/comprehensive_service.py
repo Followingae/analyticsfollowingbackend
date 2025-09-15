@@ -1,6 +1,6 @@
 """
 COMPREHENSIVE DATABASE SERVICE
-This service handles ALL Decodo datapoints and ensures complete data storage
+This service handles ALL Apify datapoints and ensures complete data storage
 Replaces existing services with unified, comprehensive approach
 """
 import json
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 class ComprehensiveDataService:
-    """Unified service for complete Decodo data storage and retrieval"""
+    """Unified service for complete Apify data storage and retrieval"""
     
     def __init__(self):
         self.pool: Optional[asyncpg.Pool] = None
@@ -200,7 +200,7 @@ class ComprehensiveDataService:
             raise ValueError(f"Failed to delete profile data: {e}")
 
     # ==========================================================================
-    # PROFILE DATA STORAGE - COMPREHENSIVE DECODO MAPPING
+    # PROFILE DATA STORAGE - COMPREHENSIVE APIFY MAPPING
     # ==========================================================================
     
     async def store_complete_profile(self, db: AsyncSession, username: str, raw_data: Dict[str, Any]) -> Tuple[Profile, bool]:
@@ -250,7 +250,7 @@ class ComprehensiveDataService:
             raise ValueError(f"Storage failed for {username}: {storage_error}")
 
     def _extract_user_data_comprehensive(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract user data from Decodo response with comprehensive error handling"""
+        """Extract user data from Apify response with comprehensive error handling"""
         try:
             # Handle multiple possible response structures
             if 'results' in raw_data:
@@ -277,8 +277,8 @@ class ComprehensiveDataService:
             logger.error(f"Error extracting user data: {e}")
             return {}
 
-    def _map_all_decodo_datapoints(self, user_data: Dict[str, Any], raw_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Map ALL 80+ Decodo datapoints to Profile model fields"""
+    def _map_all_apify_datapoints(self, user_data: Dict[str, Any], raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Map ALL 80+ Apify datapoints to Profile model fields"""
         
         def safe_get(data: Dict[str, Any], path: str, default=None):
             """Safely extract nested data with dot notation"""
@@ -595,7 +595,7 @@ class ComprehensiveDataService:
             return 0
 
     def _map_post_data_comprehensive(self, post_node: Dict[str, Any], profile_id: UUID) -> Dict[str, Any]:
-        """Map ALL post datapoints from Decodo response with automatic image proxying"""
+        """Map ALL post datapoints from Apify response with automatic image proxying"""
         
         def safe_get(data: Dict[str, Any], path: str, default=None):
             try:
@@ -806,7 +806,7 @@ class ComprehensiveDataService:
         try:
             # This would integrate with image storage service
             # For now, we store image metadata in the profile_images/profile_thumbnails JSONB fields
-            # which is already handled in _map_all_decodo_datapoints
+            # which is already handled in _map_all_apify_datapoints
             logger.info(f"Profile images stored in JSONB fields for profile {profile_id}")
             
         except Exception as e:
@@ -934,13 +934,13 @@ class ComprehensiveDataService:
             return []
 
     # ==========================================================================
-    # ANALYTICS METHODS - ENHANCED FROM DECODO DATA (Not fake AI)
+    # ANALYTICS METHODS - ENHANCED FROM APIFY DATA (Not fake AI)
     # ==========================================================================
     
     async def store_audience_demographics(self, db: AsyncSession, profile_id: UUID,
                                         gender_dist: Dict, age_dist: Dict, location_dist: Dict,
                                         sample_size: int = None, confidence_score: float = None) -> AudienceDemographics:
-        """Store audience demographics enhanced from Decodo follower data"""
+        """Store audience demographics enhanced from Apify follower data"""
         try:
             result = await db.execute(
                 select(AudienceDemographics).where(AudienceDemographics.profile_id == profile_id)
@@ -955,7 +955,7 @@ class ComprehensiveDataService:
                 demographics.sample_size = sample_size
                 demographics.confidence_score = confidence_score
                 demographics.last_sampled = func.now()
-                demographics.analysis_method = 'decodo_enhanced'
+                demographics.analysis_method = 'apify_enhanced'
             else:
                 # Create new
                 demographics_data = {
@@ -965,7 +965,7 @@ class ComprehensiveDataService:
                     'location_distribution': location_dist,
                     'sample_size': sample_size,
                     'confidence_score': confidence_score,
-                    'analysis_method': 'decodo_enhanced'
+                    'analysis_method': 'apify_enhanced'
                 }
                 demographics = AudienceDemographics(**demographics_data)
                 db.add(demographics)
@@ -983,7 +983,7 @@ class ComprehensiveDataService:
     async def store_creator_metadata(self, db: AsyncSession, profile_id: UUID,
                                    extracted_location: str, categories: List[str],
                                    content_themes: Dict = None, primary_language: str = None) -> CreatorMetadata:
-        """Store creator metadata extracted from Decodo profile data"""
+        """Store creator metadata extracted from Apify profile data"""
         try:
             result = await db.execute(
                 select(CreatorMetadata).where(CreatorMetadata.profile_id == profile_id)
@@ -1005,7 +1005,7 @@ class ComprehensiveDataService:
                     'categories': categories,
                     'content_themes': content_themes or {},
                     'primary_language': primary_language,
-                    'analysis_confidence': 0.85  # Based on Decodo data quality
+                    'analysis_confidence': 0.85  # Based on Apify data quality
                 }
                 metadata = CreatorMetadata(**metadata_data)
                 db.add(metadata)

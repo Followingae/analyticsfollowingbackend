@@ -14,7 +14,7 @@ from app.infrastructure.r2_storage_client import R2StorageClient
 from app.services.cdn_image_service import cdn_image_service, CDNImageService, CDNServiceError
 from app.services.image_transcoder_service import ImageTranscoderService
 from app.middleware.auth_middleware import get_current_active_user
-from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient
+from app.scrapers.apify_instagram_client import ApifyInstagramClient
 from app.core.config import settings
 from app.tasks.cdn_processing_tasks import (
     process_cdn_image_job, 
@@ -154,7 +154,7 @@ async def refresh_profile_media(
     current_user=Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Refresh profile media by re-fetching from Decodo and updating CDN"""
+    """Refresh profile media by re-fetching from Apify and updating CDN"""
     try:
         logger.info(f"🔄 Refreshing media for profile: {profile_id}")
         
@@ -167,16 +167,13 @@ async def refresh_profile_media(
                 detail="Invalid profile ID format"
             )
         
-        # Get latest data from Decodo
-        decodo_client = EnhancedDecodoClient(
-            username=settings.SMARTPROXY_USERNAME,
-            password=settings.SMARTPROXY_PASSWORD
-        )
+        # Get latest data from Apify
+        apify_client = ApifyInstagramClient(settings.APIFY_API_TOKEN)
         
-        async with decodo_client:
+        async with apify_client:
             try:
                 # Fetch comprehensive profile data
-                profile_data = await decodo_client.get_instagram_profile_comprehensive(profile_id)
+                profile_data = await apify_client.get_instagram_profile_comprehensive(profile_id)
                 
                 # Parse the profile data structure
                 if not profile_data or 'results' not in profile_data:
@@ -197,8 +194,8 @@ async def refresh_profile_media(
                 data = content.get('data', {})
                 user_data = data.get('user', {})
                 
-                # Build decodo_data format for CDN service
-                decodo_data = {
+                # Build apify_data format for CDN service
+                apify_data = {
                     'profile_pic_url': user_data.get('profile_pic_url'),
                     'profile_pic_url_hd': user_data.get('profile_pic_url_hd'),
                     'recent_posts': []
@@ -210,14 +207,14 @@ async def refresh_profile_media(
                 
                 for post_edge in posts_edges:
                     post_node = post_edge.get('node', {})
-                    decodo_data['recent_posts'].append({
+                    apify_data['recent_posts'].append({
                         'shortcode': post_node.get('shortcode'),
                         'display_url': post_node.get('display_url'),
                         'thumbnail_src': post_node.get('thumbnail_src')
                     })
                 
             except Exception as e:
-                logger.error(f"❌ Decodo fetch failed for {profile_id}: {e}")
+                logger.error(f"❌ Apify fetch failed for {profile_id}: {e}")
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
                     detail=f"Failed to fetch profile data: {str(e)}"
@@ -226,7 +223,7 @@ async def refresh_profile_media(
         # Enqueue for CDN processing
         cdn_service = CDNImageService()
         cdn_service.set_db_session(db)
-        result = await cdn_service.enqueue_profile_assets(profile_uuid, decodo_data)
+        result = await cdn_service.enqueue_profile_assets(profile_uuid, apify_data)
         
         if result.success:
             # Add background task to monitor processing

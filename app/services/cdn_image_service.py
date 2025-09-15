@@ -110,7 +110,7 @@ class CDNImageService:
             logger.error(f"[ERROR] Error getting profile media URLs: {e}")
             raise CDNServiceError(f"Failed to get media URLs: {e}")
     
-    async def enqueue_profile_assets(self, profile_id: UUID, decodo_data: Dict, db: AsyncSession = None) -> EnqueueResult:
+    async def enqueue_profile_assets(self, profile_id: UUID, apify_data: Dict, db: AsyncSession = None) -> EnqueueResult:
         """Enqueue profile assets for CDN processing"""
         try:
             logger.info(f"📥 Enqueuing assets for profile: {profile_id}")
@@ -122,14 +122,14 @@ class CDNImageService:
             
             jobs_created = 0
             
-            # Enqueue avatar from Decodo data
-            print(f"[CDN] CDN: Looking for profile avatar URL in Decodo data...")
+            # Enqueue avatar from Apify data
+            print(f"[CDN] CDN: Looking for profile avatar URL in Apify data...")
             avatar_url = None
-            if 'profile_pic_url_hd' in decodo_data and decodo_data['profile_pic_url_hd']:
-                avatar_url = decodo_data['profile_pic_url_hd']
+            if 'profile_pic_url_hd' in apify_data and apify_data['profile_pic_url_hd']:
+                avatar_url = apify_data['profile_pic_url_hd']
                 print(f"[CDN] CDN: Found HD avatar URL: {avatar_url[:80]}...")
-            elif 'profile_pic_url' in decodo_data and decodo_data['profile_pic_url']:
-                avatar_url = decodo_data['profile_pic_url']
+            elif 'profile_pic_url' in apify_data and apify_data['profile_pic_url']:
+                avatar_url = apify_data['profile_pic_url']
                 print(f"[CDN] CDN: Found standard avatar URL: {avatar_url[:80]}...")
             
             if avatar_url:
@@ -142,13 +142,13 @@ class CDNImageService:
                     priority=3  # Higher priority for avatars
                 )
                 jobs_created += 1
-                logger.info(f"Enqueued avatar from Decodo: {avatar_url[:80]}...")
+                logger.info(f"Enqueued avatar from Apify: {avatar_url[:80]}...")
                 print(f"[SUCCESS] CDN: Profile avatar enqueued successfully")
             else:
-                logger.warning(f"No avatar URL found in Decodo data for profile {profile_id}")
-                print(f"[WARNING]  CDN: No profile avatar URL found in Decodo data")
-            
-            # Enqueue recent posts from DATABASE (more reliable than Decodo structure parsing)
+                logger.warning(f"No avatar URL found in Apify data for profile {profile_id}")
+                print(f"[WARNING]  CDN: No profile avatar URL found in Apify data")
+
+            # Enqueue recent posts from DATABASE (more reliable than Apify structure parsing)
             print(f"[CDN] CDN: Getting recent posts from database for profile {profile_id}...")
             
             if self.db:
@@ -515,14 +515,14 @@ class CDNImageService:
             
             for profile in profiles:
                 try:
-                    # Create mock decodo_data for enqueue function
-                    decodo_data = {
+                    # Create mock apify_data for enqueue function
+                    apify_data = {
                         'profile_pic_url': profile.profile_pic_url,
                         'profile_pic_url_hd': profile.profile_pic_url_hd,
                         'recent_posts': []  # Posts will be synced separately
                     }
                     
-                    result = await self.enqueue_profile_assets(profile.id, decodo_data)
+                    result = await self.enqueue_profile_assets(profile.id, apify_data)
                     
                     if result.success:
                         sync_stats['jobs_created'] += result.jobs_created

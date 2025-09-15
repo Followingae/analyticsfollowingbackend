@@ -32,12 +32,12 @@ def setup_logging():
     logging.getLogger("fastapi").setLevel(logging.INFO)
     
     # Application loggers
-    logging.getLogger("app.scrapers").setLevel(logging.DEBUG)
-    logging.getLogger("app.api").setLevel(logging.INFO)
-    
-    # Enable debug for smartproxy client
-    logging.getLogger("app.scrapers.smartproxy_client").setLevel(logging.DEBUG)
-    
-    # CRITICAL: Enable detailed database storage logging
-    logging.getLogger("app.database.robust_storage").setLevel(logging.DEBUG)
-    logging.getLogger("app.database").setLevel(logging.INFO)
+    logging.getLogger("app.scrapers").setLevel(logging.INFO)
+    logging.getLogger("app.api").setLevel(logging.WARNING)
+
+    # Reduce verbose logging
+    logging.getLogger("app.scrapers.smartproxy_client").setLevel(logging.WARNING)
+
+    # Database logging optimized for production
+    logging.getLogger("app.database.robust_storage").setLevel(logging.WARNING)
+    logging.getLogger("app.database").setLevel(logging.WARNING)

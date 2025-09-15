@@ -96,7 +96,7 @@ class FrontendHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-API-Version"] = "2.0.0"
         response.headers["X-Process-Time"] = str(round(process_time, 3))
         response.headers["X-Backend-Status"] = "operational"
-        response.headers["X-Data-Source"] = "decodo-primary"
+        response.headers["X-Data-Source"] = "apify-primary"
         response.headers["X-Timestamp"] = datetime.now().isoformat()
         
         # Add rate limiting info (helpful for frontend)

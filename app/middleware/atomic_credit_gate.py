@@ -195,23 +195,32 @@ def atomic_requires_credits(
                 
                 return result
                     
+            except HTTPException as http_exc:
+                # CRITICAL: HTTPException from wrapped function - rollback but preserve user-friendly response
+                await db.rollback()
+                logger.error(f"[ALERT] HTTPException in atomic transaction: {http_exc.detail}")
+                logger.error(f"[SYNC] ROLLBACK COMPLETED - User {user_id} was NOT charged")
+
+                # Re-raise the HTTPException with rollback completed
+                raise http_exc
+
             except AtomicTransactionError as e:
                 # Rollback the entire transaction
                 await db.rollback()
                 logger.error(f"[ALERT] ATOMIC TRANSACTION FAILED at {e.step}: {e.message}")
                 logger.error(f"[SYNC] ROLLBACK COMPLETED - User {user_id} was NOT charged")
-                
+
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Transaction failed at {e.step}: {e.message}"
                 )
-                    
+
             except Exception as e:
                 # Unexpected error - rollback
                 await db.rollback()
                 logger.error(f"[ALERT] UNEXPECTED ERROR in atomic transaction: {e}")
                 logger.error(f"[SYNC] ROLLBACK COMPLETED - User {user_id} was NOT charged")
-                
+
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Transaction failed unexpectedly: {str(e)}"

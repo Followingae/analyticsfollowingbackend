@@ -32,7 +32,7 @@ class InstagramAnalyzer:
         return ((likes + comments) / followers) * 100
     
     def _parse_profile_data(self, raw_data: Dict[str, Any]) -> InstagramProfile:
-        # Handle Decodo API response format
+        # Handle Apify API response format
         if 'results' in raw_data and raw_data['results']:
             profile_data = raw_data['results'][0].get('content', {})
         elif 'data' in raw_data:

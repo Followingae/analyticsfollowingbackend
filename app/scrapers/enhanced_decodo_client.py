@@ -20,32 +20,32 @@ from app.models.instagram import InstagramProfile, ProfileAnalysisResponse
 
 logger = logging.getLogger(__name__)
 
-class DecodoAPIError(Exception):
-    """Custom exception for Decodo API errors"""
+class ApifyAPIError(Exception):
+    """Custom exception for Apify API errors"""
     def __init__(self, message: str, status_code: Optional[int] = None, response_data: Optional[Dict] = None):
         super().__init__(message)
         self.status_code = status_code
         self.response_data = response_data
 
-class DecodoInstabilityError(DecodoAPIError):
-    """Exception for temporary Decodo API issues that should be retried"""
+class ApifyInstabilityError(ApifyAPIError):
+    """Exception for temporary Apify API issues that should be retried"""
     pass
 
-class DecodoProfileNotFoundError(DecodoAPIError):
+class ApifyProfileNotFoundError(ApifyAPIError):
     """Exception for non-existent profiles that should NOT be retried"""
     pass
 
-class EnhancedDecodoClient:
-    """Enhanced Decodo client with robust retry mechanism and comprehensive data extraction"""
+class EnhancedApifyClient:
+    """Enhanced Apify client with robust retry mechanism and comprehensive data extraction"""
     
     def __init__(self, username: str, password: str):
         self.username = username
         self.password = password
-        self.base_url = "https://scraper-api.decodo.com/v2"
+        self.base_url = "https://scraper-api.apify.com/v2"
         self.session: Optional[httpx.AsyncClient] = None
         
-        # Retry configuration - optimized for Decodo instagram_graphql_profile instability
-        self.max_retries = 3  # Increased based on Decodo tech team feedback
+        # Retry configuration - optimized for Apify instagram_graphql_profile instability
+        self.max_retries = 3  # Increased based on Apify tech team feedback
         self.initial_wait = 2  # seconds
         self.max_wait = 20     # seconds - allow more time between retries
         self.backoff_multiplier = 1.5
@@ -81,7 +81,7 @@ class EnhancedDecodoClient:
         for attempt in range(5):  # Max 5 attempts
             try:
                 return await self._make_request_with_retry(payload)
-            except DecodoInstabilityError as e:
+            except ApifyInstabilityError as e:
                 last_exception = e
                 if "Empty content received" in str(e):
                     empty_content_count += 1
@@ -90,7 +90,7 @@ class EnhancedDecodoClient:
                     # If we get empty content 3 times in a row, likely profile doesn't exist
                     if empty_content_count >= 3:
                         logger.error(f"Profile {username} likely doesn't exist - got empty content {empty_content_count} times")
-                        raise DecodoProfileNotFoundError(f"Profile '{username}' not found on Instagram") from e
+                        raise ApifyProfileNotFoundError(f"Profile '{username}' not found on Instagram") from e
                 else:
                     # Reset counter for non-empty-content errors
                     empty_content_count = 0
@@ -120,21 +120,21 @@ class EnhancedDecodoClient:
         
         # If we get here, all retries failed
         if empty_content_count >= 3:
-            raise DecodoProfileNotFoundError(f"Profile '{username}' not found on Instagram") from last_exception
+            raise ApifyProfileNotFoundError(f"Profile '{username}' not found on Instagram") from last_exception
         else:
             raise last_exception
 
     @retry(
-        stop=stop_after_attempt(5),  # Increased retries as Decodo tech team confirmed retrying is effective
+        stop=stop_after_attempt(5),  # Increased retries as Apify tech team confirmed retrying is effective
         wait=wait_exponential(multiplier=1.5, min=2, max=15),  # More aggressive retry strategy
-        retry=retry_if_exception_type((DecodoInstabilityError, httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, OSError)),
+        retry=retry_if_exception_type((ApifyInstabilityError, httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, OSError)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         after=after_log(logger, logging.WARNING)
     )
     async def _make_request_with_retry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Make a request with automatic retry logic"""
         if not self.session:
-            raise DecodoAPIError("Client session not initialized")
+            raise ApifyAPIError("Client session not initialized")
         
         headers = {
             "Accept": "application/json",
@@ -143,7 +143,7 @@ class EnhancedDecodoClient:
             "User-Agent": "Analytics-Backend/1.0"
         }
         
-        logger.info(f"Making Decodo request: {payload.get('target', 'unknown')} for {payload.get('query', 'unknown')}")
+        logger.info(f"Making Apify request: {payload.get('target', 'unknown')} for {payload.get('query', 'unknown')}")
         
         try:
             response = await self.session.post(
@@ -154,7 +154,7 @@ class EnhancedDecodoClient:
             
             # Only log response details for errors
             if response.status_code != 200:
-                logger.info(f"Decodo response status: {response.status_code}")
+                logger.info(f"Apify response status: {response.status_code}")
                 try:
                     response_text = response.text
                     logger.info(f"Response body: {response_text[:500]}...")  # First 500 chars for errors
@@ -163,19 +163,19 @@ class EnhancedDecodoClient:
             
             # Handle different response statuses
             if response.status_code == 401:
-                raise DecodoAPIError("Authentication failed - check Decodo credentials", 401)
+                raise ApifyAPIError("Authentication failed - check Apify credentials", 401)
             elif response.status_code == 429:
                 # Rate limit - this should be retried
                 logger.warning("Rate limit hit, will retry...")
-                raise DecodoInstabilityError("Rate limit exceeded", 429)
+                raise ApifyInstabilityError("Rate limit exceeded", 429)
             elif response.status_code == 500:
                 # Server error - might be temporary
                 logger.warning("Server error, will retry...")
-                raise DecodoInstabilityError("Decodo server error", 500)
+                raise ApifyInstabilityError("Apify server error", 500)
             elif response.status_code != 200:
                 response_text = response.text
                 logger.error(f"API request failed with status {response.status_code}: {response_text}")
-                raise DecodoAPIError(f"API request failed: {response.status_code} - {response_text}", response.status_code)
+                raise ApifyAPIError(f"API request failed: {response.status_code} - {response_text}", response.status_code)
             
             # Parse JSON response
             try:
@@ -190,8 +190,8 @@ class EnhancedDecodoClient:
                         message = response_data.get('message', '')
                         
                         if status.lower() in ['error', 'failed', 'pending']:
-                            logger.warning(f"Decodo returned status response, will retry: {status} - {message}")
-                            raise DecodoInstabilityError(f"Decodo processing status: {status} - {message}")
+                            logger.warning(f"Apify returned status response, will retry: {status} - {message}")
+                            raise ApifyInstabilityError(f"Apify processing status: {status} - {message}")
                     
                     # Check for error messages that indicate configuration issues
                     if 'results' not in response_data or not response_data.get('results'):
@@ -200,47 +200,47 @@ class EnhancedDecodoClient:
                         status = response_data.get('status', '')
                         
                         if 'failed' in error_msg.lower() or 'error' in status.lower():
-                            raise DecodoInstabilityError(f"Decodo API error: {error_msg}")
+                            raise ApifyInstabilityError(f"Apify API error: {error_msg}")
                     
                     # Check if results contain actual data
                     results = response_data.get('results', [])
                     if results and len(results) > 0:
                         content = results[0].get('content', {})
                         if not content or 'data' not in content:
-                            raise DecodoInstabilityError("Empty content received from Decodo")
+                            raise ApifyInstabilityError("Empty content received from Apify")
                 
                 return response_data
                 
             except json.JSONDecodeError as e:
                 logger.error(f"JSON decode error: {str(e)}")
-                raise DecodoAPIError(f"Invalid JSON response: {str(e)}")
+                raise ApifyAPIError(f"Invalid JSON response: {str(e)}")
                 
         except httpx.TimeoutException as e:
             logger.warning(f"Request timeout: {str(e)}")
-            raise DecodoInstabilityError("Request timeout - will retry")
+            raise ApifyInstabilityError("Request timeout - will retry")
         except httpx.ConnectError as e:
             error_msg = str(e).lower()
             if 'getaddrinfo failed' in error_msg or 'name resolution' in error_msg:
                 logger.warning(f"DNS resolution failure: {str(e)}")
-                raise DecodoInstabilityError(f"DNS resolution error: {str(e)}")
+                raise ApifyInstabilityError(f"DNS resolution error: {str(e)}")
             else:
                 logger.warning(f"Connection error: {str(e)}")
-                raise DecodoInstabilityError(f"Connection error: {str(e)}")
+                raise ApifyInstabilityError(f"Connection error: {str(e)}")
         except httpx.NetworkError as e:
             logger.warning(f"Network error: {str(e)}")
-            raise DecodoInstabilityError(f"Network error: {str(e)}")
+            raise ApifyInstabilityError(f"Network error: {str(e)}")
         except OSError as e:
             # Catch socket-level errors including getaddrinfo failures
             error_msg = str(e).lower()
             if 'getaddrinfo failed' in error_msg or 'name resolution' in error_msg:
                 logger.warning(f"DNS/Socket error: {str(e)}")
-                raise DecodoInstabilityError(f"DNS resolution error: {str(e)}")
+                raise ApifyInstabilityError(f"DNS resolution error: {str(e)}")
             else:
                 logger.warning(f"Socket error: {str(e)}")
-                raise DecodoInstabilityError(f"Socket error: {str(e)}")
+                raise ApifyInstabilityError(f"Socket error: {str(e)}")
         except httpx.RequestError as e:
             logger.error(f"HTTP request error: {str(e)}")
-            raise DecodoAPIError(f"Request error: {str(e)}")
+            raise ApifyAPIError(f"Request error: {str(e)}")
     
     async def get_instagram_profile_basic(self, username: str) -> Dict[str, Any]:
         """Get basic Instagram profile data for Phase 1 search (lightweight request)"""
@@ -273,12 +273,12 @@ class EnhancedDecodoClient:
             logger.info(f"Successfully fetched basic profile data for {username}")
             return response_data
             
-        except DecodoProfileNotFoundError:
+        except ApifyProfileNotFoundError:
             logger.warning(f"Profile {username} not found (basic search)")
             raise
         except Exception as e:
             logger.error(f"Basic profile fetch failed for {username}: {str(e)}")
-            raise DecodoAPIError(f"Basic profile fetch failed: {str(e)}")
+            raise ApifyAPIError(f"Basic profile fetch failed: {str(e)}")
     
     async def get_instagram_profile_comprehensive(self, username: str) -> Dict[str, Any]:
         """Get comprehensive Instagram profile data with posts and analytics"""
@@ -305,12 +305,12 @@ class EnhancedDecodoClient:
             logger.info(f"Successfully fetched comprehensive profile data for {username}")
             return response_data
             
-        except DecodoProfileNotFoundError:
+        except ApifyProfileNotFoundError:
             logger.warning(f"Profile {username} not found (comprehensive search)")
             raise
         except Exception as e:
             logger.error(f"Comprehensive profile fetch failed for {username}: {str(e)}")
-            raise DecodoAPIError(f"Comprehensive profile fetch failed: {str(e)}")
+            raise ApifyAPIError(f"Comprehensive profile fetch failed: {str(e)}")
 
     async def get_instagram_posts_only(self, username: str, count: int = 24) -> Dict[str, Any]:
         """Get only posts data for existing profiles (faster than full profile fetch)"""
@@ -333,9 +333,9 @@ class EnhancedDecodoClient:
             logger.info(f"Successfully fetched {count} posts for {username}")
             return response_data
             
-        except DecodoProfileNotFoundError:
+        except ApifyProfileNotFoundError:
             logger.warning(f"Profile {username} not found (posts only)")
             raise
         except Exception as e:
             logger.error(f"Posts fetch failed for {username}: {str(e)}")
-            raise DecodoAPIError(f"Posts fetch failed: {str(e)}")
+            raise ApifyAPIError(f"Posts fetch failed: {str(e)}")

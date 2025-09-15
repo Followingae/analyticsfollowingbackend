@@ -198,18 +198,24 @@ async def store_profile_robust(
 
 
 def extract_profile_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract profile data from Decodo response"""
+    """Extract profile data from Apify response"""
     try:
-        # Get user data from Decodo response
+        # Get user data from Apify response - FIXED FOR APIFY FORMAT
         user_data = {}
-        
+
         if raw_data and 'results' in raw_data and len(raw_data['results']) > 0:
             result = raw_data['results'][0]
             if 'content' in result and 'data' in result['content']:
-                user_data = result['content']['data'].get('user', {})
-        
+                # CRITICAL FIX: Apify data is directly in 'data', not in 'data.user'
+                user_data = result['content']['data']
+
         if not user_data:
-            logger.warning("No user data extracted from Decodo response")
+            logger.warning("No user data extracted from Apify response")
+            logger.warning(f"Raw data structure: {list(raw_data.keys()) if raw_data else 'None'}")
+        else:
+            logger.info(f"SUCCESS: Extracted Apify user data with {len(user_data)} fields")
+            logger.info(f"Apify followers: {user_data.get('followers_count', 0):,}")
+            logger.info(f"Apify posts: {len(user_data.get('posts', []))}")
         
         # Map to profile fields with multiple field name attempts
         instagram_id = (

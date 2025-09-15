@@ -354,7 +354,7 @@ async def simple_creator_system_stats_compatibility(
 # 1. Creator Search with Credit Gate
 import logging
 from app.middleware.atomic_credit_gate import atomic_requires_credits
-from app.scrapers.enhanced_decodo_client import EnhancedDecodoClient
+from app.scrapers.apify_instagram_client import ApifyInstagramClient
 from app.database.comprehensive_service import ComprehensiveDataService
 from app.core.config import settings
 
@@ -363,66 +363,51 @@ bulletproof_logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 async def _trigger_background_processing_if_needed(profile, username: str, db) -> dict:
-    """Trigger AI analysis and CDN processing for existing profiles that need it"""
+    """Trigger UNIFIED background processing for existing profiles that need it"""
     try:
-        processing_triggered = {"ai_analysis": False, "cdn_processing": False}
-        
-        # Check if AI analysis is needed - only if profile has never been analyzed
-        needs_ai_analysis = profile.ai_profile_analyzed_at is None
-        
-        # Check if CDN processing is needed - check if we have CDN assets in database
-        cdn_assets_query = text("SELECT COUNT(*) FROM cdn_image_assets WHERE source_id = :profile_id AND source_type = 'instagram_profile'")
-        cdn_assets_result = await db.execute(cdn_assets_query, {'profile_id': str(profile.id)})
-        existing_cdn_assets = cdn_assets_result.scalar()
-        needs_cdn_processing = existing_cdn_assets == 0
-        
-        if needs_ai_analysis:
-            logger.info(f"[CRITICAL] BACKGROUND: Profile {username} NEEDS AI analysis - TRIGGERING NOW")
+        processing_triggered = {"unified_processing": False, "pipeline_started": False}
+
+        # Check if unified processing is needed
+        from app.services.unified_background_processor import unified_background_processor
+
+        # Get comprehensive processing status
+        processing_status = await unified_background_processor.get_profile_processing_status(str(profile.id))
+
+        logger.info(f"[UNIFIED-CHECK] Processing status for {username}: {processing_status.get('current_stage', 'unknown')}")
+
+        # If not fully complete, trigger unified processing
+        if not processing_status.get('overall_complete', False):
+            logger.info(f"[UNIFIED-TRIGGER] Profile {username} needs unified processing - TRIGGERING NOW")
+
             try:
-                # DIRECT CELERY TASK TRIGGERING - NO DELAYS, NO FAILURES
-                from app.workers.ai_background_worker import celery_app
-                import uuid
-                
-                task_id = str(uuid.uuid4())
-                logger.info(f"[AI] FORCING AI analysis task for {username} with task_id: {task_id}")
-                
-                task_result = celery_app.send_task(
-                    'ai_worker.analyze_profile_posts',
-                    args=[str(profile.id), username],
-                    task_id=task_id
+                import asyncio
+
+                # Start unified background processing pipeline (non-blocking)
+                processing_task = asyncio.create_task(
+                    unified_background_processor.process_profile_complete_pipeline(
+                        profile_id=str(profile.id),
+                        username=username
+                    )
                 )
-                
-                processing_triggered["ai_analysis"] = True
-                processing_triggered["ai_task_id"] = task_id
-                logger.error(f"[SUCCESS] FORCED AI ANALYSIS TASK SENT! Task ID: {task_id} for {username}")
-                
+
+                processing_triggered["unified_processing"] = True
+                processing_triggered["pipeline_started"] = True
+                processing_triggered["current_stage"] = processing_status.get('current_stage', 'unknown')
+
+                logger.info(f"[SUCCESS] UNIFIED processing pipeline started for {username}")
+
             except Exception as e:
-                logger.error(f"[CRITICAL-ERROR] FAILED TO TRIGGER AI ANALYSIS for {username}: {e}")
+                logger.error(f"[CRITICAL-ERROR] FAILED TO TRIGGER UNIFIED processing for {username}: {e}")
                 import traceback
                 traceback.print_exc()
-        
-        if needs_cdn_processing:
-            logger.info(f"[SEARCH] BACKGROUND: Profile {username} needs CDN processing")
-            try:
-                from app.services.cdn_image_service import cdn_image_service
-                
-                # Get database session from existing context
-                from app.database.connection import get_session
-                async with get_session() as db_session:
-                    cdn_result = await cdn_image_service.enqueue_profile_assets(profile.id, {}, db_session)
-                
-                if cdn_result.get("success"):
-                    processing_triggered["cdn_processing"] = True
-                    logger.info(f"[SUCCESS] BACKGROUND: CDN processing completed for {username}")
-                
-            except Exception as e:
-                logger.error(f"[ERROR] BACKGROUND: CDN processing failed for {username}: {e}")
-        
+        else:
+            logger.info(f"[UNIFIED-SKIP] Profile {username} is fully processed - no action needed")
+
         return processing_triggered
-        
+
     except Exception as e:
-        logger.error(f"[ERROR] BACKGROUND: Processing check failed for {username}: {e}")
-        return {"ai_analysis": False, "cdn_processing": False}
+        logger.error(f"[ERROR] UNIFIED processing check failed for {username}: {e}")
+        return {"unified_processing": False, "pipeline_started": False}
 
 @app.post("/api/v1/simple/creator/search/{username}")
 @atomic_requires_credits(
@@ -606,97 +591,73 @@ async def bulletproof_creator_search(
                     "avg_engagement_rate": existing_profile.engagement_rate,
                     "content_categories_found": len(existing_profile.ai_top_10_categories) if existing_profile.ai_top_10_categories else 0
                 },
-                # CRITICAL: Trigger AI analysis for existing profiles that need it
-                "ai_analysis_triggered": await _trigger_background_processing_if_needed(existing_profile, username, db),
+                # CRITICAL: Trigger unified processing for existing profiles that need it
+                "background_processing": await _trigger_background_processing_if_needed(existing_profile, username, db),
                 "message": "Complete profile data loaded from database",
                 "data_source": "database_complete",
                 "cached": True
             }
         else:
-            # Fetch new profile from Decodo with COMPLETE data population
+            # Fetch new profile with COMPLETE data population using Apify
             logger.info(f"[ERROR] STEP 1 RESULT: Profile '{username}' NOT FOUND in database")
-            logger.info(f"[SEARCH] STEP 2: Fetching COMPLETE data from Decodo API...")
-            bulletproof_logger.info(f"BULLETPROOF: New profile {username} - fetching COMPLETE data from Decodo")
-            
-            async with EnhancedDecodoClient(
-                settings.SMARTPROXY_USERNAME,
-                settings.SMARTPROXY_PASSWORD
-            ) as decodo_client:
-                logger.info(f"[API] Calling Decodo API for '{username}' with COMPREHENSIVE settings...")
-                
-                # Use the PERFECT original Decodo client
-                decodo_data = await decodo_client.get_instagram_profile_comprehensive(username)
-                
-                if not decodo_data:
-                    logger.error(f"[ERROR] STEP 2 RESULT: Decodo returned NO DATA for '{username}'")
-                    raise HTTPException(status_code=404, detail="Profile not found")
-                
-                logger.info(f"[SUCCESS] STEP 2 RESULT: Decodo data received for '{username}'")
-                logger.info(f"[ANALYTICS] Decodo followers: {decodo_data.get('followers_count', 0):,}")
-                logger.info(f"[ANALYTICS] Decodo posts: {decodo_data.get('posts_count', 0):,}")
-            
+            logger.info(f"[SEARCH] STEP 2: Fetching COMPLETE data from Apify API...")
+            bulletproof_logger.info(f"BULLETPROOF: New profile {username} - fetching COMPLETE data from Apify")
+
+            async with ApifyInstagramClient(settings.APIFY_API_TOKEN) as apify_client:
+                logger.info(f"[API] Calling Apify API for '{username}' (12 posts, 10 related, 12 reels)...")
+
+                # Use Apify client with EXACT limits set
+                apify_data = await apify_client.get_instagram_profile_comprehensive(username)
+
+            if not apify_data:
+                logger.error(f"[ERROR] STEP 2 RESULT: Apify returned NO DATA for '{username}'")
+                raise HTTPException(status_code=404, detail="Profile not found")
+
+            logger.info(f"[SUCCESS] STEP 2 RESULT: Apify data received for '{username}'")
+
+            # Extract data from Apify response (already in Apify-compatible format)
+            profile_data = apify_data['results'][0]['content']['data']
+            logger.info(f"[ANALYTICS] Apify followers: {profile_data.get('followers_count', 0):,}")
+            logger.info(f"[ANALYTICS] Apify posts: {len(profile_data.get('posts', []))}")
+
             logger.info(f"[SEARCH] STEP 3: Storing COMPLETE profile data in database...")
             comprehensive_service = ComprehensiveDataService()
-            
-            # Store new profile with enhanced retry mechanisms  
+
+            # Store new profile with enhanced retry mechanisms
             profile, is_new = await comprehensive_service.store_complete_profile(
-                db, username, decodo_data
+                db, username, apify_data
             )
-            
+
             logger.info(f"[SUCCESS] STEP 3 RESULT: Profile stored (new: {is_new})")
             logger.info(f"[ANALYTICS] Profile ID: {profile.id}")
-            
-            # Start REAL AI analysis in background (non-blocking)
-            if is_new:
-                logger.info(f"[SEARCH] STEP 4: Starting background AI analysis...")
-                bulletproof_logger.info(f"BULLETPROOF: Starting background AI analysis for {username}")
-                
-                try:
-                    # DIRECT CELERY TASK TRIGGERING - NO DELAYS, NO FAILURES
-                    from app.workers.ai_background_worker import celery_app
-                    import uuid
-                    
-                    task_id = str(uuid.uuid4())
-                    logger.info(f"[AI] FORCING AI analysis task for NEW PROFILE {username} with task_id: {task_id}")
-                    
-                    task_result = celery_app.send_task(
-                        'ai_worker.analyze_profile_posts',
-                        args=[str(profile.id), username],
-                        task_id=task_id
-                    )
-                    
-                    logger.error(f"[SUCCESS] FORCED AI ANALYSIS TASK SENT FOR NEW PROFILE! Task ID: {task_id} for {username}")
-                    bulletproof_logger.info(f"BULLETPROOF: DIRECT AI analysis task triggered for {username}: {task_id}")
-                    
-                except Exception as ai_error:
-                    logger.error(f"[CRITICAL] FAILED to trigger AI analysis for NEW PROFILE {username}: {ai_error}")
-                    bulletproof_logger.error(f"BULLETPROOF: AI analysis trigger FAILED for {username}: {ai_error}")
-                    # Don't fail the entire request if AI fails
-            else:
-                print(f"⏩ STEP 4: AI analysis skipped (profile not new)")
-            
-            # CRITICAL: Start CDN processing for ALL profiles (new and existing without CDN)
-            logger.info(f"[SEARCH] STEP 5: Starting CDN image processing...")
-            bulletproof_logger.info(f"BULLETPROOF: Starting CDN processing for {username}")
-            
+
+            # CRITICAL: Start UNIFIED BACKGROUND PROCESSING with correct sequencing
+            logger.info(f"[SEARCH] STEP 4: Starting UNIFIED background processing (Apify → CDN → AI)...")
+            bulletproof_logger.info(f"BULLETPROOF: Starting unified background processing for {username}")
+
             try:
-                from app.services.cdn_image_service import cdn_image_service
-                
-                # Start CDN processing in background (non-blocking) 
-                cdn_result = await cdn_image_service.enqueue_profile_assets(profile.id, decodo_data, db)
-                
-                if cdn_result.get("success"):
-                    logger.info(f"[SUCCESS] STEP 5 RESULT: CDN processing completed successfully")
-                    logger.info(f"[CDN] Avatar CDN URL: {cdn_result.get('avatar_url', 'N/A')}")
-                    bulletproof_logger.info(f"BULLETPROOF: CDN processing successful for {username}")
-                else:
-                    logger.warning(f"[WARNING] STEP 5 RESULT: CDN processing failed: {cdn_result.get('error', 'Unknown error')}")
-                    bulletproof_logger.warning(f"BULLETPROOF: CDN processing failed for {username}: {cdn_result.get('error')}")
-                
-            except Exception as cdn_error:
-                logger.error(f"[ERROR] STEP 5 RESULT: CDN processing error: {cdn_error}")
-                bulletproof_logger.error(f"BULLETPROOF: CDN processing error for {username}: {cdn_error}")
-                # Don't fail the entire request if CDN fails
+                from app.services.unified_background_processor import unified_background_processor
+
+                # Trigger complete pipeline processing (Apify already done, now CDN → AI)
+                logger.info(f"[UNIFIED-PROCESSOR] Starting complete pipeline for {username} (Profile: {profile.id})")
+
+                import asyncio
+
+                # Start background processing pipeline (non-blocking)
+                processing_task = asyncio.create_task(
+                    unified_background_processor.process_profile_complete_pipeline(
+                        profile_id=str(profile.id),
+                        username=username
+                    )
+                )
+
+                logger.info(f"[SUCCESS] STEP 4 RESULT: Unified background processing pipeline started")
+                bulletproof_logger.info(f"BULLETPROOF: Unified processing pipeline started for {username}")
+
+            except Exception as processing_error:
+                logger.error(f"[CRITICAL] STEP 4 ERROR: Unified processing failed for {username}: {processing_error}")
+                bulletproof_logger.error(f"BULLETPROOF: Unified processing FAILED for {username}: {processing_error}")
+                # Don't fail the entire request if background processing fails
             
             return {
                 "success": True,
@@ -718,9 +679,43 @@ async def bulletproof_creator_search(
         print(f"==================== CREATOR SEARCH END ====================\n")
             
     except Exception as e:
+        from tenacity import RetryError
+        from app.scrapers.apify_instagram_client import ApifyInstabilityError, ApifyAPIError
+
         print(f"COMPREHENSIVE CREATOR SEARCH ERROR for '{username}': {e}")
         print(f"==================== CREATOR SEARCH FAILED ====================\n")
         bulletproof_logger.error(f"BULLETPROOF: Comprehensive creator search failed for {username}: {e}")
+
+        # Handle Apify API instability gracefully
+        if isinstance(e, RetryError) and hasattr(e, 'last_attempt') and e.last_attempt.exception():
+            inner_exception = e.last_attempt.exception()
+            if isinstance(inner_exception, ApifyInstabilityError):
+                logger.warning(f"[APIFY-INSTABILITY] API temporarily unavailable for {username}")
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "external_service_unavailable",
+                        "message": f"Instagram data provider is temporarily experiencing issues. Please try searching for '{username}' again in a few minutes.",
+                        "service": "apify_api",
+                        "retry_recommended": True,
+                        "estimated_retry_time": "2-5 minutes"
+                    }
+                )
+
+        # Handle other Apify API errors
+        if isinstance(e, (ApifyAPIError, ApifyInstabilityError)):
+            logger.warning(f"[APIFY-ERROR] API error for {username}: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "external_service_error",
+                    "message": f"Unable to fetch Instagram data for '{username}'. This is usually temporary - please try again later.",
+                    "service": "apify_api",
+                    "retry_recommended": True
+                }
+            )
+
+        # Handle generic errors (keep original 500 for other issues)
         raise HTTPException(status_code=500, detail=f"Comprehensive search failed: {str(e)}")
 
 # 2. Creator Profile AI Analysis Data (Step 2) Endpoint
@@ -1221,7 +1216,7 @@ async def health_check():
             "timestamp": datetime.now().isoformat(),
             "version": "2.0.2-network-resilient",
             "features": {
-                "decodo_integration": True,
+                "apify_integration": True,
                 "retry_mechanism": True,
                 "enhanced_reliability": True,
                 "comprehensive_analytics": True,
@@ -1703,7 +1698,7 @@ async def api_info():
     return {
         "name": "Analytics Following Backend",
         "version": "2.0.0",
-        "description": "Instagram Analytics API with Decodo integration",
+        "description": "Instagram Analytics API with Apify integration",
         "base_url": "/api/v1",
         "documentation": "/docs",
         "health_check": "/health",

@@ -32,7 +32,7 @@ celery_app = Celery(
     backend='redis://localhost:6379/0'
 )
 
-# Celery configuration - FIXED: Removed problematic worker-level configs
+# Celery configuration
 celery_app.conf.update(
     task_serializer='json',
     accept_content=['json'],
@@ -47,8 +47,8 @@ celery_app.conf.update(
     worker_disable_rate_limits=False,
     task_default_retry_delay=60,
     task_max_retries=3,
-    # REMOVED: worker_concurrency and worker_max_tasks_per_child
-    # These should be passed as command-line args, not app config
+    worker_concurrency=2,
+    worker_max_tasks_per_child=50,
 )
 
 # Database setup

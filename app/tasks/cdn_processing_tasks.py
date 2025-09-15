@@ -309,9 +309,9 @@ async def _batch_enqueue_profile_assets_async(profile_data_list: List[Dict]):
         for profile_data in profile_data_list:
             try:
                 profile_id = UUID(profile_data['profile_id'])
-                decodo_data = profile_data['decodo_data']
+                apify_data = profile_data['apify_data']
                 
-                result = await cdn_service.enqueue_profile_assets(profile_id, decodo_data)
+                result = await cdn_service.enqueue_profile_assets(profile_id, apify_data)
                 
                 results.append({
                     'profile_id': profile_data['profile_id'],
@@ -515,7 +515,7 @@ async def _generate_processing_stats_async():
 
 @app.task(bind=True, name="nightly_freshness_check")
 def nightly_freshness_check(self):
-    """Check for updated Decodo URLs and mark for refresh"""
+    """Check for updated Apify URLs and mark for refresh"""
     return asyncio.run(_nightly_freshness_check_async())
 
 async def _nightly_freshness_check_async():
