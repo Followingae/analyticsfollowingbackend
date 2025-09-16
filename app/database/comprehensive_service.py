@@ -208,14 +208,14 @@ class ComprehensiveDataService:
         from app.database.robust_storage import store_profile_robust
         
         logger.info(f"Starting comprehensive profile storage for {username}")
-        print(f"🗄️  DATABASE: Storing complete profile for '{username}'")
+        print(f"DATABASE: Storing complete profile for '{username}'")
         
         try:
             # Store main profile first
-            print(f"🗄️  Calling robust_storage.store_profile_robust...")
+            print(f"Calling robust_storage.store_profile_robust...")
             profile, is_new = await store_profile_robust(db, username, raw_data)
             logger.info(f"SUCCESS: Profile {username} stored successfully: {'new' if is_new else 'updated'}")
-            print(f"✅ Profile stored: ID={profile.id}, new={is_new}")
+            print(f"Profile stored: ID={profile.id}, new={is_new}")
             
             # Extract user data for post processing
             user_data = self._extract_user_data_comprehensive(raw_data)
@@ -223,21 +223,21 @@ class ComprehensiveDataService:
             if user_data:
                 # Store all posts from profile
                 logger.info(f"Processing posts for profile {profile.id}")
-                print(f"📝 DATABASE: Processing posts for profile {profile.id}")
+                print(f"DATABASE: Processing posts for profile {profile.id}")
                 posts_count = await self._store_profile_posts(db, profile.id, user_data)
-                print(f"✅ DATABASE: Stored {posts_count} posts")
-                
+                print(f"DATABASE: Stored {posts_count} posts")
+
                 # Store related profiles
                 logger.info(f"Processing related profiles for profile {profile.id}")
-                print(f"👥 DATABASE: Processing related profiles...")
+                print(f"DATABASE: Processing related profiles...")
                 related_count = await self._store_related_profiles(db, profile.id, user_data)
-                print(f"✅ DATABASE: Stored {related_count} related profiles")
-                
+                print(f"DATABASE: Stored {related_count} related profiles")
+
                 # Store profile images metadata
                 logger.info(f"Processing profile images for profile {profile.id}")
-                print(f"🖼️  DATABASE: Processing profile images metadata...")
+                print(f"DATABASE: Processing profile images metadata...")
                 await self._store_profile_images(db, profile.id, user_data)
-                print(f"✅ DATABASE: Profile images metadata processed")
+                print(f"DATABASE: Profile images metadata processed")
                 
                 logger.info(f"SUCCESS: Complete profile data stored for {username}")
             else:
@@ -252,21 +252,22 @@ class ComprehensiveDataService:
     def _extract_user_data_comprehensive(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract user data from Apify response with comprehensive error handling"""
         try:
-            # Handle multiple possible response structures
+            # Handle Apify format - data is directly in content.data, no user wrapper
             if 'results' in raw_data:
                 results = raw_data['results']
                 if results and len(results) > 0:
                     result = results[0]
                     if 'content' in result and 'data' in result['content']:
-                        return result['content']['data'].get('user', {})
+                        # CRITICAL FIX: Apify data is directly in 'data', not in 'data.user'
+                        return result['content']['data']
                     elif 'data' in result:
-                        return result['data'].get('user', {})
-            
-            # Direct user data
+                        return result['data']
+
+            # Fallback: Direct user data (legacy formats)
             if 'user' in raw_data:
                 return raw_data['user']
-                
-            # GraphQL response structure
+
+            # GraphQL response structure (legacy)
             if 'data' in raw_data and 'user' in raw_data['data']:
                 return raw_data['data']['user']
                 
@@ -412,15 +413,22 @@ class ComprehensiveDataService:
         followers = profile_data.get('followers_count', 0)
         posts_count = profile_data.get('posts_count', 0)
         
-        # Calculate engagement rate from recent posts if available
+        # CRITICAL FIX: Calculate engagement rate from recent posts - handle both formats
+        # Try Instagram GraphQL format first
         posts_data = safe_get(user_data, 'edge_owner_to_timeline_media.edges', [])
+        if not posts_data:
+            # Try Apify format - convert to GraphQL-like structure for compatibility
+            apify_posts = safe_get(user_data, 'posts', [])
+            posts_data = [{'node': post} for post in apify_posts]
+
         total_engagement = 0
         analyzed_posts = 0
-        
+
         for post_edge in posts_data[:12]:  # Last 12 posts
             post_node = post_edge.get('node', {})
-            likes = safe_get(post_node, 'edge_liked_by.count', 0)
-            comments = safe_get(post_node, 'edge_media_to_comment.count', 0)
+            # Handle both GraphQL format (edge_liked_by.count) and Apify format (direct likes_count)
+            likes = safe_get(post_node, 'edge_liked_by.count', 0) or safe_get(post_node, 'likes_count', 0)
+            comments = safe_get(post_node, 'edge_media_to_comment.count', 0) or safe_get(post_node, 'comments_count', 0)
             total_engagement += likes + comments
             analyzed_posts += 1
         
@@ -510,21 +518,34 @@ class ComprehensiveDataService:
     async def _store_profile_posts(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]) -> int:
         """Store ALL posts from profile with comprehensive data mapping and engagement rate calculation"""
         try:
-            posts_edges = user_data.get('edge_owner_to_timeline_media', {}).get('edges', [])
-            print(f"📝 DATABASE: Found {len(posts_edges)} posts to process")
-            
+            # CRITICAL FIX: Handle both Instagram GraphQL format AND Apify format
+            posts_edges = []
+
+            # Try Instagram GraphQL format first (edge_owner_to_timeline_media.edges)
+            graphql_posts = user_data.get('edge_owner_to_timeline_media', {}).get('edges', [])
+            if graphql_posts:
+                posts_edges = graphql_posts
+                print(f" DATABASE: Found {len(posts_edges)} posts to process (GraphQL format)")
+            else:
+                # Try Apify format (simple posts array)
+                apify_posts = user_data.get('posts', [])
+                if apify_posts:
+                    # Convert Apify format to GraphQL-like format for compatibility
+                    posts_edges = [{'node': post} for post in apify_posts]
+                    print(f" DATABASE: Found {len(posts_edges)} posts to process (Apify format)")
+
             if not posts_edges:
                 logger.info(f"No posts found for profile {profile_id}")
-                print(f"📝 DATABASE: No posts found for profile {profile_id}")
+                print(f" DATABASE: No posts found for profile {profile_id}")
                 return 0
             
             # Get profile's followers count for engagement rate calculation
-            print(f"📝 DATABASE: Getting follower count for engagement rate calculation...")
+            print(f" DATABASE: Getting follower count for engagement rate calculation...")
             profile_result = await db.execute(
                 select(Profile.followers_count).where(Profile.id == profile_id)
             )
             followers_count = profile_result.scalar() or 0
-            print(f"📝 DATABASE: Profile has {followers_count} followers for engagement calculation")
+            print(f" DATABASE: Profile has {followers_count} followers for engagement calculation")
             
             posts_created = 0
             posts_skipped = 0
@@ -537,7 +558,7 @@ class ComprehensiveDataService:
                     posts_skipped += 1
                     continue
                 
-                print(f"📝 DATABASE: Processing post {i}/{len(posts_edges)} (shortcode: {shortcode})")
+                print(f" DATABASE: Processing post {i}/{len(posts_edges)} (shortcode: {shortcode})")
                 
                 # Check if post already exists
                 result = await db.execute(
@@ -551,11 +572,11 @@ class ComprehensiveDataService:
                 existing_post = result.scalar_one_or_none()
                 
                 if existing_post:
-                    print(f"📝 DATABASE: Post {shortcode} already exists, skipping")
+                    print(f" DATABASE: Post {shortcode} already exists, skipping")
                     posts_skipped += 1
                     continue
                 
-                print(f"📝 DATABASE: Creating new post {shortcode}...")
+                print(f" DATABASE: Creating new post {shortcode}...")
                 post_data = self._map_post_data_comprehensive(post_node, profile_id)
                 
                 # Calculate and add engagement rate
@@ -574,9 +595,9 @@ class ComprehensiveDataService:
                 post = Post(**valid_post_fields)
                 db.add(post)
                 posts_created += 1
-                print(f"📝 DATABASE: Post {shortcode} prepared for database insert")
+                print(f" DATABASE: Post {shortcode} prepared for database insert")
             
-            print(f"📝 DATABASE: Committing {posts_created} new posts to database...")
+            print(f" DATABASE: Committing {posts_created} new posts to database...")
             await db.commit()
             logger.info(f"Created {posts_created} new posts for profile {profile_id}")
             logger.info(f"DATABASE: Successfully committed {posts_created} posts ({posts_skipped} skipped as duplicates)")
@@ -606,32 +627,43 @@ class ComprehensiveDataService:
             except (KeyError, TypeError):
                 return default
         
-        # Direct URLs - external proxy will be handled elsewhere
+        # CRITICAL FIX: Handle both Instagram GraphQL format AND Apify format
+        shortcode = safe_get(post_node, 'shortcode', '')
+        instagram_id = safe_get(post_node, 'id', '') or safe_get(post_node, 'instagram_post_id', '')
+
+        # BUGFIX: Ensure instagram_post_id is never empty by using shortcode as fallback
+        if not instagram_id and shortcode:
+            instagram_id = f"shortcode_{shortcode}"
+        elif not instagram_id:
+            # Generate a unique ID if both are missing
+            import uuid
+            instagram_id = f"generated_{str(uuid.uuid4())[:8]}"
+
         post_data = {
             'profile_id': profile_id,
-            'instagram_post_id': safe_get(post_node, 'id', ''),
-            'shortcode': safe_get(post_node, 'shortcode', ''),
-            
-            # Media information (direct URLs)
+            'instagram_post_id': instagram_id,
+            'shortcode': shortcode,
+
+            # Media information - handle both formats
             'media_type': safe_get(post_node, '__typename', ''),
             'is_video': safe_get(post_node, 'is_video', False),
             'display_url': safe_get(post_node, 'display_url', ''),
             'thumbnail_src': safe_get(post_node, 'thumbnail_src', ''),
             'thumbnail_tall_src': safe_get(post_node, 'thumbnail_tall_src', ''),
-            
-            # Video fields (direct URLs)
+
+            # Video fields - handle both formats
             'video_url': safe_get(post_node, 'video_url', ''),
             'video_view_count': safe_get(post_node, 'video_view_count', 0),
             'has_audio': safe_get(post_node, 'has_audio'),
             'video_duration': safe_get(post_node, 'video_duration'),
-            
+
             # Dimensions
             'width': safe_get(post_node, 'dimensions.width', 0),
             'height': safe_get(post_node, 'dimensions.height', 0),
-            
-            # Engagement
-            'likes_count': safe_get(post_node, 'edge_liked_by.count', 0),
-            'comments_count': safe_get(post_node, 'edge_media_to_comment.count', 0),
+
+            # CRITICAL: Engagement - handle both GraphQL format (edge_liked_by.count) and Apify format (likes_count)
+            'likes_count': safe_get(post_node, 'edge_liked_by.count', 0) or safe_get(post_node, 'likes_count', 0),
+            'comments_count': safe_get(post_node, 'edge_media_to_comment.count', 0) or safe_get(post_node, 'comments_count', 0),
             'comments_disabled': safe_get(post_node, 'comments_disabled', False),
             
             # Content
@@ -650,9 +682,8 @@ class ComprehensiveDataService:
             'is_carousel': safe_get(post_node, '__typename') == 'GraphSidecar',
             'carousel_media_count': len(safe_get(post_node, 'edge_sidecar_to_children.edges', [])) if safe_get(post_node, '__typename') == 'GraphSidecar' else 1,
             
-            # Timestamps
-            'taken_at_timestamp': safe_get(post_node, 'taken_at_timestamp', 0),
-            'posted_at': datetime.fromtimestamp(safe_get(post_node, 'taken_at_timestamp', 0), tz=timezone.utc) if safe_get(post_node, 'taken_at_timestamp') else None,
+            # CRITICAL: Timestamps - handle both formats
+            'taken_at_timestamp': safe_get(post_node, 'taken_at_timestamp', 0) or safe_get(post_node, 'timestamp', 0),
             
             # Structured data
             'thumbnail_resources': safe_get(post_node, 'thumbnail_resources', []),
@@ -666,10 +697,19 @@ class ComprehensiveDataService:
             'raw_data': post_node
         }
         
-        # Extract caption
+        # CRITICAL FIX: Extract caption - handle both Instagram GraphQL format AND Apify format
+        caption_text = ''
+
+        # Try Instagram GraphQL format first (edge_media_to_caption.edges)
         caption_edges = safe_get(post_node, 'edge_media_to_caption.edges', [])
         if caption_edges and len(caption_edges) > 0:
-            post_data['caption'] = caption_edges[0].get('node', {}).get('text', '')
+            caption_text = caption_edges[0].get('node', {}).get('text', '')
+
+        # If no caption found, try Apify format (direct caption field)
+        if not caption_text:
+            caption_text = safe_get(post_node, 'caption', '') or safe_get(post_node, 'text', '')
+
+        post_data['caption'] = caption_text
         
         # Extract hashtags and mentions from caption
         caption = post_data.get('caption', '')
@@ -750,17 +790,29 @@ class ComprehensiveDataService:
     async def _store_related_profiles(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]) -> int:
         """Store related/suggested profiles"""
         try:
-            print(f"👥 DATABASE: Cleaning existing related profiles...")
+            print(f" DATABASE: Cleaning existing related profiles...")
             # Delete existing related profiles
             delete_result = await db.execute(delete(RelatedProfile).where(RelatedProfile.profile_id == profile_id))
-            print(f"👥 DATABASE: Deleted {delete_result.rowcount or 0} existing related profiles")
+            print(f" DATABASE: Deleted {delete_result.rowcount or 0} existing related profiles")
             
-            # Extract related profiles
-            related_edges = user_data.get('edge_related_profiles', {}).get('edges', [])
-            print(f"👥 DATABASE: Found {len(related_edges)} related profiles to process")
-            
+            # CRITICAL FIX: Handle both Instagram GraphQL format AND Apify format for related profiles
+            related_edges = []
+
+            # Try Instagram GraphQL format first (edge_related_profiles.edges)
+            graphql_related = user_data.get('edge_related_profiles', {}).get('edges', [])
+            if graphql_related:
+                related_edges = graphql_related
+                print(f" DATABASE: Found {len(related_edges)} related profiles to process (GraphQL format)")
+            else:
+                # Try Apify format (simple related_profiles array)
+                apify_related = user_data.get('related_profiles', [])
+                if apify_related:
+                    # Convert Apify format to GraphQL-like format for compatibility
+                    related_edges = [{'node': profile} for profile in apify_related]
+                    print(f" DATABASE: Found {len(related_edges)} related profiles to process (Apify format)")
+
             if not related_edges:
-                print(f"👥 DATABASE: No related profiles found")
+                print(f" DATABASE: No related profiles found")
                 return 0
             
             related_count = 0
@@ -769,10 +821,10 @@ class ComprehensiveDataService:
                 username = node.get('username')
                 
                 if not username:
-                    print(f"👥 DATABASE: Skipping related profile {i} (no username)")
+                    print(f" DATABASE: Skipping related profile {i} (no username)")
                     continue
                 
-                print(f"👥 DATABASE: Processing related profile {i}/{min(len(related_edges), 15)}: @{username}")
+                print(f" DATABASE: Processing related profile {i}/{min(len(related_edges), 15)}: @{username}")
                 
                 related_data = {
                     'profile_id': profile_id,
@@ -789,12 +841,12 @@ class ComprehensiveDataService:
                 related_profile = RelatedProfile(**related_data)
                 db.add(related_profile)
                 related_count += 1
-                print(f"👥 DATABASE: Related profile @{username} prepared for insert")
+                print(f" DATABASE: Related profile @{username} prepared for insert")
             
-            print(f"👥 DATABASE: Committing {related_count} related profiles to database...")
+            print(f" DATABASE: Committing {related_count} related profiles to database...")
             await db.commit()
             logger.info(f"Stored {related_count} related profiles for profile {profile_id}")
-            print(f"✅ DATABASE: Successfully committed {related_count} related profiles")
+            print(f"[SUCCESS] DATABASE: Successfully committed {related_count} related profiles")
             return related_count
             
         except Exception as e:
@@ -1612,12 +1664,12 @@ class ComprehensiveDataService:
     async def grant_team_profile_access(self, db: AsyncSession, team_id: UUID, user_id: UUID, username: str) -> bool:
         """Grant team access to a profile"""
         try:
-            print(f"👥 TEAM ACCESS: Starting team access grant for {username} to team {team_id}")
+            print(f" TEAM ACCESS: Starting team access grant for {username} to team {team_id}")
             from app.database.unified_models import TeamProfileAccess
             from uuid import uuid4
             
             # Find profile by username
-            print(f"👥 TEAM ACCESS: Looking up profile {username} in database...")
+            print(f" TEAM ACCESS: Looking up profile {username} in database...")
             result = await db.execute(
                 select(Profile).where(Profile.username == username)
             )
@@ -1628,10 +1680,10 @@ class ComprehensiveDataService:
                 print(f"❌ TEAM ACCESS: Profile {username} not found in database")
                 return False
             
-            print(f"✅ TEAM ACCESS: Profile {username} found (ID: {profile.id})")
+            print(f"[SUCCESS] TEAM ACCESS: Profile {username} found (ID: {profile.id})")
                 
             # Map auth.users.id to public.users.id for foreign key constraint
-            print(f"👥 TEAM ACCESS: Mapping Supabase user {user_id} to public users table...")
+            print(f" TEAM ACCESS: Mapping Supabase user {user_id} to public users table...")
             public_user_result = await db.execute(
                 select(User.id).where(User.supabase_user_id == str(user_id))
             )
@@ -1642,10 +1694,10 @@ class ComprehensiveDataService:
                 print(f"❌ TEAM ACCESS: Cannot find public.users record for auth user {user_id}")
                 return False
             
-            print(f"✅ TEAM ACCESS: Mapped to public user ID: {public_user_id}")
+            print(f"[SUCCESS] TEAM ACCESS: Mapped to public user ID: {public_user_id}")
             
             # Check if team access already exists
-            print(f"👥 TEAM ACCESS: Checking if team access already exists...")
+            print(f" TEAM ACCESS: Checking if team access already exists...")
             existing_access = await db.execute(
                 select(TeamProfileAccess).where(
                     and_(
@@ -1658,12 +1710,12 @@ class ComprehensiveDataService:
             
             if access_record:
                 # Update access timestamp
-                print(f"👥 TEAM ACCESS: Team access already exists, updating timestamp...")
+                print(f" TEAM ACCESS: Team access already exists, updating timestamp...")
                 access_record.accessed_at = datetime.now(timezone.utc)
                 logger.info(f"Updated team access for team {team_id} to profile {username}")
             else:
                 # Create new team access
-                print(f"👥 TEAM ACCESS: Creating new team access record...")
+                print(f" TEAM ACCESS: Creating new team access record...")
                 new_access = TeamProfileAccess(
                     id=uuid4(),
                     team_id=team_id,
@@ -1673,11 +1725,11 @@ class ComprehensiveDataService:
                 )
                 db.add(new_access)
                 logger.info(f"Granted new team access for team {team_id} to profile {username}")
-                print(f"👥 TEAM ACCESS: New team access record created")
+                print(f" TEAM ACCESS: New team access record created")
             
-            print(f"👥 TEAM ACCESS: Committing team access to database...")
+            print(f" TEAM ACCESS: Committing team access to database...")
             await db.commit()
-            print(f"✅ TEAM ACCESS: Team access granted successfully for {username}")
+            print(f"[SUCCESS] TEAM ACCESS: Team access granted successfully for {username}")
             return True
             
         except Exception as e:

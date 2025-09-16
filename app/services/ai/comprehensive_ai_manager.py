@@ -428,6 +428,72 @@ class ComprehensiveAIManager:
             raise ValueError(f"Unknown model type: {model_type}")
     
     # ==========================================
+    # DATA VALIDATION HELPERS
+    # ==========================================
+
+    def _validate_posts_data(self, posts_data: List, context: str = 'analysis') -> List[dict]:
+        """
+        CRITICAL: Validate and convert posts_data to proper dictionary format
+        Handles cases where database rows are passed instead of dictionaries
+        """
+        validated_posts = []
+
+        for i, post in enumerate(posts_data):
+            try:
+                # Check if post is already a dictionary
+                if isinstance(post, dict):
+                    validated_posts.append(post)
+                    continue
+
+                # If post is a database row object (has attributes), convert to dict
+                if hasattr(post, 'id') and hasattr(post, 'caption'):
+                    post_dict = {
+                        'id': str(getattr(post, 'id', f'unknown_{i}')),
+                        'instagram_post_id': getattr(post, 'instagram_post_id', ''),
+                        'caption': getattr(post, 'caption', '') or '',
+                        'likes_count': getattr(post, 'likes_count', 0) or 0,
+                        'comments_count': getattr(post, 'comments_count', 0) or 0,
+                        'display_url': getattr(post, 'display_url', ''),
+                        'thumbnail_url': getattr(post, 'thumbnail_url', ''),
+                        'cdn_thumbnail_url': getattr(post, 'cdn_thumbnail_url', ''),
+                        'is_video': getattr(post, 'is_video', False) or False,
+                        'video_view_count': getattr(post, 'video_view_count', 0) or 0,
+                        'posted_at': getattr(post, 'posted_at', None),
+                        'created_at': getattr(post, 'created_at', None)
+                    }
+                    validated_posts.append(post_dict)
+                    continue
+
+                # If post is a list/tuple (database row), convert using indexes
+                if isinstance(post, (list, tuple)) and len(post) >= 3:
+                    # Assume standard order: id, instagram_post_id, caption, likes, comments...
+                    post_dict = {
+                        'id': str(post[0]) if len(post) > 0 else f'unknown_{i}',
+                        'instagram_post_id': post[1] if len(post) > 1 else '',
+                        'caption': (post[2] or '') if len(post) > 2 else '',
+                        'likes_count': (post[3] or 0) if len(post) > 3 else 0,
+                        'comments_count': (post[4] or 0) if len(post) > 4 else 0,
+                        'display_url': post[5] if len(post) > 5 else '',
+                        'thumbnail_url': post[6] if len(post) > 6 else '',
+                        'cdn_thumbnail_url': post[7] if len(post) > 7 else '',
+                        'is_video': (post[8] or False) if len(post) > 8 else False,
+                        'video_view_count': (post[9] or 0) if len(post) > 9 else 0,
+                        'posted_at': post[10] if len(post) > 10 else None,
+                        'created_at': post[11] if len(post) > 11 else None
+                    }
+                    validated_posts.append(post_dict)
+                    continue
+
+                logger.warning(f"[AI-VALIDATION] Unrecognized post data format at index {i} in {context}: {type(post)}")
+
+            except Exception as e:
+                logger.error(f"[AI-VALIDATION] Failed to convert post at index {i} in {context}: {e}")
+                continue
+
+        logger.info(f"[AI-VALIDATION] {context}: Converted {len(validated_posts)}/{len(posts_data)} posts to valid format")
+        return validated_posts
+
+    # ==========================================
     # EXISTING CORE MODEL ANALYSIS (Enhanced)
     # ==========================================
     
@@ -439,34 +505,76 @@ class ComprehensiveAIManager:
             'sentiment_scores': [],
             'confidence_avg': 0.0
         }
-        
+
         total_posts = len(posts_data)
         if total_posts == 0:
             return results
-        
+
+        # CRITICAL FIX: Validate and convert posts_data structure
+        validated_posts = self._validate_posts_data(posts_data, 'sentiment_analysis')
+        if not validated_posts:
+            logger.warning("[AI-SENTIMENT] No valid posts data for analysis")
+            return results
+
         sentiment_counts = {'positive': 0, 'negative': 0, 'neutral': 0}
         confidence_sum = 0
-        
-        for post in posts_data:
+
+        for post in validated_posts:
             caption = post.get('caption', '')
             if caption:
                 try:
-                    # Use existing AI manager for sentiment
-                    analysis = await ai_manager.analyze_sentiment(caption)
-                    
+                    # Use AI manager pipeline directly
+                    pipeline_obj = ai_manager.get_sentiment_pipeline()
+                    processed_text = ai_manager.preprocess_text_for_model(caption, 'sentiment')
+                    pipeline_results = pipeline_obj(processed_text)
+
+                    if pipeline_results and isinstance(pipeline_results, list) and len(pipeline_results) > 0:
+                        # CRITICAL FIX: Handle different pipeline result formats
+                        best_result = None
+                        try:
+                            # Try to find best result by score (dictionary format)
+                            if all(isinstance(x, dict) and 'score' in x for x in pipeline_results):
+                                best_result = max(pipeline_results, key=lambda x: x['score'])
+                            else:
+                                # Fallback to first result
+                                best_result = pipeline_results[0]
+                        except (KeyError, TypeError):
+                            best_result = pipeline_results[0] if pipeline_results else {}
+
+                        # Handle different result formats
+                        if isinstance(best_result, dict):
+                            label_map = {
+                                'LABEL_0': 'negative', 'NEGATIVE': 'negative',
+                                'LABEL_1': 'neutral', 'NEUTRAL': 'neutral',
+                                'LABEL_2': 'positive', 'POSITIVE': 'positive'
+                            }
+                            raw_label = best_result.get('label', 'neutral')
+                            sentiment = label_map.get(raw_label, str(raw_label).lower())
+                            confidence = float(best_result.get('score', 0.0))
+                        else:
+                            # Fallback for unexpected formats
+                            sentiment = 'neutral'
+                            confidence = 0.0
+
+                        score_map = {'negative': -0.5, 'neutral': 0.0, 'positive': 0.5}
+                        score = score_map.get(sentiment, 0.0) * confidence
+                        analysis = {'sentiment': sentiment, 'confidence': confidence, 'score': score}
+                    else:
+                        analysis = {'sentiment': 'neutral', 'confidence': 0.0, 'score': 0.0}
+
                     sentiment = analysis.get('sentiment', 'neutral')
-                    confidence = analysis.get('confidence', 0.0)
-                    
+                    confidence = float(analysis.get('confidence', 0.0))  # Ensure Python float, not numpy
+
                     sentiment_counts[sentiment] += 1
                     confidence_sum += confidence
-                    
+
                     results['sentiment_scores'].append({
-                        'post_id': post.get('id'),
+                        'post_id': str(post.get('id', '')),  # Ensure string, not numpy type
                         'sentiment': sentiment,
                         'confidence': confidence,
-                        'score': analysis.get('score', 0.0)
+                        'score': float(analysis.get('score', 0.0))  # Ensure Python float
                     })
-                    
+
                 except Exception as e:
                     logger.warning(f"Sentiment analysis failed for post: {e}")
         
@@ -491,33 +599,66 @@ class ComprehensiveAIManager:
             'language_scores': [],
             'multilingual_score': 0.0
         }
-        
+
+        # CRITICAL FIX: Validate and convert posts_data structure
+        validated_posts = self._validate_posts_data(posts_data, 'language_analysis')
+        if not validated_posts:
+            return results
+
         language_counts = {}
-        total_posts = len(posts_data)
-        
+        total_posts = len(validated_posts)
+
         if total_posts == 0:
             return results
-        
-        for post in posts_data:
+
+        for post in validated_posts:
             caption = post.get('caption', '')
             if caption:
                 try:
-                    # Use existing AI manager for language detection
-                    analysis = await ai_manager.detect_language(caption)
-                    
+                    # Use AI manager pipeline directly
+                    pipeline_obj = ai_manager.get_language_pipeline()
+                    processed_text = ai_manager.preprocess_text_for_model(caption, 'language')
+                    pipeline_results = pipeline_obj(processed_text)
+
+                    if pipeline_results and isinstance(pipeline_results, list) and len(pipeline_results) > 0:
+                        # CRITICAL FIX: Handle different pipeline result formats
+                        best_result = None
+                        try:
+                            # Try to find best result by score (dictionary format)
+                            if all(isinstance(x, dict) and 'score' in x for x in pipeline_results):
+                                best_result = max(pipeline_results, key=lambda x: x['score'])
+                            else:
+                                # Fallback to first result
+                                best_result = pipeline_results[0]
+                        except (KeyError, TypeError):
+                            best_result = pipeline_results[0] if pipeline_results else {}
+
+                        # Handle different result formats
+                        if isinstance(best_result, dict):
+                            language = best_result.get('label', 'en')
+                            confidence = float(best_result.get('score', 0.0))
+                        else:
+                            # Fallback for unexpected formats
+                            language = 'en'
+                            confidence = 0.0
+
+                        analysis = {'language': language, 'confidence': confidence}
+                    else:
+                        analysis = {'language': 'en', 'confidence': 0.0}
+
                     language = analysis.get('language', 'en')
-                    confidence = analysis.get('confidence', 0.0)
-                    
+                    confidence = float(analysis.get('confidence', 0.0))  # Ensure Python float
+
                     if language not in language_counts:
                         language_counts[language] = 0
                     language_counts[language] += 1
-                    
+
                     results['language_scores'].append({
-                        'post_id': post.get('id'),
+                        'post_id': str(post.get('id', '')),  # Ensure string
                         'language': language,
                         'confidence': confidence
                     })
-                    
+
                 except Exception as e:
                     logger.warning(f"Language detection failed for post: {e}")
         
@@ -544,29 +685,49 @@ class ComprehensiveAIManager:
             'category_scores': [],
             'content_diversity_score': 0.0
         }
-        
+
+        # CRITICAL FIX: Validate and convert posts_data structure
+        validated_posts = self._validate_posts_data(posts_data, 'category_analysis')
+        if not validated_posts:
+            return results
+
         category_counts = {}
-        total_posts = len(posts_data)
-        
+        total_posts = len(validated_posts)
+
         if total_posts == 0:
             return results
-        
-        for post in posts_data:
+
+        for post in validated_posts:
             caption = post.get('caption', '')
             if caption:
                 try:
-                    # Use existing AI manager for categorization
-                    analysis = await ai_manager.classify_content_category(caption)
-                    
+                    # Use AI manager pipeline directly
+                    pipeline_obj = ai_manager.get_category_pipeline()
+                    processed_text = ai_manager.preprocess_text_for_model(caption, 'category')
+
+                    categories = [
+                        'fashion', 'beauty', 'travel', 'food', 'fitness', 'technology',
+                        'lifestyle', 'business', 'education', 'entertainment', 'sports',
+                        'health', 'art', 'music', 'photography', 'automotive', 'gaming',
+                        'home', 'parenting', 'pets', 'general'
+                    ]
+
+                    pipeline_results = pipeline_obj(processed_text, categories)
+
+                    if pipeline_results and 'labels' in pipeline_results and 'scores' in pipeline_results:
+                        analysis = {'category': pipeline_results['labels'][0], 'confidence': float(pipeline_results['scores'][0])}
+                    else:
+                        analysis = {'category': 'general', 'confidence': 0.0}
+
                     category = analysis.get('category', 'general')
-                    confidence = analysis.get('confidence', 0.0)
-                    
+                    confidence = float(analysis.get('confidence', 0.0))  # Ensure Python float
+
                     if category not in category_counts:
                         category_counts[category] = 0
                     category_counts[category] += 1
-                    
+
                     results['category_scores'].append({
-                        'post_id': post.get('id'),
+                        'post_id': str(post.get('id', '')),  # Ensure string
                         'category': category,
                         'confidence': confidence
                     })
@@ -596,10 +757,13 @@ class ComprehensiveAIManager:
     async def _analyze_audience_quality(self, profile_data: dict, posts_data: List[dict]) -> Dict[str, Any]:
         """Audience Quality Assessment - Fake follower detection, engagement analysis"""
         logger.info("[SEARCH] Analyzing audience quality and authenticity")
-        
+
+        # CRITICAL FIX: Validate and convert posts_data structure
+        validated_posts = self._validate_posts_data(posts_data, 'audience_quality_analysis')
+
         # Extract engagement metrics
         engagement_data = []
-        for post in posts_data:
+        for post in validated_posts:
             likes = post.get('likes_count', 0)
             comments = post.get('comments_count', 0)
             followers = profile_data.get('followers_count', 1)
@@ -632,7 +796,7 @@ class ComprehensiveAIManager:
         
         # Fake follower detection heuristics
         likes_comments_ratio = df['likes_to_comments_ratio'].mean()
-        suspicious_ratio = likes_comments_ratio > 50  # Very high likes to comments ratio
+        suspicious_ratio = bool(likes_comments_ratio > 50)  # Convert numpy.bool to Python bool
         
         # Overall authenticity score
         authenticity_score = max(0, min(100, (
@@ -658,8 +822,8 @@ class ComprehensiveAIManager:
             },
             'quality_indicators': {
                 'high_likes_comments_ratio': suspicious_ratio,
-                'engagement_volatility': df['engagement_rate'].std(),
-                'consistent_engagement': engagement_consistency > 0.7
+                'engagement_volatility': float(df['engagement_rate'].std()),
+                'consistent_engagement': bool(engagement_consistency > 0.7)
             }
         }
     
@@ -879,15 +1043,22 @@ class ComprehensiveAIManager:
     async def _analyze_trend_detection(self, profile_data: dict, posts_data: List[dict]) -> Dict[str, Any]:
         """Trend Detection - Content trend analysis, viral potential, timing optimization"""
         logger.info("[ANALYTICS] Analyzing content trends and viral potential")
-        
+
         try:
+            # CRITICAL FIX: Validate and convert posts_data structure
+            validated_posts = self._validate_posts_data(posts_data, 'trend_detection')
+
             # Analyze engagement trends over time
             engagement_over_time = []
             hashtag_trends = {}
             content_evolution = []
-            
-            # Sort posts by date for trend analysis
-            sorted_posts = sorted(posts_data, key=lambda x: x.get('posted_at', ''), reverse=True)
+
+            # Sort posts by date for trend analysis (handle None values)
+            sorted_posts = sorted(
+                validated_posts,
+                key=lambda x: x.get('posted_at') or datetime.now(timezone.utc),
+                reverse=True
+            )
             
             for i, post in enumerate(sorted_posts[:20]):  # Analyze last 20 posts
                 likes = post.get('likes_count', 0)
@@ -1192,7 +1363,12 @@ class ComprehensiveAIManager:
             posting_times = []
             posting_gaps = []
             
-            sorted_posts = sorted(posts_data, key=lambda x: x.get('posted_at', ''), reverse=True)
+            # Filter out posts with None timestamps and provide safe sorting
+            posts_with_timestamps = [p for p in posts_data if p.get('posted_at') is not None]
+            if posts_with_timestamps:
+                sorted_posts = sorted(posts_with_timestamps, key=lambda x: x.get('posted_at', ''), reverse=True)
+            else:
+                sorted_posts = posts_data  # Use original order if no timestamps
             
             for i, post in enumerate(sorted_posts[:-1]):
                 current_time = post.get('posted_at')
@@ -1276,18 +1452,18 @@ class ComprehensiveAIManager:
                 'lifecycle_analysis': {
                     'current_stage': lifecycle_stage,
                     'growth_indicators': {
-                        'consistent_posting': consistency_score > 70,
-                        'engaging_content': high_engagement_posts > len(posts_data) * 0.2,
-                        'diverse_content': sum(content_diversity.values()) > 2.5,
-                        'strategic_hashtag_use': content_diversity['hashtag_usage_rate'] > 0.5
+                        'consistent_posting': bool(consistency_score > 70),
+                        'engaging_content': bool(high_engagement_posts > len(posts_data) * 0.2),
+                        'diverse_content': bool(sum(content_diversity.values()) > 2.5),
+                        'strategic_hashtag_use': bool(content_diversity['hashtag_usage_rate'] > 0.5)
                     }
                 },
                 'behavioral_insights': behavioral_insights,
                 'optimization_opportunities': {
-                    'improve_consistency': consistency_score < 60,
-                    'increase_video_content': content_diversity['video_content_rate'] < 0.3,
-                    'better_hashtag_strategy': content_diversity['hashtag_usage_rate'] < 0.7,
-                    'location_tagging': content_diversity['location_tagging_rate'] < 0.3
+                    'improve_consistency': bool(consistency_score < 60),
+                    'increase_video_content': bool(content_diversity['video_content_rate'] < 0.3),
+                    'better_hashtag_strategy': bool(content_diversity['hashtag_usage_rate'] < 0.7),
+                    'location_tagging': bool(content_diversity['location_tagging_rate'] < 0.3)
                 }
             }
             

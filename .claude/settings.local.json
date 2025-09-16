@@ -39,7 +39,11 @@
       "Bash(netstat:*)",
       "WebFetch(domain:apify.com)",
       "mcp__cloudflare__r2_list_buckets",
-      "mcp__cloudflare__r2_list_objects"
+      "mcp__cloudflare__r2_list_objects",
+      "Bash(python:*)",
+      "mcp__cloudflare__r2_put_object",
+      "WebFetch(domain:cdn.following.ae)",
+      "mcp__cloudflare__r2_delete_object"
     ],
     "deny": [],
     "ask": [],

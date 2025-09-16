@@ -325,6 +325,21 @@ class Profile(Base):
     # NEW: Top Categories System for Frontend Display
     ai_top_3_categories = Column(JSONB, nullable=True)  # [{"category": "Fashion & Beauty", "percentage": 45.2, "confidence": 0.87}, ...]
     ai_top_10_categories = Column(JSONB, nullable=True)  # [{"category": "Fashion & Beauty", "percentage": 45.2, "confidence": 0.87}, ...]
+
+    # COMPREHENSIVE AI ANALYSIS (All 10 Models)
+    ai_audience_quality = Column(JSONB, nullable=True)  # Audience authenticity, engagement quality, bot detection
+    ai_visual_content = Column(JSONB, nullable=True)  # Visual aesthetics, composition, consistency analysis
+    ai_audience_insights = Column(JSONB, nullable=True)  # Demographics, interests, behavioral patterns
+    ai_trend_detection = Column(JSONB, nullable=True)  # Content trends, viral potential, momentum analysis
+    ai_advanced_nlp = Column(JSONB, nullable=True)  # Writing style, vocabulary, emotional patterns
+    ai_fraud_detection = Column(JSONB, nullable=True)  # Fraud risk, suspicious patterns, authenticity
+    ai_behavioral_patterns = Column(JSONB, nullable=True)  # Posting patterns, lifecycle, consistency
+
+    # Comprehensive AI Metadata
+    ai_comprehensive_analysis_version = Column(String(20), nullable=True)  # Track comprehensive AI version
+    ai_comprehensive_analyzed_at = Column(DateTime(timezone=True), nullable=True)  # When comprehensive analysis completed
+    ai_models_success_rate = Column(Float, nullable=True)  # Success rate of all 10 models (0.0-1.0)
+    ai_models_status = Column(JSONB, nullable=True)  # Status of each individual model
     
     # Data management
     refresh_count = Column(Integer, nullable=True, default=0)

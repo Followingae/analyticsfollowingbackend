@@ -212,10 +212,15 @@ def extract_profile_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         if not user_data:
             logger.warning("No user data extracted from Apify response")
             logger.warning(f"Raw data structure: {list(raw_data.keys()) if raw_data else 'None'}")
+            if raw_data and 'results' in raw_data:
+                logger.warning(f"Results structure: {list(raw_data['results'][0].keys()) if raw_data['results'] else 'No results'}")
+                if raw_data['results'] and 'content' in raw_data['results'][0]:
+                    logger.warning(f"Content structure: {list(raw_data['results'][0]['content'].keys())}")
         else:
             logger.info(f"SUCCESS: Extracted Apify user data with {len(user_data)} fields")
             logger.info(f"Apify followers: {user_data.get('followers_count', 0):,}")
             logger.info(f"Apify posts: {len(user_data.get('posts', []))}")
+            logger.info(f"User data keys: {list(user_data.keys())}")
         
         # Map to profile fields with multiple field name attempts
         instagram_id = (
@@ -282,6 +287,7 @@ def extract_profile_data(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 cleaned_data[key] = raw_data
         
         logger.info(f"Extracted data: followers={cleaned_data.get('followers_count')}, posts={cleaned_data.get('posts_count')}, verified={cleaned_data.get('is_verified')}")
+        logger.info(f"Profile data keys being stored: {list(cleaned_data.keys())}")
         
         return cleaned_data
         

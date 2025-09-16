@@ -90,13 +90,30 @@ def atomic_requires_credits(
                     logger.info(f"[SEARCH] DEBUG: Found Request object in kwargs[{key}]")
                 elif str(type(value)).find('AsyncSession') != -1:  # Database session
                     db_session = value
-                    # logger.debug(f"[SEARCH] DEBUG: Found Database session in kwargs[{key}]")
+                    logger.info(f"[SEARCH] DEBUG: Found Database session in kwargs[{key}]")
+
+            # Also check args for database session (when called from another route)
+            if not db_session:
+                for i, arg in enumerate(args):
+                    if str(type(arg)).find('AsyncSession') != -1:  # Database session
+                        db_session = arg
+                        logger.info(f"[SEARCH] DEBUG: Found Database session in args[{i}]")
+                        break
             
-            # Extract reference_id from URL path or kwargs
+            # Extract reference_id from URL path, kwargs, or function args
             reference_id = None
+
+            # First check kwargs
             if 'username' in kwargs:
                 reference_id = kwargs['username']
-                # logger.debug(f"[SEARCH] DEBUG: Found username in kwargs: {reference_id}")
+                logger.info(f"[SEARCH] DEBUG: Found username in kwargs: {reference_id}")
+
+            # Then check function args (first string argument is usually username)
+            elif args and len(args) > 0 and isinstance(args[0], str) and len(args[0]) > 0:
+                reference_id = args[0]
+                logger.info(f"[SEARCH] DEBUG: Using args[0] as username: {reference_id}")
+
+            # Finally check request path params
             elif request and hasattr(request, 'path_params'):
                 reference_id = request.path_params.get('username')
                 logger.info(f"[SEARCH] DEBUG: Found username in request path_params: {reference_id}")

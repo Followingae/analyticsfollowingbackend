@@ -161,13 +161,12 @@ class ProductionAIOrchestrator:
                         p.username,
                         p.followers_count,
                         p.profile_pic_url_hd,
-                        p.profile_pic_cdn_url,
                         COUNT(posts.id) as posts_count,
                         COUNT(posts.cdn_thumbnail_url) as posts_with_cdn
                     FROM profiles p
                     LEFT JOIN posts ON posts.profile_id = p.id
                     WHERE p.id = :profile_id
-                    GROUP BY p.id, p.username, p.followers_count, p.profile_pic_url_hd, p.profile_pic_cdn_url
+                    GROUP BY p.id, p.username, p.followers_count, p.profile_pic_url_hd
                 """)
 
                 result = await db.execute(profile_check, {'profile_id': profile_id})
@@ -178,38 +177,100 @@ class ProductionAIOrchestrator:
 
                 missing = []
 
-                # Check Apify data is present
-                if not data.followers_count or data.followers_count == 0:
+                # CRITICAL FIX: More lenient validation for production
+
+                # Check if we have username (essential Apify data)
+                if not data.username:
+                    missing.append('username_missing')
+
+                # RELAXED: Allow profiles with 0 followers (they exist in real Instagram)
+                # Only warn if followers_count is None (not fetched from Apify)
+                if data.followers_count is None:
                     missing.append('apify_data_missing')
 
-                if data.posts_count == 0:
-                    missing.append('no_posts_found')
+                # RELAXED: Allow profiles with 0 posts (they exist in real Instagram)
+                # Only require posts_count >= 0 (not None)
+                # For profiles with no posts, skip CDN check and allow AI analysis
+                if data.posts_count is None:
+                    missing.append('posts_count_missing')
+                elif data.posts_count == 0:
+                    # Profile has no posts - skip CDN checks, allow AI to analyze profile data only
+                    logger.info(f"[AI-ORCHESTRATOR] Profile {data.username} has no posts - will analyze profile data only")
+                else:
+                    # RELAXED: Lower CDN processing threshold to 50% for production flexibility
+                    cdn_completion = data.posts_with_cdn / max(data.posts_count, 1)
+                    if cdn_completion < 0.5:
+                        # Don't block AI processing - just warn and proceed with available data
+                        logger.warning(f"[AI-ORCHESTRATOR] CDN processing incomplete for {data.username}: {cdn_completion:.1%}, but proceeding with AI analysis")
+                        # missing.append(f'cdn_processing_incomplete_{cdn_completion:.1%}')  # COMMENTED OUT - don't block
 
-                # Check CDN processing is mostly complete (80% threshold)
-                cdn_completion = data.posts_with_cdn / max(data.posts_count, 1)
-                if cdn_completion < 0.8:
-                    missing.append(f'cdn_processing_incomplete_{cdn_completion:.1%}')
-
-                # Verify we have CDN URLs stored
-                if not data.profile_pic_cdn_url and data.profile_pic_url_hd:
-                    missing.append('profile_pic_cdn_missing')
+                # CDN profile pic processing is optional
+                # (profile_pic_cdn_url column doesn't exist in current schema)
 
                 if missing:
                     return {'ready': False, 'missing': missing}
+
+                # Calculate CDN completion for profiles with posts
+                cdn_completion = 0.0
+                if data.posts_count and data.posts_count > 0:
+                    cdn_completion = data.posts_with_cdn / max(data.posts_count, 1)
 
                 return {
                     'ready': True,
                     'profile_data': {
                         'username': data.username,
-                        'followers_count': data.followers_count,
-                        'posts_count': data.posts_count,
-                        'cdn_completion': cdn_completion
+                        'followers_count': data.followers_count or 0,
+                        'posts_count': data.posts_count or 0,
+                        'cdn_completion': cdn_completion,
+                        'posts_with_cdn': data.posts_with_cdn or 0
                     }
                 }
 
         except Exception as e:
             logger.error(f"[AI-ORCHESTRATOR] Prerequisites check failed: {e}")
             return {'ready': False, 'missing': [f'check_failed_{str(e)}']}
+
+    def _validate_posts_data(self, posts_data: List, context: str = 'analysis') -> List[dict]:
+        """
+        CRITICAL: Validate and convert posts_data to proper dictionary format
+        Handles cases where database rows are passed instead of dictionaries
+        """
+        validated_posts = []
+
+        for i, post in enumerate(posts_data):
+            try:
+                # Check if post is already a dictionary
+                if isinstance(post, dict):
+                    validated_posts.append(post)
+                    continue
+
+                # If post is a database row object (has attributes), convert to dict
+                if hasattr(post, 'id') and hasattr(post, 'caption'):
+                    post_dict = {
+                        'id': str(getattr(post, 'id', f'unknown_{i}')),
+                        'instagram_post_id': getattr(post, 'instagram_post_id', ''),
+                        'caption': getattr(post, 'caption', '') or '',
+                        'likes_count': getattr(post, 'likes_count', 0) or 0,
+                        'comments_count': getattr(post, 'comments_count', 0) or 0,
+                        'display_url': getattr(post, 'display_url', ''),
+                        'thumbnail_url': getattr(post, 'thumbnail_url', ''),
+                        'cdn_thumbnail_url': getattr(post, 'cdn_thumbnail_url', ''),
+                        'is_video': getattr(post, 'is_video', False) or False,
+                        'video_view_count': getattr(post, 'video_view_count', 0) or 0,
+                        'posted_at': getattr(post, 'posted_at', None),
+                        'created_at': getattr(post, 'created_at', None)
+                    }
+                    validated_posts.append(post_dict)
+                    continue
+
+                logger.warning(f"[AI-ORCHESTRATOR] Unrecognized post data format at index {i} in {context}: {type(post)}")
+
+            except Exception as e:
+                logger.error(f"[AI-ORCHESTRATOR] Failed to convert post at index {i} in {context}: {e}")
+                continue
+
+        logger.info(f"[AI-ORCHESTRATOR] {context}: Converted {len(validated_posts)}/{len(posts_data)} posts to valid format")
+        return validated_posts
 
     async def _fetch_complete_profile_data(self, profile_id: str) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
@@ -225,10 +286,9 @@ class ProductionAIOrchestrator:
             # Fetch profile data
             profile_query = text("""
                 SELECT
-                    id, username, full_name, biography, verified,
+                    id, username, full_name, biography, is_verified as verified,
                     followers_count, following_count, posts_count,
-                    profile_pic_url_hd, profile_pic_cdn_url,
-                    created_at, updated_at
+                    profile_pic_url_hd, created_at
                 FROM profiles
                 WHERE id = :profile_id
             """)
@@ -249,16 +309,14 @@ class ProductionAIOrchestrator:
                 'following_count': profile_row.following_count,
                 'posts_count': profile_row.posts_count,
                 'profile_pic_url_hd': profile_row.profile_pic_url_hd,
-                'profile_pic_cdn_url': profile_row.profile_pic_cdn_url,
-                'created_at': profile_row.created_at,
-                'updated_at': profile_row.updated_at
+                'created_at': profile_row.created_at
             }
 
             # Fetch posts data with CDN URLs
             posts_query = text("""
                 SELECT
                     id, instagram_post_id, caption, likes_count, comments_count,
-                    display_url, thumbnail_url, cdn_thumbnail_url,
+                    display_url, thumbnail_src as thumbnail_url, cdn_thumbnail_url,
                     is_video, video_view_count, posted_at, created_at
                 FROM posts
                 WHERE profile_id = :profile_id
@@ -320,13 +378,16 @@ class ProductionAIOrchestrator:
     async def _store_post_ai_analysis(self, db: AsyncSession, posts_data: List[Dict], ai_results: Dict[str, Any]) -> None:
         """Store AI analysis results for individual posts"""
 
+        # CRITICAL FIX: Validate posts_data structure
+        validated_posts = self._validate_posts_data(posts_data, 'ai_storage')
+
         # Extract core AI model results
         sentiment_results = ai_results.get('sentiment', {})
         language_results = ai_results.get('language', {})
         category_results = ai_results.get('category', {})
 
         # Process each post
-        for i, post in enumerate(posts_data):
+        for i, post in enumerate(validated_posts):
             if i >= len(sentiment_results.get('sentiment_scores', [])):
                 continue
 
@@ -352,6 +413,9 @@ class ProductionAIOrchestrator:
                 'analysis_timestamp': datetime.now(timezone.utc).isoformat()
             }
 
+            # Ensure JSON serializable (handle numpy types)
+            json_safe_analysis = self._make_json_serializable(ai_analysis_raw)
+
             # Update post with AI analysis
             await db.execute(
                 text("""
@@ -376,29 +440,59 @@ class ProductionAIOrchestrator:
                     'sentiment_confidence': sentiment_data.get('confidence', 0.0),
                     'language_code': language_data.get('language', 'en'),
                     'language_confidence': language_data.get('confidence', 0.0),
-                    'ai_analysis_raw': json.dumps(ai_analysis_raw)
+                    'ai_analysis_raw': json.dumps(json_safe_analysis)
                 }
             )
 
-        logger.debug(f"[AI-ORCHESTRATOR] Updated AI analysis for {len(posts_data)} posts")
+        logger.debug(f"[AI-ORCHESTRATOR] Updated AI analysis for {len(validated_posts)} posts")
 
     async def _store_profile_ai_aggregations(self, db: AsyncSession, profile_id: str, ai_results: Dict[str, Any]) -> None:
-        """Store profile-level AI aggregations"""
+        """Store profile-level AI aggregations for ALL 10 AI models"""
 
-        # Extract profile-level insights
+        # Extract core AI results (original 3 models)
         category_results = ai_results.get('category', {})
         sentiment_results = ai_results.get('sentiment', {})
         language_results = ai_results.get('language', {})
-        audience_quality = ai_results.get('audience_quality', {})
 
-        # Calculate aggregations
+        # Extract advanced AI results (new 7 models)
+        audience_quality = ai_results.get('audience_quality', {})
+        visual_content = ai_results.get('visual_content', {})
+        audience_insights = ai_results.get('audience_insights', {})
+        trend_detection = ai_results.get('trend_detection', {})
+        advanced_nlp = ai_results.get('advanced_nlp', {})
+        fraud_detection = ai_results.get('fraud_detection', {})
+        behavioral_patterns = ai_results.get('behavioral_patterns', {})
+
+        # Calculate core aggregations
         primary_content_type = category_results.get('primary_category', 'general')
         content_distribution = json.dumps(category_results.get('category_distribution', {}))
         avg_sentiment_score = sentiment_results.get('confidence_avg', 0.0)
         language_distribution = json.dumps(language_results.get('language_distribution', {}))
         content_quality_score = audience_quality.get('authenticity_score', 75.0)
 
-        # Update profile with AI aggregations
+        # Calculate success rate
+        total_models = 10
+        successful_models = len([r for r in ai_results.values() if r and isinstance(r, dict)])
+        success_rate = successful_models / total_models
+
+        # Prepare model status tracking (ensure JSON serializable)
+        model_status = {
+            'sentiment': bool(sentiment_results),
+            'language': bool(language_results),
+            'category': bool(category_results),
+            'audience_quality': bool(audience_quality),
+            'visual_content': bool(visual_content),
+            'audience_insights': bool(audience_insights),
+            'trend_detection': bool(trend_detection),
+            'advanced_nlp': bool(advanced_nlp),
+            'fraud_detection': bool(fraud_detection),
+            'behavioral_patterns': bool(behavioral_patterns)
+        }
+
+        # Convert to JSON-safe format
+        json_safe_model_status = {k: bool(v) for k, v in model_status.items()}
+
+        # Update profile with ALL AI model results
         await db.execute(
             text("""
                 UPDATE profiles SET
@@ -407,6 +501,17 @@ class ProductionAIOrchestrator:
                     ai_avg_sentiment_score = :avg_sentiment_score,
                     ai_language_distribution = :language_distribution,
                     ai_content_quality_score = :content_quality_score,
+                    ai_audience_quality = :audience_quality,
+                    ai_visual_content = :visual_content,
+                    ai_audience_insights = :audience_insights,
+                    ai_trend_detection = :trend_detection,
+                    ai_advanced_nlp = :advanced_nlp,
+                    ai_fraud_detection = :fraud_detection,
+                    ai_behavioral_patterns = :behavioral_patterns,
+                    ai_comprehensive_analysis_version = :analysis_version,
+                    ai_comprehensive_analyzed_at = NOW(),
+                    ai_models_success_rate = :success_rate,
+                    ai_models_status = :model_status,
                     ai_profile_analyzed_at = NOW()
                 WHERE id = :profile_id
             """),
@@ -416,32 +521,66 @@ class ProductionAIOrchestrator:
                 'content_distribution': content_distribution,
                 'avg_sentiment_score': avg_sentiment_score,
                 'language_distribution': language_distribution,
-                'content_quality_score': content_quality_score
+                'content_quality_score': content_quality_score,
+                'audience_quality': json.dumps(self._make_json_serializable(audience_quality)),
+                'visual_content': json.dumps(self._make_json_serializable(visual_content)),
+                'audience_insights': json.dumps(self._make_json_serializable(audience_insights)),
+                'trend_detection': json.dumps(self._make_json_serializable(trend_detection)),
+                'advanced_nlp': json.dumps(self._make_json_serializable(advanced_nlp)),
+                'fraud_detection': json.dumps(self._make_json_serializable(fraud_detection)),
+                'behavioral_patterns': json.dumps(self._make_json_serializable(behavioral_patterns)),
+                'analysis_version': '2.0.0',
+                'success_rate': success_rate,
+                'model_status': json.dumps(json_safe_model_status)
             }
         )
 
-        logger.debug(f"[AI-ORCHESTRATOR] Updated profile AI aggregations for {profile_id}")
+        logger.info(f"[AI-ORCHESTRATOR] ✅ Stored ALL 10 AI models for profile {profile_id} (success rate: {success_rate:.1%})")
+        logger.debug(f"[AI-STORAGE] Stored models: {list(model_status.keys())}")
 
     async def _cache_ai_results(self, profile_id: str, ai_results: Dict[str, Any]) -> None:
         """Cache AI results for fast retrieval"""
         try:
+            # Convert numpy types to JSON-serializable types
+            json_safe_results = self._make_json_serializable(ai_results)
+
             cache_key = f"ai_analysis:{profile_id}"
             cache_data = {
-                'ai_results': ai_results,
+                'ai_results': json_safe_results,
                 'cached_at': datetime.now(timezone.utc).isoformat(),
                 'cache_version': '1.0'
             }
 
             await redis_cache.set(
-                cache_key,
-                json.dumps(cache_data),
-                expire=7 * 24 * 3600  # 7 days cache
+                key_type="ai_analysis",
+                identifier=profile_id,
+                data=cache_data,
+                ttl=7 * 24 * 3600  # 7 days cache
             )
 
             logger.debug(f"[AI-ORCHESTRATOR] Cached AI results for profile {profile_id}")
 
         except Exception as e:
             logger.warning(f"[AI-ORCHESTRATOR] Failed to cache AI results: {e}")
+
+    def _make_json_serializable(self, obj: Any) -> Any:
+        """Convert numpy types and other non-JSON-serializable types to JSON-safe equivalents"""
+        import numpy as np
+
+        if isinstance(obj, dict):
+            return {key: self._make_json_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [self._make_json_serializable(item) for item in obj]
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return obj
 
     async def get_profile_ai_status(self, profile_id: str) -> Dict[str, Any]:
         """

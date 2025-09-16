@@ -160,20 +160,28 @@ async def _download_and_process_image(source_url: str) -> bytes:
         return output_buffer.getvalue()
 
 async def _upload_to_r2_mcp(image_data: bytes, r2_key: str) -> bool:
-    """Upload to R2 using direct MCP integration"""
+    """Upload to R2 using dedicated R2 upload service"""
     try:
-        logger.info(f"[MCP-CDN] Uploading to R2: {r2_key} ({len(image_data)} bytes)")
+        logger.info(f"[R2-CDN] Uploading to R2: {r2_key} ({len(image_data)} bytes)")
 
-        # For now, simulate successful upload - real MCP integration will be added
-        # TODO: Replace with actual mcp__cloudflare__r2_put_object call
-        import time
-        await asyncio.sleep(1)  # Simulate upload time
+        # Use industry standard boto3 R2 upload service
+        from app.services.standard_r2_service import standard_r2_service
 
-        logger.info(f"[MCP-CDN] R2 upload simulated successfully: {r2_key}")
-        return True
+        upload_result = await standard_r2_service.upload_image(
+            image_data=image_data,
+            r2_key=r2_key,
+            content_type="image/webp"
+        )
+
+        if upload_result['success']:
+            logger.info(f"[R2-CDN] Successfully uploaded {r2_key} to Cloudflare R2 bucket")
+            return True
+        else:
+            logger.error(f"[R2-CDN] Upload error: {upload_result.get('error', 'Unknown error')}")
+            return False
 
     except Exception as e:
-        logger.error(f"[MCP-CDN] Upload error: {e}")
+        logger.error(f"[R2-CDN] Upload service error: {e}")
         return False
 
 # Task routing

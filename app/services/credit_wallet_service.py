@@ -502,16 +502,21 @@ class CreditWalletService:
         try:
             async with get_session() as session:
                 # ADMIN BYPASS: Check if user is admin first
-                admin_check = await session.execute(
-                    text("""
-                        SELECT raw_user_meta_data->>'role' as role 
-                        FROM auth.users 
-                        WHERE id = :user_id
-                    """),
-                    {"user_id": str(user_id)}
-                )
-                
-                user_role = admin_check.scalar()
+                # CRITICAL FIX: Safe admin role check to prevent tuple errors
+                try:
+                    admin_check = await session.execute(
+                        text("""
+                            SELECT raw_user_meta_data->>'role' as role
+                            FROM auth.users
+                            WHERE id = :user_id
+                        """),
+                        {"user_id": str(user_id)}
+                    )
+
+                    user_role = admin_check.scalar()
+                except Exception as e:
+                    logger.warning(f"Error checking admin role for user {user_id}: {e}")
+                    user_role = None
                 
                 # Admins bypass all credit checks
                 if user_role in ['admin', 'super_admin']:
@@ -525,28 +530,46 @@ class CreditWalletService:
                         credits_needed=0,
                         message=f"Admin access granted for {action_type}"
                     )
-                result = await session.execute(
-                    text("""
-                        SELECT public.can_perform_credit_action(:user_id, :action_type, :required_credits)
-                    """),
-                    {
-                        "user_id": str(user_id),
-                        "action_type": action_type,
-                        "required_credits": required_credits
-                    }
-                )
-                
-                response_data = result.scalar()
-                
-                return CanPerformActionResponse(
-                    can_perform=response_data.get("can_perform", False),
-                    reason=response_data.get("reason", "unknown"),
-                    credits_required=response_data.get("credits_required", 0),
-                    wallet_balance=response_data.get("wallet_balance", 0),
-                    free_remaining=response_data.get("free_remaining", 0),
-                    credits_needed=response_data.get("credits_needed", 0),
-                    message=response_data.get("message")
-                )
+                # CRITICAL FIX: Safe database function call to prevent tuple errors
+                try:
+                    result = await session.execute(
+                        text("""
+                            SELECT public.can_perform_credit_action(:user_id, :action_type, :required_credits)
+                        """),
+                        {
+                            "user_id": str(user_id),
+                            "action_type": action_type,
+                            "required_credits": required_credits
+                        }
+                    )
+
+                    response_data = result.scalar()
+
+                    # Handle case where database function returns None or unexpected format
+                    if not response_data:
+                        logger.warning(f"Database function returned None for user {user_id}, action {action_type}")
+                        response_data = {}
+                    elif not isinstance(response_data, dict):
+                        logger.error(f"Database function returned unexpected format: {type(response_data)} for user {user_id}")
+                        response_data = {}
+
+                    return CanPerformActionResponse(
+                        can_perform=response_data.get("can_perform", False),
+                        reason=response_data.get("reason", "unknown"),
+                        credits_required=response_data.get("credits_required", 0),
+                        wallet_balance=response_data.get("wallet_balance", 0),
+                        free_remaining=response_data.get("free_remaining", 0),
+                        credits_needed=response_data.get("credits_needed", 0),
+                        message=response_data.get("message")
+                    )
+
+                except Exception as db_error:
+                    logger.error(f"Database function error for user {user_id}: {db_error}")
+                    return CanPerformActionResponse(
+                        can_perform=False,
+                        reason="database_error",
+                        message=f"Database error: {str(db_error)}"
+                    )
                 
         except Exception as e:
             logger.error(f"Error checking action permission for user {user_id}: {e}")
@@ -637,20 +660,44 @@ class CreditWalletService:
                 if not row:
                     logger.warning(f"No credit wallet found for user {user_id}")
                     return None
-                
-                # Get current balance from wallet
-                wallet = await self.get_wallet(user_id)
-                current_balance = wallet.current_balance if wallet else 0
-                
-                total_plan_credits = TotalPlanCredits(
-                    total_plan_credits=row[0],  # total_plan_credits
-                    package_credits=row[1],     # package_credits
-                    purchased_credits=row[2],   # purchased_credits
-                    bonus_credits=row[3],       # bonus_credits
-                    monthly_allowance=row[4],   # monthly_allowance
-                    package_name=row[5],        # package_name
-                    current_balance=current_balance
-                )
+
+                # CRITICAL FIX: Safe tuple index access to prevent index errors
+                try:
+                    # Get current balance from wallet
+                    wallet = await self.get_wallet(user_id)
+                    current_balance = wallet.current_balance if wallet else 0
+
+                    # Safe tuple access with defaults for missing values
+                    row_values = list(row) if row else []
+                    while len(row_values) < 6:  # Ensure we have at least 6 values
+                        row_values.append(0 if len(row_values) < 5 else "Unknown")
+
+                    total_plan_credits = TotalPlanCredits(
+                        total_plan_credits=row_values[0] or 0,  # total_plan_credits
+                        package_credits=row_values[1] or 0,     # package_credits
+                        purchased_credits=row_values[2] or 0,   # purchased_credits
+                        bonus_credits=row_values[3] or 0,       # bonus_credits
+                        monthly_allowance=row_values[4] or 0,   # monthly_allowance
+                        package_name=row_values[5] or "Unknown", # package_name
+                        current_balance=current_balance
+                    )
+
+                except (IndexError, TypeError) as e:
+                    logger.error(f"Tuple index error in get_total_plan_credits for user {user_id}: {e}")
+                    logger.error(f"Row data: {row}")
+                    # Return safe default values
+                    wallet = await self.get_wallet(user_id)
+                    current_balance = wallet.current_balance if wallet else 0
+
+                    total_plan_credits = TotalPlanCredits(
+                        total_plan_credits=current_balance,
+                        package_credits=0,
+                        purchased_credits=current_balance,
+                        bonus_credits=0,
+                        monthly_allowance=0,
+                        package_name="Unknown",
+                        current_balance=current_balance
+                    )
                 
                 # Cache for 10 minutes (skip cache for now)
                 # await cache_manager.set_json(

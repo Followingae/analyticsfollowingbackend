@@ -210,6 +210,7 @@ class ApifyInstagramClient:
         }
 
         logger.info(f"[APIFY] Successfully transformed {username} data to Apify format")
+        logger.info(f"[APIFY] DEBUG: Apify format data structure: followers={apify_format['results'][0]['content']['data'].get('followers_count')}, posts={len(apify_format['results'][0]['content']['data'].get('posts', []))}")
         return apify_format
 
     def _extract_posts_data(self, apify_results: list) -> list:

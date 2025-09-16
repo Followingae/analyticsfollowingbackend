@@ -16,6 +16,7 @@ from typing import Dict, Any
 from datetime import datetime, timezone
 
 from app.services.ai.ai_manager_singleton import ai_manager
+from app.services.ai.comprehensive_ai_manager import comprehensive_ai_manager
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
 # Robust creator search service removed - using Simple API endpoints
 from app.database.comprehensive_service import comprehensive_service
@@ -103,30 +104,55 @@ class StartupInitializationService:
             raise SystemExit(f"System startup failed: {e}")
     
     async def _initialize_ai_manager(self):
-        """Initialize AI Manager Singleton - MANDATORY"""
+        """Initialize COMPREHENSIVE AI Manager - ALL 10 MODELS - MANDATORY"""
         try:
-            logger.info("Loading AI models (sentiment, language, category)...")
-            
-            # Call mandatory startup initialization
+            logger.info("Loading ALL 10 AI models (comprehensive analysis)...")
+            logger.info("Models: sentiment, language, category, audience_quality, visual_content, audience_insights, trend_detection, advanced_nlp, fraud_detection, behavioral_patterns")
+
+            # FIRST: Initialize core AI manager (3 models) for backwards compatibility
             await ai_manager.mandatory_startup_initialization()
-            
-            # Validate all models are loaded
             ai_manager.validate_startup_requirements()
-            
+
+            # SECOND: Initialize COMPREHENSIVE AI manager (ALL 10 models)
+            logger.info("Initializing COMPREHENSIVE AI system with ALL 10 models...")
+            comprehensive_results = await comprehensive_ai_manager.initialize_all_models()
+
+            # Validate comprehensive system
+            total_models = len(comprehensive_results)
+            successful_models = sum(1 for success in comprehensive_results.values() if success)
+            success_rate = successful_models / total_models
+
+            if success_rate < 0.7:  # Require at least 70% success
+                failed_models = [model for model, success in comprehensive_results.items() if not success]
+                raise Exception(f"Comprehensive AI initialization failed - only {success_rate:.1%} success rate. Failed models: {failed_models}")
+
+            logger.info(f"COMPREHENSIVE AI STARTUP COMPLETE: {successful_models}/{total_models} models loaded ({success_rate:.1%} success rate)")
+
             # Get system stats
             ai_stats = ai_manager.get_system_stats()
+            ai_stats.update({
+                'comprehensive_models_loaded': successful_models,
+                'total_comprehensive_models': total_models,
+                'comprehensive_success_rate': success_rate,
+                'comprehensive_models_status': comprehensive_results
+            })
             
             self.initialization_results["ai_manager"] = {
                 "status": "success",
                 "models_loaded": ai_stats["models_loaded"],
                 "device": ai_stats["device"],
-                "cache_directory": ai_stats["cache_directory"]
+                "cache_directory": ai_stats["cache_directory"],
+                "comprehensive_models_loaded": ai_stats.get("comprehensive_models_loaded", 0),
+                "comprehensive_success_rate": ai_stats.get("comprehensive_success_rate", 0.0),
+                "total_models": len(ai_stats["models_loaded"]) + ai_stats.get("comprehensive_models_loaded", 0)
             }
-            
-            logger.info(f"SUCCESS: AI Manager initialized: {len(ai_stats['models_loaded'])} models loaded")
+
+            total_models_loaded = len(ai_stats['models_loaded']) + ai_stats.get('comprehensive_models_loaded', 0)
+            logger.info(f"SUCCESS: COMPREHENSIVE AI initialized: {total_models_loaded} total models loaded ({len(ai_stats['models_loaded'])} core + {ai_stats.get('comprehensive_models_loaded', 0)} advanced)")
             
         except Exception as e:
-            logger.critical(f"ERROR: AI Manager initialization FAILED: {e}")
+            logger.critical(f"ERROR: COMPREHENSIVE AI Manager initialization FAILED: {e}")
+            logger.critical("SYSTEM CANNOT START - All 10 AI models are required for proper operation")
             self.critical_failures.append(f"AI Manager: {str(e)}")
             self.initialization_results["ai_manager"] = {
                 "status": "critical_failure",

@@ -89,10 +89,10 @@ class ComprehensiveCDNService:
 
                 # Get posts with image URLs
                 posts_query = text("""
-                    SELECT id, instagram_post_id, display_url, thumbnail_url
+                    SELECT id, instagram_post_id, display_url, thumbnail_src as thumbnail_url
                     FROM posts
                     WHERE profile_id = :profile_id
-                    AND (display_url IS NOT NULL OR thumbnail_url IS NOT NULL)
+                    AND (display_url IS NOT NULL OR thumbnail_src IS NOT NULL)
                     ORDER BY created_at DESC
                     LIMIT 50
                 """)
@@ -113,9 +113,9 @@ class ComprehensiveCDNService:
                     )
 
                     if profile_pic_result['success']:
-                        # Update profile with CDN URL
+                        # Update profile with CDN URL (using correct column name)
                         await db.execute(
-                            text("UPDATE profiles SET profile_pic_cdn_url = :cdn_url WHERE id = :profile_id"),
+                            text("UPDATE profiles SET cdn_avatar_url = :cdn_url WHERE id = :profile_id"),
                             {'cdn_url': profile_pic_result['cdn_url'], 'profile_id': profile_id}
                         )
                         results['cdn_urls_created'].append(profile_pic_result['cdn_url'])
@@ -291,7 +291,7 @@ class ComprehensiveCDNService:
 
     async def _upload_to_cloudflare_r2(self, image_data: bytes, r2_key: str) -> bool:
         """
-        Upload optimized image to Cloudflare R2 using MCP integration
+        Upload optimized image to Cloudflare R2 using dedicated R2 upload service
 
         Args:
             image_data: Optimized image bytes
@@ -303,99 +303,54 @@ class ComprehensiveCDNService:
         try:
             logger.debug(f"[R2-UPLOAD] Uploading {len(image_data)} bytes to {r2_key}")
 
-            # Create MCP upload script
-            image_b64 = base64.b64encode(image_data).decode('utf-8')
+            # Use industry standard boto3 R2 upload service
+            from app.services.standard_r2_service import standard_r2_service
 
-            # Use Claude Code's MCP integration for R2 upload
-            mcp_script = f'''
-import sys
-import os
-import base64
-import asyncio
+            upload_result = await standard_r2_service.upload_image(
+                image_data=image_data,
+                r2_key=r2_key,
+                content_type="image/webp"
+            )
 
-async def upload_to_r2():
-    try:
-        # Decode image data
-        image_data = base64.b64decode("{image_b64}")
-
-        # Simulate MCP R2 upload (in production, would use actual MCP call)
-        # For now, we'll simulate successful upload
-        print(f"[R2-MCP] Uploading {{len(image_data)}} bytes to {r2_key}")
-        print(f"[R2-MCP] Content-Type: image/webp")
-        print(f"[R2-MCP] Bucket: thumbnails-prod")
-
-        # Simulate upload delay
-        await asyncio.sleep(0.5)
-
-        print("[R2-MCP] Upload completed successfully")
-        print("UPLOAD_SUCCESS")
-
-    except Exception as e:
-        print(f"[R2-MCP] Upload error: {{e}}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    asyncio.run(upload_to_r2())
-'''
-
-            # Execute MCP upload
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-                f.write(mcp_script)
-                script_path = f.name
-
-            try:
-                result = subprocess.run(
-                    ['python', script_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
-
-                if result.returncode == 0 and "UPLOAD_SUCCESS" in result.stdout:
-                    logger.debug(f"[R2-SUCCESS] Uploaded {r2_key}")
-                    return True
-                else:
-                    logger.error(f"[R2-ERROR] Upload failed: {result.stderr or result.stdout}")
-                    return False
-
-            finally:
-                try:
-                    os.unlink(script_path)
-                except:
-                    pass
+            if upload_result['success']:
+                logger.debug(f"[R2-SUCCESS] Uploaded {r2_key} to Cloudflare R2")
+                return True
+            else:
+                logger.error(f"[R2-ERROR] Upload failed: {upload_result.get('error', 'Unknown error')}")
+                return False
 
         except Exception as e:
-            logger.error(f"[R2-ERROR] Upload process failed: {e}")
+            logger.error(f"[R2-ERROR] Upload service failed: {e}")
             return False
 
     async def _store_processing_stats(self, db: AsyncSession, results: Dict[str, Any]) -> None:
         """Store processing statistics in database"""
         try:
+            # Convert timezone-aware datetime to naive UTC for database
+            completed_at_utc = results['completed_at'].replace(tzinfo=None) if results['completed_at'].tzinfo else results['completed_at']
+
             stats_data = {
-                'processing_id': results['processing_id'],
-                'profile_id': results['profile_id'],
-                'username': results['username'],
-                'total_images': results['total_images'],
                 'processed_images': results['processed_images'],
                 'failed_images': results['failed_images'],
-                'processing_duration': (results['completed_at'] - results['started_at']).total_seconds(),
-                'success_rate': results['processed_images'] / max(results['total_images'], 1),
-                'cdn_urls_count': len(results['cdn_urls_created']),
-                'errors_count': len(results['processing_errors']),
-                'created_at': results['started_at']
+                'processing_duration_ms': (results['completed_at'] - results['started_at']).total_seconds() * 1000,
+                'created_at': completed_at_utc
             }
 
-            # Store in cdn_processing_stats table
+            # Use INSERT ... ON CONFLICT to handle duplicate keys
             await db.execute(
                 text("""
                     INSERT INTO cdn_processing_stats
-                    (processing_id, profile_id, username, total_images, processed_images,
-                     failed_images, processing_duration, success_rate, cdn_urls_count,
-                     errors_count, created_at)
+                    (date, hour, jobs_processed, jobs_failed, total_bytes_processed,
+                     avg_processing_time_ms, worker_utilization_percent, created_at)
                     VALUES
-                    (:processing_id, :profile_id, :username, :total_images, :processed_images,
-                     :failed_images, :processing_duration, :success_rate, :cdn_urls_count,
-                     :errors_count, :created_at)
+                    (CURRENT_DATE, EXTRACT(HOUR FROM NOW()), :processed_images, :failed_images,
+                     0, :processing_duration_ms, 100, :created_at)
+                    ON CONFLICT (date, hour)
+                    DO UPDATE SET
+                        jobs_processed = cdn_processing_stats.jobs_processed + EXCLUDED.jobs_processed,
+                        jobs_failed = cdn_processing_stats.jobs_failed + EXCLUDED.jobs_failed,
+                        avg_processing_time_ms = (cdn_processing_stats.avg_processing_time_ms + EXCLUDED.avg_processing_time_ms) / 2,
+                        created_at = EXCLUDED.created_at
                 """),
                 stats_data
             )
@@ -417,17 +372,17 @@ if __name__ == "__main__":
         """
         try:
             async with get_session() as db:
-                # Check profile CDN status
+                # Check profile CDN status (using correct column name)
                 profile_query = text("""
                     SELECT
                         p.username,
-                        p.profile_pic_cdn_url,
+                        p.cdn_avatar_url,
                         COUNT(posts.id) as total_posts,
                         COUNT(posts.cdn_thumbnail_url) as posts_with_cdn
                     FROM profiles p
                     LEFT JOIN posts ON posts.profile_id = p.id
                     WHERE p.id = :profile_id
-                    GROUP BY p.id, p.username, p.profile_pic_cdn_url
+                    GROUP BY p.id, p.username, p.cdn_avatar_url
                 """)
 
                 result = await db.execute(profile_query, {'profile_id': profile_id})
@@ -441,8 +396,8 @@ if __name__ == "__main__":
                 return {
                     'status': 'found',
                     'username': data.username,
-                    'profile_pic_cdn_available': data.profile_pic_cdn_url is not None,
-                    'profile_pic_cdn_url': data.profile_pic_cdn_url,
+                    'profile_pic_cdn_available': data.cdn_avatar_url is not None,
+                    'profile_pic_cdn_url': data.cdn_avatar_url,
                     'total_posts': data.total_posts,
                     'posts_with_cdn': data.posts_with_cdn,
                     'cdn_completion_percentage': round(cdn_completion, 1),

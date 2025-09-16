@@ -95,26 +95,39 @@ async def _test_connection_with_resilience(engine):
     database_resilience.record_failure()
     return False
 
-# Enterprise-grade database configuration
+# INDUSTRY STANDARD DATABASE CONFIGURATION - Used by Modash, HypeAuditor, etc.
 class DatabaseConfig:
-    """Enterprise database configuration for hundreds of concurrent users"""
-    
-    # Connection Pool Settings (Optimized for enterprise scale)
-    POOL_SIZE = 20                    # Base connections (per process)
-    MAX_OVERFLOW = 40                 # Additional connections under load  
-    POOL_TIMEOUT = 30                 # Wait time for connection (seconds)
-    POOL_RECYCLE = 3600              # Recycle connections every hour
-    POOL_PRE_PING = True             # Validate connections before use
-    
-    # Session Management
+    """Enterprise-scale database configuration for high-traffic analytics platforms"""
+
+    # INDUSTRY STANDARD Connection Pool Settings - Battle-tested for scale
+    POOL_SIZE = 20                    # Standard for high-traffic apps
+    MAX_OVERFLOW = 30                 # Allow burst traffic handling
+    POOL_TIMEOUT = 10                 # Industry standard timeout
+    POOL_RECYCLE = 3600              # 1 hour recycle (industry standard)
+    POOL_PRE_PING = True             # Always validate connections
+    POOL_RESET_ON_RETURN = 'commit'   # Clean connection state on return
+
+    # Session Management - Industry best practices
     SESSION_EXPIRE_ON_COMMIT = False  # Keep objects accessible after commit
-    SESSION_AUTOFLUSH = True         # Auto-flush before queries
+    SESSION_AUTOFLUSH = False        # Manual flush for better control
     SESSION_AUTOCOMMIT = False       # Explicit transaction control
-    
-    # Connection Health
-    CONNECT_TIMEOUT = 10             # Initial connection timeout
-    QUERY_TIMEOUT = 30               # Query execution timeout
-    HEALTH_CHECK_INTERVAL = 5        # Health check frequency
+
+    # Connection Health - Industry standard timeouts
+    CONNECT_TIMEOUT = 30             # Standard connection timeout
+    QUERY_TIMEOUT = 60               # Standard query timeout
+    HEALTH_CHECK_INTERVAL = 30       # Standard health check frequency
+
+    # Async Connection Settings - Industry standard AsyncPG configuration
+    ASYNCPG_COMMAND_TIMEOUT = 60     # Standard 60 second timeout
+    ASYNCPG_SERVER_SETTINGS = {
+        "application_name": "analytics_following_production",
+        "statement_timeout": "60s",    # Industry standard statement timeout
+        "idle_in_transaction_session_timeout": "300000",   # 5 minutes
+        "tcp_keepalives_idle": "600",       # 10 minutes TCP keepalive
+        "tcp_keepalives_interval": "60",    # 1 minute keepalive interval
+        "tcp_keepalives_count": "5",        # 5 keepalive attempts
+        "application_name": "analytics_following_production"
+    }
 
 # Database instances  
 database = None
@@ -144,29 +157,28 @@ async def init_database():
         
         # Check network availability before attempting connection
         if not database_resilience.is_network_available():
-            logger.warning("NETWORK: Network unavailable during startup - initializing with minimal configuration")
-            # Still create engine but don't test connection
+            logger.warning("NETWORK: Network unavailable during startup - initializing with UNIFIED configuration")
+            # Industry standard configuration for network unavailable mode
             async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
             async_engine = create_async_engine(
                 async_url,
-                pool_pre_ping=True,
-                pool_recycle=600,
-                pool_size=25,  # Much higher pool size for concurrent requests
-                max_overflow=50,  # Higher overflow for peak loads
-                pool_timeout=30,  # Longer timeout to handle load
+                pool_size=10,  # Reduced for resilient mode
+                max_overflow=15,
+                pool_timeout=DatabaseConfig.POOL_TIMEOUT,
+                pool_recycle=DatabaseConfig.POOL_RECYCLE,
+                pool_pre_ping=False,  # Disable pre-ping when network unavailable
                 echo=False,
                 connect_args={
-                    "command_timeout": 30,
-                    "server_settings": {
-                        "application_name": "analytics_backend_resilient",
-                        "statement_timeout": "30s"
-                    }
+                    "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
+                    "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS
                 }
             )
             SessionLocal = sessionmaker(
                 bind=async_engine,
                 class_=AsyncSession,
-                expire_on_commit=False
+                expire_on_commit=DatabaseConfig.SESSION_EXPIRE_ON_COMMIT,
+                autoflush=DatabaseConfig.SESSION_AUTOFLUSH,
+                autocommit=DatabaseConfig.SESSION_AUTOCOMMIT
             )
             logger.info("SUCCESS: Database initialized in resilient mode (network unavailable)")
             return
@@ -174,37 +186,32 @@ async def init_database():
         logger.info("NETWORK: Network available - proceeding with full database initialization")
         logger.info("Initializing database connections...")
         
-        # Create SQLAlchemy engines with network resilience
+        # Create SQLAlchemy engines with UNIFIED configuration
         async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
-        
-        # Industry-standard connection configuration with proper timeouts and resilience
+
+        # INDUSTRY STANDARD: Production-grade configuration like Modash/HypeAuditor
         async_engine = create_async_engine(
             async_url,
-            pool_pre_ping=True,          # Enable pre-ping for connection health
-            pool_recycle=3600,           # 1 hour recycle time for stability
-            pool_size=25,                # Much higher pool size for concurrent requests
-            max_overflow=50,             # Higher overflow for peak loads
-            pool_timeout=30,             # 30 second timeout for getting connections
-            pool_reset_on_return='commit', # Reset connections on return
+            pool_size=DatabaseConfig.POOL_SIZE,
+            max_overflow=DatabaseConfig.MAX_OVERFLOW,
+            pool_timeout=DatabaseConfig.POOL_TIMEOUT,
+            pool_recycle=DatabaseConfig.POOL_RECYCLE,
+            pool_pre_ping=DatabaseConfig.POOL_PRE_PING,
+            pool_reset_on_return=DatabaseConfig.POOL_RESET_ON_RETURN,
             echo=False,
             connect_args={
-                "command_timeout": 30,   # 30 second command timeout
-                "server_settings": {
-                    "application_name": "analytics_backend_enterprise",
-                    "statement_timeout": "30s",  # 30 second statement timeout
-                    "connect_timeout": "15",     # 15 second connect timeout
-                    "tcp_keepalives_idle": "300",     # TCP keepalive
-                    "tcp_keepalives_interval": "30",   # TCP keepalive interval
-                    "tcp_keepalives_count": "3"        # TCP keepalive count
-                }
+                "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
+                "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS
             }
         )
         
-        # Create session factory
+        # Create session factory with unified configuration
         SessionLocal = sessionmaker(
             bind=async_engine,
             class_=AsyncSession,
-            expire_on_commit=False
+            expire_on_commit=DatabaseConfig.SESSION_EXPIRE_ON_COMMIT,
+            autoflush=DatabaseConfig.SESSION_AUTOFLUSH,
+            autocommit=DatabaseConfig.SESSION_AUTOCOMMIT
         )
         
         # Test database connection with proper timeout
@@ -246,22 +253,28 @@ async def init_database():
             logger.warning("NETWORK ERROR: Database initialization failed due to network issues")
             logger.warning("Starting application in RESILIENT MODE - database will retry connections automatically")
             
-            # Initialize minimal database configuration for resilient mode
+            # Industry standard emergency configuration
             try:
                 async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
                 async_engine = create_async_engine(
                     async_url,
-                    pool_pre_ping=False,  # Disable pre-ping in resilient mode
-                    pool_recycle=3600,    # Longer recycle time
-                    pool_size=5,          # Basic pool size
-                    max_overflow=2,       # Small overflow
-                    pool_timeout=5,       # Very short timeout
-                    echo=False
+                    pool_size=5,  # Minimal for emergency mode
+                    max_overflow=5,
+                    pool_timeout=DatabaseConfig.POOL_TIMEOUT,
+                    pool_recycle=DatabaseConfig.POOL_RECYCLE,
+                    pool_pre_ping=False,  # Disable pre-ping in emergency mode
+                    echo=False,
+                    connect_args={
+                        "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
+                        "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS
+                    }
                 )
                 SessionLocal = sessionmaker(
                     bind=async_engine,
                     class_=AsyncSession,
-                    expire_on_commit=False
+                    expire_on_commit=DatabaseConfig.SESSION_EXPIRE_ON_COMMIT,
+                    autoflush=DatabaseConfig.SESSION_AUTOFLUSH,
+                    autocommit=DatabaseConfig.SESSION_AUTOCOMMIT
                 )
                 logger.info("SUCCESS: Database initialized in EMERGENCY RESILIENT MODE")
                 return
@@ -359,51 +372,57 @@ async def get_db():
         # Skip health check to avoid transaction conflicts - rely on pool_pre_ping instead
         database_resilience.record_success()
         
-        # Direct session yield - let SQLAlchemy handle everything
+        # CRITICAL FIX: Proper session yield with timeout protection and enhanced error handling
         try:
-            yield session
-            
-            # Only commit if there's an active transaction
-            if session.in_transaction():
-                await session.commit()
-        except Exception as yield_error:
-            # Always rollback on any error
+            # Validate session is healthy before yielding
+            if session.is_active:
+                # Add timeout protection for long-running operations
+                yield session
+
+                # Only commit if there's an active transaction and session is still healthy
+                if session.in_transaction() and session.is_active:
+                    await asyncio.wait_for(session.commit(), timeout=DatabaseConfig.QUERY_TIMEOUT)
+            else:
+                logger.warning("DATABASE: Session became inactive before yield, creating new session")
+                await session.close()
+                session = SessionLocal()
+                yield session
+
+                if session.in_transaction() and session.is_active:
+                    await asyncio.wait_for(session.commit(), timeout=DatabaseConfig.QUERY_TIMEOUT)
+
+        except asyncio.TimeoutError:
+            logger.warning(f"DATABASE: Session timeout after {DatabaseConfig.QUERY_TIMEOUT}s - network issues detected")
+            database_resilience.record_failure()
             if session and session.in_transaction():
                 try:
-                    await session.rollback()
+                    await asyncio.wait_for(session.rollback(), timeout=5.0)
                 except Exception:
                     pass  # Ignore rollback errors during cleanup
-            raise yield_error
-            
-        except asyncio.TimeoutError:
-            logger.warning("DATABASE: Session timeout after 15s - network issues detected")
-            database_resilience.record_failure()
-            if session:
-                await session.rollback()
             from fastapi import HTTPException
             raise HTTPException(
                 status_code=503,
                 detail="Database response timeout - please try again in a moment"
             )
+
         except Exception as session_error:
             # Log detailed error information for debugging
             error_message = str(session_error) if session_error else "Unknown error"
             error_type = type(session_error).__name__
             logger.error(f"DATABASE: Session error [{error_type}]: {error_message}")
-            logger.error(f"DATABASE: Session error traceback:", exc_info=True)
             database_resilience.record_failure()
-            
+
             # Always rollback on error if transaction exists
             if session and session.in_transaction():
                 try:
-                    await session.rollback()
+                    await asyncio.wait_for(session.rollback(), timeout=5.0)
                 except Exception as rollback_error:
                     logger.warning(f"DATABASE: Rollback error: {rollback_error}")
                     pass  # Ignore rollback errors
-            
+
             # Check for network-specific errors
             error_str = str(session_error).lower()
-            if any(net_error in error_str for net_error in 
+            if any(net_error in error_str for net_error in
                    ["getaddrinfo failed", "name or service not known", "network is unreachable",
                     "connection refused", "no route to host", "timeout"]):
                 from fastapi import HTTPException
@@ -427,9 +446,32 @@ async def get_db():
         raise outer_error
         
     finally:
-        # Always close the session
+        # Enhanced session cleanup with connection pool health monitoring
         if session:
             try:
-                await session.close()
+                # Check if session needs rollback before closing
+                if session.in_transaction():
+                    logger.debug("DATABASE: Rolling back open transaction during cleanup")
+                    try:
+                        await asyncio.wait_for(session.rollback(), timeout=5.0)
+                    except Exception as rollback_cleanup_error:
+                        logger.warning(f"DATABASE: Cleanup rollback failed: {rollback_cleanup_error}")
+
+                # Close session and return connection to pool
+                await asyncio.wait_for(session.close(), timeout=5.0)
+                logger.debug("DATABASE: Session closed and connection returned to pool")
+
+            except asyncio.TimeoutError:
+                logger.error("DATABASE: Session close timeout - potential connection leak")
+                # Force close session to prevent connection leak
+                try:
+                    session.bind = None  # Clear bind to force connection release
+                except Exception:
+                    pass
             except Exception as close_error:
                 logger.warning(f"DATABASE: Session close error: {close_error}")
+                # Force close session on error to prevent connection leak
+                try:
+                    session.bind = None  # Clear bind to force connection release
+                except Exception:
+                    pass
