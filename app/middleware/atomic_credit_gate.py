@@ -152,7 +152,33 @@ def atomic_requires_credits(
                 
                 credits_required = permission_check["credits_required"]
                 used_free_allowance = permission_check["used_free_allowance"]
-                
+                already_unlocked = permission_check.get("already_unlocked", False)
+
+                # FAST PATH: Skip all credit operations for already unlocked profiles
+                if already_unlocked and credits_required == 0:
+                    logger.info(f"[FAST-PATH] Profile {reference_id} already unlocked - executing function directly")
+
+                    # Execute function immediately without credit operations
+                    try:
+                        result = await func(*args, **kwargs)
+                        logger.info(f"[FAST-PATH] Function executed successfully for {reference_id}")
+
+                        # Add credit information to response if requested
+                        if return_detailed_response and isinstance(result, dict):
+                            result["credit_info"] = {
+                                "credits_spent": 0,
+                                "used_free_allowance": False,
+                                "remaining_balance": "N/A - Already unlocked",
+                                "transaction_id": None,
+                                "access_granted": True
+                            }
+
+                        return result
+
+                    except Exception as e:
+                        logger.error(f"[FAST-PATH] Function execution failed for {reference_id}: {e}")
+                        raise
+
                 # Step 2: Spend credits BEFORE function execution (only if required)
                 transaction = None
                 if credits_required > 0:
@@ -261,13 +287,13 @@ async def _atomic_check_permissions(db, user_id: UUID, action_type: str, referen
             already_unlocked = unlock_result.scalar_one_or_none() is not None
             
             if already_unlocked:
-                logger.info(f"Profile {reference_id} already unlocked for user {user_id}")
+                logger.info(f"[FAST-PATH] Profile {reference_id} already unlocked for user {user_id} - skipping ALL credit checks")
                 return {
                     "allowed": True,
                     "credits_required": 0,
                     "used_free_allowance": False,
                     "already_unlocked": True,
-                    "message": "Profile already unlocked"
+                    "message": "Profile already unlocked - fast path"
                 }
         
         # Get pricing information with comprehensive error handling

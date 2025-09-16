@@ -275,6 +275,102 @@ async def database_schema_check(db: AsyncSession = Depends(get_db)):
         
         results["status"] = "completed" if not results["issues_found"] or results["fixes_applied"] else "issues_found"
         return results
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Schema check failed: {str(e)}")
+
+
+@router.get("/database/pool", response_model=Dict[str, Any])
+async def database_pool_health(db = Depends(get_db)):
+    """
+    Database connection pool health monitoring
+    Returns detailed pool statistics and health status
+    """
+    try:
+        from app.database.connection import async_engine
+
+        if not async_engine or not hasattr(async_engine, 'pool'):
+            return {"status": "unavailable", "message": "Pool not initialized"}
+
+        pool = async_engine.pool
+        stats = {
+            "size": pool.size(),
+            "checked_in": pool.checkedin(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
+            "invalid": pool.invalid(),
+            "utilization": round((pool.checkedout() / (pool.size() + pool.overflow())) * 100, 2) if (pool.size() + pool.overflow()) > 0 else 0
+        }
+
+        # Determine health status
+        if stats["utilization"] > 90:
+            status = "critical"
+            message = "Pool utilization over 90%"
+        elif stats["utilization"] > 70:
+            status = "warning"
+            message = "Pool utilization over 70%"
+        elif stats["invalid"] > 0:
+            status = "degraded"
+            message = f"{stats['invalid']} invalid connections"
+        else:
+            status = "healthy"
+            message = "Pool operating normally"
+
+        # Add recommendations
+        recommendations = []
+        if status == "critical":
+            recommendations.append("Consider increasing pool_size or reducing concurrent requests")
+            recommendations.append("Check for connection leaks in application code")
+            recommendations.append("Monitor long-running queries")
+        elif status == "warning":
+            recommendations.append("Monitor pool utilization trends")
+            recommendations.append("Consider optimizing query performance")
+        elif status == "degraded":
+            recommendations.append("Check for invalid connections and connection timeouts")
+            recommendations.append("Restart pool if invalid connections persist")
+
+        return {
+            "status": status,
+            "message": message,
+            "stats": stats,
+            "recommendations": recommendations,
+            "timestamp": int(time.time()),
+            "endpoint": "database/pool"
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to get pool health: {str(e)}",
+            "timestamp": int(time.time()),
+            "endpoint": "database/pool"
+        }
+
+
+@router.get("/database/pool/reset", response_model=Dict[str, Any])
+async def reset_database_pool():
+    """
+    EMERGENCY: Reset database connection pool
+    Use this only if the pool is in a critical state
+    """
+    try:
+        from app.database.connection import close_database, init_database
+
+        # Close existing connections
+        await close_database()
+
+        # Reinitialize with fresh pool
+        await init_database()
+
+        return {
+            "status": "success",
+            "message": "Database pool reset successfully",
+            "timestamp": int(time.time())
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to reset pool: {str(e)}",
+            "timestamp": int(time.time())
+        }

@@ -99,10 +99,10 @@ async def _test_connection_with_resilience(engine):
 class DatabaseConfig:
     """Enterprise-scale database configuration for high-traffic analytics platforms"""
 
-    # INDUSTRY STANDARD Connection Pool Settings - Battle-tested for scale
-    POOL_SIZE = 20                    # Standard for high-traffic apps
-    MAX_OVERFLOW = 30                 # Allow burst traffic handling
-    POOL_TIMEOUT = 10                 # Industry standard timeout
+    # OPTIMIZED Connection Pool Settings - Prevent timeout issues
+    POOL_SIZE = 10                    # Reduced to prevent pool exhaustion
+    MAX_OVERFLOW = 15                 # Conservative overflow for stability
+    POOL_TIMEOUT = 5                  # Faster timeout to prevent hanging
     POOL_RECYCLE = 3600              # 1 hour recycle (industry standard)
     POOL_PRE_PING = True             # Always validate connections
     POOL_RESET_ON_RETURN = 'commit'   # Clean connection state on return
@@ -117,12 +117,12 @@ class DatabaseConfig:
     QUERY_TIMEOUT = 60               # Standard query timeout
     HEALTH_CHECK_INTERVAL = 30       # Standard health check frequency
 
-    # Async Connection Settings - Industry standard AsyncPG configuration
-    ASYNCPG_COMMAND_TIMEOUT = 60     # Standard 60 second timeout
+    # Async Connection Settings - Optimized AsyncPG configuration
+    ASYNCPG_COMMAND_TIMEOUT = 30     # Reduced timeout to prevent hangs
     ASYNCPG_SERVER_SETTINGS = {
         "application_name": "analytics_following_production",
-        "statement_timeout": "60s",    # Industry standard statement timeout
-        "idle_in_transaction_session_timeout": "300000",   # 5 minutes
+        "statement_timeout": "30s",    # Reduced statement timeout
+        "idle_in_transaction_session_timeout": "120000",   # 2 minutes (reduced)
         "tcp_keepalives_idle": "600",       # 10 minutes TCP keepalive
         "tcp_keepalives_interval": "60",    # 1 minute keepalive interval
         "tcp_keepalives_count": "5",        # 5 keepalive attempts

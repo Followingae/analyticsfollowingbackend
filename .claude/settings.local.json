@@ -43,7 +43,8 @@
       "Bash(python:*)",
       "mcp__cloudflare__r2_put_object",
       "WebFetch(domain:cdn.following.ae)",
-      "mcp__cloudflare__r2_delete_object"
+      "mcp__cloudflare__r2_delete_object",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": [],
