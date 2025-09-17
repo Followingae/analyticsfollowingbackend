@@ -66,6 +66,35 @@ from app.services.redis_cache_service import redis_cache
 from app.database.connection import get_session
 from app.database.unified_models import Profile, Post
 
+# New Real AI Analyzers (with fallback handling)
+try:
+    from app.services.ai.real_visual_content_analyzer import RealVisualContentAnalyzer
+    REAL_VISUAL_AVAILABLE = True
+except ImportError as e:
+    REAL_VISUAL_AVAILABLE = False
+    logger.warning(f"Real Visual Content Analyzer not available: {e}")
+
+try:
+    from app.services.ai.real_advanced_nlp_analyzer import RealAdvancedNLPAnalyzer
+    REAL_NLP_AVAILABLE = True
+except ImportError as e:
+    REAL_NLP_AVAILABLE = False
+    logger.warning(f"Real Advanced NLP Analyzer not available: {e}")
+
+try:
+    from app.services.ai.real_trend_detection_analyzer import RealTrendDetectionAnalyzer
+    REAL_TREND_AVAILABLE = True
+except ImportError as e:
+    REAL_TREND_AVAILABLE = False
+    logger.warning(f"Real Trend Detection Analyzer not available: {e}")
+
+try:
+    from app.services.ai.real_geographic_demographic_analyzer import RealGeographicDemographicAnalyzer
+    REAL_GEO_AVAILABLE = True
+except ImportError as e:
+    REAL_GEO_AVAILABLE = False
+    logger.warning(f"Real Geographic Demographic Analyzer not available: {e}")
+
 class AIModelType(Enum):
     """All 10 AI Model Types"""
     # Existing Core Models (3)
@@ -407,15 +436,43 @@ class ComprehensiveAIManager:
             return await self._analyze_audience_quality(profile_data, posts_data)
             
         elif model_type == AIModelType.VISUAL_CONTENT:
+            # Use new real visual content analyzer if available
+            if REAL_VISUAL_AVAILABLE:
+                try:
+                    real_analyzer = RealVisualContentAnalyzer()
+                    return await real_analyzer.analyze_visual_content(posts_data)
+                except Exception as e:
+                    logger.warning(f"Real visual analyzer failed: {e}, using fallback")
             return await self._analyze_visual_content(posts_data)
-            
+
         elif model_type == AIModelType.AUDIENCE_INSIGHTS:
+            # Use new real geographic/demographic analyzer if available
+            if REAL_GEO_AVAILABLE:
+                try:
+                    real_analyzer = RealGeographicDemographicAnalyzer()
+                    return await real_analyzer.analyze_geographic_demographics(profile_data, posts_data)
+                except Exception as e:
+                    logger.warning(f"Real geographic analyzer failed: {e}, using fallback")
             return await self._analyze_audience_insights(profile_data, posts_data)
-            
+
         elif model_type == AIModelType.TREND_DETECTION:
+            # Use new real trend detection analyzer if available
+            if REAL_TREND_AVAILABLE:
+                try:
+                    real_analyzer = RealTrendDetectionAnalyzer()
+                    return await real_analyzer.analyze_trend_detection(profile_data, posts_data)
+                except Exception as e:
+                    logger.warning(f"Real trend analyzer failed: {e}, using fallback")
             return await self._analyze_trend_detection(profile_data, posts_data)
-            
+
         elif model_type == AIModelType.ADVANCED_NLP:
+            # Use new real advanced NLP analyzer if available
+            if REAL_NLP_AVAILABLE:
+                try:
+                    real_analyzer = RealAdvancedNLPAnalyzer()
+                    return await real_analyzer.analyze_advanced_nlp(profile_data, posts_data)
+                except Exception as e:
+                    logger.warning(f"Real NLP analyzer failed: {e}, using fallback")
             return await self._analyze_advanced_nlp(posts_data)
             
         elif model_type == AIModelType.FRAUD_DETECTION:
