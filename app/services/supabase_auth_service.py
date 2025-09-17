@@ -250,7 +250,7 @@ class ProductionSupabaseAuthService:
             from sqlalchemy import text
             
             # Use connection pool for fast database access with timeout
-            async with asyncio.timeout(15.0):  # 15 second timeout
+            async with asyncio.timeout(60.0):  # 60 second timeout (industry standard)
                 async with async_engine.begin() as conn:
                     # Get fresh user data from database using Supabase user ID
                     result = await conn.execute(text("""
@@ -335,7 +335,7 @@ class ProductionSupabaseAuthService:
                     return user_response
                     
         except asyncio.TimeoutError:
-            logger.warning(f"LOGIN-FRESH: Database timeout after 15s for {supabase_user.email}")
+            logger.warning(f"LOGIN-FRESH: Database timeout after 60s for {supabase_user.email}")
             # Fallback to basic Supabase data if database times out
             logger.warning("LOGIN-FALLBACK: Using basic Supabase data - database timeout")
             return UserResponse(
@@ -866,7 +866,7 @@ class ProductionSupabaseAuthService:
             from sqlalchemy import text
             
             # Use connection pool instead of creating new connections with timeout
-            async with asyncio.timeout(15.0):  # 15 second timeout
+            async with asyncio.timeout(120.0):  # 120 second timeout for dashboard queries
                 async with async_engine.begin() as conn:
                     
                     # Optimized query: Get user ID and basic info in one query
@@ -951,7 +951,7 @@ class ProductionSupabaseAuthService:
                     return dashboard_stats
                 
         except asyncio.TimeoutError:
-            logger.warning(f"DASHBOARD: Database timeout after 15s for user {user_id}")
+            logger.warning(f"DASHBOARD: Database timeout after 120s for user {user_id}")
             # Return empty stats on timeout
             return UserDashboardStats(
                 total_searches=0,

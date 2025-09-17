@@ -278,10 +278,10 @@ async def get_current_user_profile(
         async with async_engine.begin() as conn:
             # Get fresh user data from database using Supabase user ID
             result = await conn.execute(text("""
-                SELECT id, email, full_name, role, status, created_at, last_login, 
-                       avatar_config, "user.first_name" as first_name, "user.last_name" as last_name, company, 
-                       job_title, phone_number, bio, timezone, language, updated_at
-                FROM users 
+                SELECT id, email, full_name, role, status, created_at, last_login,
+                       avatar_config, company, job_title, phone_number, bio,
+                       timezone, language, updated_at
+                FROM users
                 WHERE supabase_user_id = :user_id
             """), {"user_id": current_user.id})
             
@@ -318,8 +318,8 @@ async def get_current_user_profile(
                 created_at=user_row.created_at,
                 last_login=user_row.last_login,
                 avatar_config=avatar_config,
-                first_name=user_row.first_name,
-                last_name=user_row.last_name,
+                first_name=None,  # Column doesn't exist
+                last_name=None,   # Column doesn't exist
                 company=user_row.company,
                 job_title=user_row.job_title,
                 phone_number=user_row.phone_number,
@@ -432,8 +432,8 @@ async def get_user_dashboard(
         # Get user profile data using the same pattern as settings API
         user_result = await db_session.execute(text("""
             SELECT id, email, full_name, role, status, created_at, last_login,
-                   avatar_config, "user.first_name" as first_name, "user.last_name" as last_name,
-                   company, job_title, phone_number, bio, timezone, language, updated_at
+                   avatar_config, company, job_title, phone_number, bio,
+                   timezone, language, updated_at
             FROM users
             WHERE supabase_user_id = :user_id
         """), {"user_id": current_user.id})
@@ -461,8 +461,8 @@ async def get_user_dashboard(
             created_at=user_row.created_at,
             last_login=user_row.last_login,
             avatar_config=avatar_config,
-            first_name=user_row.first_name,
-            last_name=user_row.last_name,
+            first_name=None,
+            last_name=None,
             company=user_row.company,
             job_title=user_row.job_title,
             phone_number=user_row.phone_number,
