@@ -274,6 +274,7 @@ async def creator_search_compatibility(
 
 # BULLETPROOF FIX: Add missing simple creator system stats endpoint with direct database query
 @app.get("/api/v1/simple/creator/system/stats")
+@app.get("/api/v1/creator/system/stats")  # Add missing endpoint
 async def simple_creator_system_stats_compatibility(
     current_user=Depends(get_current_active_user),
     db=Depends(get_db)
@@ -362,6 +363,25 @@ async def simple_creator_system_stats_compatibility(
             "error": f"System temporarily unavailable: {str(e)}",
             "message": "System statistics partially unavailable - system will retry automatically"
         }
+
+# COMPATIBILITY ROUTES: Handle doubled API paths from frontend
+@app.get("/api/v1/api/v1/simple/creator/system/stats")
+async def system_stats_compatibility_doubled(
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """Compatibility route for doubled API path"""
+    return await simple_creator_system_stats_compatibility(current_user, db)
+
+@app.get("/api/v1/api/v1/simple/creator/unlocked")
+async def unlocked_profiles_compatibility_doubled(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+    current_user=Depends(get_current_active_user),
+    db=Depends(get_db)
+):
+    """Compatibility route for doubled API path"""
+    return await nuclear_unlocked_profiles(page, page_size, current_user, db)
 
 # ADMIN CDN SYNC ENDPOINT - Fix database synchronization
 @app.post("/api/v1/admin/cdn/sync-all-profiles")
@@ -577,6 +597,7 @@ async def bulletproof_creator_search(
                         "cdn_thumbnail_url": post_cdn_url,
                         "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
                         "ai_analysis": {
+                            # Basic AI fields
                             "content_category": post.ai_content_category,
                             "category_confidence": post.ai_category_confidence,
                             "sentiment": post.ai_sentiment,
@@ -584,8 +605,20 @@ async def bulletproof_creator_search(
                             "sentiment_confidence": post.ai_sentiment_confidence,
                             "language_code": post.ai_language_code,
                             "language_confidence": post.ai_language_confidence,
-                            "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None
-                        }
+                            "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None,
+                            # Complete advanced AI analysis data
+                            "full_analysis": post.ai_analysis_raw.get("category", {}) if post.ai_analysis_raw else {},
+                            "visual_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("visual_content", {}) if post.ai_analysis_raw else {},
+                            "text_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}) if post.ai_analysis_raw else {},
+                            "engagement_prediction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("engagement_prediction", {}) if post.ai_analysis_raw else {},
+                            "brand_safety": post.ai_analysis_raw.get("advanced_models", {}).get("fraud_detection", {}) if post.ai_analysis_raw else {},
+                            "hashtag_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
+                            "entity_extraction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
+                            "topic_modeling": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("topic_modeling", {}) if post.ai_analysis_raw else {},
+                            "data_size_chars": len(str(post.ai_analysis_raw)) if post.ai_analysis_raw else 0
+                        },
+                        # Complete raw AI analysis for advanced features
+                        "ai_analysis_raw": post.ai_analysis_raw if post.ai_analysis_raw else None
                     })
 
                 fast_time = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -841,6 +874,7 @@ async def bulletproof_creator_search(
                         "cdn_thumbnail_url": post_cdn_url,
                         "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
                         "ai_analysis": {
+                            # Basic AI fields
                             "content_category": post.ai_content_category,
                             "category_confidence": post.ai_category_confidence,
                             "sentiment": post.ai_sentiment,
@@ -848,8 +882,20 @@ async def bulletproof_creator_search(
                             "sentiment_confidence": post.ai_sentiment_confidence,
                             "language_code": post.ai_language_code,
                             "language_confidence": post.ai_language_confidence,
-                            "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None
-                        }
+                            "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None,
+                            # Complete advanced AI analysis data
+                            "full_analysis": post.ai_analysis_raw.get("category", {}) if post.ai_analysis_raw else {},
+                            "visual_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("visual_content", {}) if post.ai_analysis_raw else {},
+                            "text_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}) if post.ai_analysis_raw else {},
+                            "engagement_prediction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("engagement_prediction", {}) if post.ai_analysis_raw else {},
+                            "brand_safety": post.ai_analysis_raw.get("advanced_models", {}).get("fraud_detection", {}) if post.ai_analysis_raw else {},
+                            "hashtag_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
+                            "entity_extraction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
+                            "topic_modeling": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("topic_modeling", {}) if post.ai_analysis_raw else {},
+                            "data_size_chars": len(str(post.ai_analysis_raw)) if post.ai_analysis_raw else 0
+                        },
+                        # Complete raw AI analysis for advanced features
+                        "ai_analysis_raw": post.ai_analysis_raw if post.ai_analysis_raw else None
                     })
 
                 # Replace posts data with refreshed data

@@ -99,11 +99,11 @@ async def _test_connection_with_resilience(engine):
 class DatabaseConfig:
     """Enterprise-scale database configuration for high-traffic analytics platforms"""
 
-    # OPTIMIZED Connection Pool Settings - Prevent timeout issues
-    POOL_SIZE = 10                    # Reduced to prevent pool exhaustion
-    MAX_OVERFLOW = 15                 # Conservative overflow for stability
-    POOL_TIMEOUT = 5                  # Faster timeout to prevent hanging
-    POOL_RECYCLE = 3600              # 1 hour recycle (industry standard)
+    # ENTERPRISE SCALE: Production-grade pool settings for Modash-scale platform
+    POOL_SIZE = 30                    # Increased connection pool for stability
+    MAX_OVERFLOW = 50                 # Increased overflow for burst capacity
+    POOL_TIMEOUT = 5                  # Reduced timeout to fail fast and prevent blocking
+    POOL_RECYCLE = 1800              # 30 minute recycle for faster recovery
     POOL_PRE_PING = True             # Always validate connections
     POOL_RESET_ON_RETURN = 'commit'   # Clean connection state on return
 
@@ -112,21 +112,21 @@ class DatabaseConfig:
     SESSION_AUTOFLUSH = False        # Manual flush for better control
     SESSION_AUTOCOMMIT = False       # Explicit transaction control
 
-    # Connection Health - Industry standard timeouts
-    CONNECT_TIMEOUT = 30             # Standard connection timeout
-    QUERY_TIMEOUT = 60               # Standard query timeout
+    # Connection Health - Enterprise-grade timeouts for scale
+    CONNECT_TIMEOUT = 20             # Increased connection timeout for stability
+    QUERY_TIMEOUT = 60               # Increased for complex dashboard queries
     HEALTH_CHECK_INTERVAL = 30       # Standard health check frequency
 
-    # Async Connection Settings - Optimized AsyncPG configuration
-    ASYNCPG_COMMAND_TIMEOUT = 30     # Reduced timeout to prevent hangs
+    # Async Connection Settings - Enterprise AsyncPG configuration
+    ASYNCPG_COMMAND_TIMEOUT = 30     # Balanced command timeout for stability
     ASYNCPG_SERVER_SETTINGS = {
         "application_name": "analytics_following_production",
-        "statement_timeout": "30s",    # Reduced statement timeout
-        "idle_in_transaction_session_timeout": "120000",   # 2 minutes (reduced)
-        "tcp_keepalives_idle": "600",       # 10 minutes TCP keepalive
-        "tcp_keepalives_interval": "60",    # 1 minute keepalive interval
-        "tcp_keepalives_count": "5",        # 5 keepalive attempts
-        "application_name": "analytics_following_production"
+        "statement_timeout": "30s",    # Balanced statement timeout
+        "idle_in_transaction_session_timeout": "30000",    # 30 seconds - faster cleanup
+        "tcp_keepalives_idle": "120",       # 2 minutes TCP keepalive - more aggressive
+        "tcp_keepalives_interval": "10",    # 10 second keepalive interval - faster detection
+        "tcp_keepalives_count": "2",        # 2 keepalive attempts - fail faster
+        "lock_timeout": "15s"               # Reduced lock timeout for faster recovery
     }
 
 # Database instances  

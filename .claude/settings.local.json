@@ -45,7 +45,17 @@
       "WebFetch(domain:cdn.following.ae)",
       "mcp__cloudflare__r2_delete_object",
       "Bash(git checkout:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "mcp__supabase__get_logs",
+      "mcp__supabase__apply_migration",
+      "mcp__cloudflare__r2_get_object",
+      "mcp__cloudflare__zones_list",
+      "mcp__cloudflare__worker_list",
+      "mcp__cloudflare__worker_put",
+      "mcp__cloudflare__zones_get",
+      "mcp__cloudflare__domain_list",
+      "mcp__cloudflare__route_create",
+      "mcp__cloudflare__worker_get"
     ],
     "deny": [],
     "ask": [],

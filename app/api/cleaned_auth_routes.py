@@ -428,129 +428,132 @@ async def get_user_dashboard(
     try:
         from sqlalchemy import text
         import json
+        import asyncio
 
-        # Get user profile data using the same pattern as settings API
-        user_result = await db_session.execute(text("""
-            SELECT id, email, full_name, role, status, created_at, last_login,
-                   avatar_config, company, job_title, phone_number, bio,
-                   timezone, language, updated_at
-            FROM users
-            WHERE supabase_user_id = :user_id
-        """), {"user_id": current_user.id})
+        # Enterprise-grade dashboard with balanced timeout for stability
+        async with asyncio.timeout(30.0):  # 30 second timeout for dashboard queries
+            # Get user profile data with optimized query
+            user_result = await db_session.execute(text("""
+                SELECT id, email, full_name, role, status, created_at, last_login,
+                       avatar_config, company, job_title, phone_number, bio,
+                       timezone, language, updated_at
+                FROM users
+                WHERE supabase_user_id = :user_id
+                LIMIT 1
+            """), {"user_id": current_user.id})
 
-        user_row = user_result.fetchone()
-        if not user_row:
-            raise HTTPException(status_code=404, detail="User profile not found")
+            user_row = user_result.fetchone()
+            if not user_row:
+                raise HTTPException(status_code=404, detail="User profile not found")
 
-        # Parse avatar config using the same pattern as settings API
-        avatar_config = None
-        if user_row.avatar_config:
-            try:
-                avatar_config = json.loads(user_row.avatar_config) if isinstance(user_row.avatar_config, str) else user_row.avatar_config
-            except (json.JSONDecodeError, TypeError):
-                avatar_config = None
+            # Parse avatar config using the same pattern as settings API
+            avatar_config = None
+            if user_row.avatar_config:
+                try:
+                    avatar_config = json.loads(user_row.avatar_config) if isinstance(user_row.avatar_config, str) else user_row.avatar_config
+                except (json.JSONDecodeError, TypeError):
+                    avatar_config = None
 
-
-        # Create user response
-        user_response = UserResponse(
-            id=current_user.id,
-            email=user_row.email,
-            full_name=user_row.full_name,
-            role=user_row.role,
-            status=user_row.status,
-            created_at=user_row.created_at,
-            last_login=user_row.last_login,
-            avatar_config=avatar_config,
-            first_name=None,
-            last_name=None,
-            company=user_row.company,
-            job_title=user_row.job_title,
-            phone_number=user_row.phone_number,
-            bio=user_row.bio,
-            timezone=user_row.timezone or "UTC",
-            language=user_row.language or "en",
-            updated_at=user_row.updated_at
-        )
-            
-        # Get team data if user is part of a team
-        team_result = await db_session.execute(text("""
-            SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
-                   t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
-                   t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
-            FROM teams t
-            JOIN team_members tm ON t.id = tm.team_id
-            JOIN users u ON tm.user_id = u.id
-                WHERE u.supabase_user_id = :user_id
-        """), {"user_id": current_user.id})
-
-        team_row = team_result.fetchone()
-        team_info = None
-
-        if team_row:
-            team_info = TeamInfo(
-                id=str(team_row.id),
-                name=team_row.name,
-                subscription_tier=team_row.subscription_tier,
-                subscription_status=team_row.subscription_status,
-                monthly_limits={
-                    "profiles": team_row.monthly_profile_limit,
-                    "emails": team_row.monthly_email_limit,
-                    "posts": team_row.monthly_posts_limit
-                },
-                monthly_usage={
-                    "profiles": team_row.profiles_used_this_month,
-                    "emails": team_row.emails_used_this_month,
-                    "posts": team_row.posts_used_this_month
-                }
+            # Create user response
+            user_response = UserResponse(
+                id=current_user.id,
+                email=user_row.email,
+                full_name=user_row.full_name,
+                role=user_row.role,
+                status=user_row.status,
+                created_at=user_row.created_at,
+                last_login=user_row.last_login,
+                avatar_config=avatar_config,
+                first_name=None,
+                last_name=None,
+                company=user_row.company,
+                job_title=user_row.job_title,
+                phone_number=user_row.phone_number,
+                bio=user_row.bio,
+                timezone=user_row.timezone or "UTC",
+                language=user_row.language or "en",
+                updated_at=user_row.updated_at
             )
 
-        # Determine subscription info
-        resolved_tier = user_row.role  # Start with user role
-        limits = {"profiles": 5, "emails": 0, "posts": 0}  # Free tier defaults
-        usage = {"profiles": 0, "emails": 0, "posts": 0}
-        is_team_subscription = team_info is not None
+            # Get team data if user is part of a team - optimized query
+            team_result = await db_session.execute(text("""
+                SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
+                       t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
+                       t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
+                FROM teams t
+                JOIN team_members tm ON t.id = tm.team_id
+                JOIN users u ON tm.user_id = u.id
+                WHERE u.supabase_user_id = :user_id
+                LIMIT 1
+            """), {"user_id": current_user.id})
 
-        if team_info:
-            resolved_tier = team_info.subscription_tier
-            limits = team_info.monthly_limits
-            usage = team_info.monthly_usage
-        else:
-            # Individual subscription limits
-            if user_row.role == "premium":
-                limits = {"profiles": 2000, "emails": 800, "posts": 300}
-            elif user_row.role == "standard":
-                limits = {"profiles": 500, "emails": 250, "posts": 125}
+            team_row = team_result.fetchone()
+            team_info = None
 
-        subscription_info = SubscriptionInfo(
-            tier=resolved_tier,
-            limits=limits,
-            usage=usage,
-            is_team_subscription=is_team_subscription
-        )
+            if team_row:
+                team_info = TeamInfo(
+                    id=str(team_row.id),
+                    name=team_row.name,
+                    subscription_tier=team_row.subscription_tier,
+                    subscription_status=team_row.subscription_status,
+                    monthly_limits={
+                        "profiles": team_row.monthly_profile_limit,
+                        "emails": team_row.monthly_email_limit,
+                        "posts": team_row.monthly_posts_limit
+                    },
+                    monthly_usage={
+                        "profiles": team_row.profiles_used_this_month,
+                        "emails": team_row.emails_used_this_month,
+                        "posts": team_row.posts_used_this_month
+                    }
+                )
 
-        # Get dashboard statistics
-        stats = await auth_service.get_user_dashboard_stats(current_user.id)
-        stats_dict = {
-            "total_searches": stats.total_searches,
-            "searches_this_month": stats.searches_this_month,
-            "favorite_profiles": stats.favorite_profiles,
-            "recent_searches": [search.dict() for search in stats.recent_searches],
-            "account_created": stats.account_created.isoformat(),
-            "last_active": stats.last_active.isoformat()
-        }
+            # Determine subscription info
+            resolved_tier = user_row.role  # Start with user role
+            limits = {"profiles": 5, "emails": 0, "posts": 0}  # Free tier defaults
+            usage = {"profiles": 0, "emails": 0, "posts": 0}
+            is_team_subscription = team_info is not None
 
-        # DEBUG: Final response logging
-        logger.info(f"DASHBOARD-DEBUG: Final user_response.avatar_config: {user_response.avatar_config}")
+            if team_info:
+                resolved_tier = team_info.subscription_tier
+                limits = team_info.monthly_limits
+                usage = team_info.monthly_usage
+            else:
+                # Individual subscription limits
+                if user_row.role == "premium":
+                    limits = {"profiles": 2000, "emails": 800, "posts": 300}
+                elif user_row.role == "standard":
+                    limits = {"profiles": 500, "emails": 250, "posts": 125}
 
-        dashboard_response = UserDashboardResponse(
-            user=user_response,
-            team=team_info,
-            subscription=subscription_info,
-            stats=stats_dict
-        )
+            subscription_info = SubscriptionInfo(
+                tier=resolved_tier,
+                limits=limits,
+                usage=usage,
+                is_team_subscription=is_team_subscription
+            )
 
+            # Get dashboard statistics
+            stats = await auth_service.get_user_dashboard_stats(current_user.id)
+            stats_dict = {
+                "total_searches": stats.total_searches,
+                "searches_this_month": stats.searches_this_month,
+                "favorite_profiles": stats.favorite_profiles,
+                "recent_searches": [search.dict() for search in stats.recent_searches],
+                "account_created": stats.account_created.isoformat(),
+                "last_active": stats.last_active.isoformat()
+            }
 
-        return dashboard_response
+            # DEBUG: Final response logging
+            logger.info(f"DASHBOARD-DEBUG: Final user_response.avatar_config: {user_response.avatar_config}")
+
+            dashboard_response = UserDashboardResponse(
+                user=user_response,
+                team=team_info,
+                subscription=subscription_info,
+                stats=stats_dict
+            )
+
+            return dashboard_response
         
     except HTTPException:
         raise

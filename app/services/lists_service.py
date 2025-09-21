@@ -25,16 +25,35 @@ class ListsService:
     """Service class for My Lists functionality"""
     
     async def _get_database_user_id(self, db: AsyncSession, supabase_user_id: UUID) -> UUID:
-        """Convert Supabase user ID to database user ID"""
+        """Convert Supabase user ID to database user ID with caching"""
         from sqlalchemy import text
+        from app.services.redis_cache_service import redis_cache
+
+        # Try cache first
+        try:
+            cached_user_id = await redis_cache.get("user_id_mapping", str(supabase_user_id))
+            if cached_user_id:
+                return UUID(cached_user_id)
+        except Exception as cache_error:
+            logger.warning(f"Cache lookup failed for user {supabase_user_id}: {cache_error}")
+
+        # Query database - enterprise-grade UUID handling with proper type casting
         result = await db.execute(
-            text("SELECT id FROM users WHERE id::text = :user_id OR supabase_user_id::text = :user_id"), 
-            {"user_id": str(supabase_user_id)}
+            text("SELECT id FROM users WHERE id = CAST(:user_id AS uuid) OR supabase_user_id = :user_id_text"),
+            {"user_id": str(supabase_user_id), "user_id_text": str(supabase_user_id)}
         )
         user_row = result.fetchone()
         if not user_row:
             raise ValueError(f"User {supabase_user_id} not found in database")
-        return user_row[0]
+
+        # Cache for 30 minutes
+        user_id = user_row[0]
+        try:
+            await redis_cache.set("user_id_mapping", str(supabase_user_id), str(user_id), ttl=1800)
+        except Exception as cache_error:
+            logger.warning(f"Cache set failed for user {supabase_user_id}: {cache_error}")
+
+        return user_id
     
     async def _get_profile_id_from_username(self, db: AsyncSession, username: str) -> UUID:
         """Get profile ID from username"""

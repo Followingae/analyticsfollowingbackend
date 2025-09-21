@@ -251,14 +251,15 @@ class ProductionSupabaseAuthService:
             
             # Use connection pool for fast database access with timeout
             async with asyncio.timeout(60.0):  # 60 second timeout (industry standard)
-                async with async_engine.begin() as conn:
-                    # Get fresh user data from database using Supabase user ID
+                async with async_engine.connect() as conn:  # ENTERPRISE: Use connect() for read operations (faster)
+                    # OPTIMIZED: Enterprise-grade login query with performance hints
                     result = await conn.execute(text("""
-                        SELECT id, email, full_name, role, status, created_at, last_login, 
-                               profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name, 
+                        SELECT id, email, full_name, role, status, created_at, last_login,
+                               profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name,
                                company, job_title, phone_number, bio, timezone, language, updated_at
-                        FROM users 
+                        FROM users
                         WHERE supabase_user_id = :user_id
+                        LIMIT 1
                     """), {"user_id": supabase_user.id})
                 
                 user_row = result.fetchone()
@@ -436,16 +437,16 @@ class ProductionSupabaseAuthService:
             current_time = datetime.now(timezone.utc)
             logger.info(f"SYNC: Using UTC time: {current_time}")
             
-            # Add retry logic for database connection timeouts
-            max_retries = 3
-            retry_delay = 1  # seconds
+            # ENTERPRISE: Aggressive retry logic for high-scale platform
+            max_retries = 2  # Faster failure detection for enterprise responsiveness
+            retry_delay = 0.5  # Reduced delay for speed
             
             for attempt in range(max_retries):
                 try:
                     async with SessionLocal() as db:
-                        # Set reasonable timeout for this specific operation
+                        # ENTERPRISE: Optimize for fast login performance
                         from sqlalchemy import text
-                        await db.execute(text("SET statement_timeout = '30s'"))
+                        await db.execute(text("SET statement_timeout = '45s'"))  # Increased timeout for stability
                         
                         # ENFORCE: Check if user exists by Supabase ID ONLY (never create duplicates)
                         logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id} (attempt {attempt + 1})")
@@ -865,13 +866,13 @@ class ProductionSupabaseAuthService:
             from app.database.connection import async_engine
             from sqlalchemy import text
             
-            # Use connection pool instead of creating new connections with timeout
-            async with asyncio.timeout(120.0):  # 120 second timeout for dashboard queries
+            # Use connection pool with balanced timeout for dashboard stability
+            async with asyncio.timeout(30.0):  # 30 second timeout for dashboard queries
                 async with async_engine.begin() as conn:
                     
-                    # Optimized query: Get user ID and basic info in one query
+                    # Optimized query: Get user ID and basic info in one query with LIMIT
                     user_result = await conn.execute(text("""
-                        SELECT id, created_at FROM users WHERE supabase_user_id = :user_id
+                        SELECT id, created_at FROM users WHERE supabase_user_id = :user_id LIMIT 1
                     """), {"user_id": str(user_id)})
                 
                     user_row = user_result.fetchone()
@@ -925,14 +926,14 @@ class ProductionSupabaseAuthService:
                         for row in recent_search_result.fetchall()
                     ]
                     
-                    # Get favorite profiles (unlocked profiles) - user_profile_access.user_id is UUID
+                    # Get favorite profiles (unlocked profiles) - use database user ID (UUID)
                     favorite_profiles_result = await conn.execute(text("""
                         SELECT p.username FROM user_profile_access upa
                         JOIN profiles p ON p.id = upa.profile_id
-                        WHERE upa.user_id = :user_id
+                        WHERE upa.user_id = :db_user_id
                         ORDER BY upa.granted_at DESC
                         LIMIT 10
-                    """), {"user_id": str(db_user_id)})
+                    """), {"db_user_id": db_user_id})
                     
                     favorite_profile_list = [row.username for row in favorite_profiles_result.fetchall()]
                     
@@ -951,7 +952,7 @@ class ProductionSupabaseAuthService:
                     return dashboard_stats
                 
         except asyncio.TimeoutError:
-            logger.warning(f"DASHBOARD: Database timeout after 120s for user {user_id}")
+            logger.error(f"DASHBOARD: Database timeout after 30s for user {user_id} - connection issue")
             # Return empty stats on timeout
             return UserDashboardStats(
                 total_searches=0,
