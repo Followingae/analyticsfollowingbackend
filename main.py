@@ -1457,6 +1457,9 @@ from app.api.admin.superadmin_dashboard_routes import router as superadmin_dashb
 from app.api.admin.superadmin_comprehensive_extension import router as superadmin_extension_router
 app.include_router(superadmin_dashboard_router, prefix="/api")
 app.include_router(superadmin_extension_router, prefix="/api")
+# CDN Sync Repair Routes (Superadmin Only)
+from app.api.v1.admin.cdn_repair import router as cdn_repair_router
+app.include_router(cdn_repair_router, prefix="/api/v1")
 
 # Include CDN Media and Health routes
 from app.api.cdn_media_routes import router as cdn_media_router

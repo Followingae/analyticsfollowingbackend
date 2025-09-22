@@ -66,15 +66,52 @@ class CDNSyncService:
         Args:
             profile_id: Profile UUID
             username: Instagram username
-            post_ids: List of Instagram post IDs
+            post_ids: List of Instagram post IDs (can be shortcodes or full instagram_post_ids)
 
         Returns:
-            Dict mapping post_id -> CDN URL
+            Dict mapping original_post_id -> CDN URL
         """
         try:
-            # STEP 1: Try to get from database (preferred)
+            # STEP 1: Try to get from posts table (current system - preferred)
             if post_ids:
-                db_query = text("""
+                # Handle both formats: "shortcode_ABC123" and "ABC123"
+                # Extract shortcodes for database query
+                shortcodes = []
+                post_id_to_shortcode = {}
+
+                for post_id in post_ids:
+                    if post_id.startswith('shortcode_'):
+                        shortcode = post_id.replace('shortcode_', '')
+                    else:
+                        shortcode = post_id
+                    shortcodes.append(shortcode)
+                    post_id_to_shortcode[shortcode] = post_id
+
+                posts_query = text("""
+                    SELECT shortcode, cdn_thumbnail_url
+                    FROM posts
+                    WHERE profile_id = :profile_id
+                    AND cdn_thumbnail_url IS NOT NULL
+                    AND shortcode = ANY(:shortcodes)
+                """)
+                posts_result = await db.execute(posts_query, {
+                    'profile_id': profile_id,
+                    'shortcodes': shortcodes
+                })
+
+                # Map back to original post_id format
+                posts_urls = {}
+                for shortcode, cdn_url in posts_result.fetchall():
+                    original_post_id = post_id_to_shortcode[shortcode]
+                    posts_urls[original_post_id] = cdn_url
+
+                if posts_urls:
+                    self.logger.info(f"[CDN] Profile {username}: Found {len(posts_urls)} post CDN URLs in posts table")
+                    return posts_urls
+
+            # STEP 2: Try legacy cdn_image_assets table (fallback)
+            if post_ids:
+                assets_query = text("""
                     SELECT media_id, cdn_url_512
                     FROM cdn_image_assets
                     WHERE source_id = :profile_id
@@ -82,17 +119,17 @@ class CDNSyncService:
                     AND cdn_url_512 IS NOT NULL
                     AND media_id = ANY(:post_ids)
                 """)
-                db_result = await db.execute(db_query, {
+                assets_result = await db.execute(assets_query, {
                     'profile_id': profile_id,
                     'post_ids': post_ids
                 })
-                db_urls = {row[0]: row[1] for row in db_result.fetchall()}
+                assets_urls = {row[0]: row[1] for row in assets_result.fetchall()}
 
-                if db_urls:
-                    self.logger.info(f"[CDN] Profile {username}: Found {len(db_urls)} post CDN URLs in database")
-                    return db_urls
+                if assets_urls:
+                    self.logger.info(f"[CDN] Profile {username}: Found {len(assets_urls)} post CDN URLs in cdn_image_assets table")
+                    return assets_urls
 
-            # STEP 2: Database empty - construct direct R2 URLs (legacy thumbnails)
+            # STEP 3: Database empty - construct direct R2 URLs (legacy thumbnails)
             # Check if we have legacy thumbnail structure in R2
             legacy_urls = {}
             for post_id in post_ids:
