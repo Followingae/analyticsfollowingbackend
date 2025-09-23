@@ -55,7 +55,16 @@
       "mcp__cloudflare__zones_get",
       "mcp__cloudflare__domain_list",
       "mcp__cloudflare__route_create",
-      "mcp__cloudflare__worker_get"
+      "mcp__cloudflare__worker_get",
+      "Bash(cat:*)",
+      "mcp__supabase__list_tables",
+      "Bash(dir migrations)",
+      "Bash(git restore:*)",
+      "Bash(ping:*)",
+      "Bash(for:*)",
+      "Bash(do echo \"=== $file ===\")",
+      "Bash(grep:*)",
+      "Bash(done)"
     ],
     "deny": [],
     "ask": [],

@@ -533,7 +533,7 @@ async def get_user_dashboard(
             )
 
             # Get dashboard statistics
-            stats = await auth_service.get_user_dashboard_stats(current_user.id)
+            stats = await auth_service.get_user_dashboard_stats(current_user.id, db_session)
             stats_dict = {
                 "total_searches": stats.total_searches,
                 "searches_this_month": stats.searches_this_month,

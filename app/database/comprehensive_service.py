@@ -11,7 +11,6 @@ import datetime as dt_module  # Import the module itself to avoid conflicts
 from typing import Dict, Any, Optional, List, Tuple
 from uuid import UUID
 import logging
-import asyncpg
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, and_, or_, func, text
 from sqlalchemy.orm import selectinload, joinedload
@@ -25,6 +24,7 @@ from .unified_models import (
     UserList, UserListItem
 )
 from app.services.engagement_rate_service import EngagementRateService
+from app.services.location_detection_service import LocationDetectionService
 
 logger = logging.getLogger(__name__)
 
@@ -33,53 +33,8 @@ class ComprehensiveDataService:
     """Unified service for complete Apify data storage and retrieval"""
     
     def __init__(self):
-        self.pool: Optional[asyncpg.Pool] = None
+        self.location_service = LocationDetectionService()
         
-    async def init_pool(self):
-        """Initialize asyncpg connection pool for performance-critical operations - SINGLE POOL PATTERN"""
-        try:
-            # CHECK: If pool already exists, don't create a new one (single connection pool pattern)
-            if self.pool is not None:
-                logger.info("Comprehensive service pool already initialized - reusing existing pool")
-                return
-                
-            # Check if database URL is properly configured
-            if not settings.DATABASE_URL or "[YOUR-PASSWORD]" in settings.DATABASE_URL or not settings.DATABASE_URL.strip():
-                logger.warning("Database URL not configured properly for comprehensive service - skipping pool initialization")
-                return
-                
-            # Try to create connection pool with error handling and timeout
-            try:
-                self.pool = await asyncio.wait_for(
-                    asyncpg.create_pool(
-                        settings.DATABASE_URL,
-                        min_size=1,  # Reduced minimum connections
-                        max_size=5,  # Reduced maximum connections
-                        command_timeout=30,
-                        server_settings={
-                            "statement_cache_size": "50",
-                            "application_name": "comprehensive_service"
-                        }
-                    ),
-                    timeout=10.0  # 10 second timeout for pool creation
-                )
-                logger.info("Comprehensive service connection pool initialized successfully")
-            except asyncio.TimeoutError:
-                logger.warning("Comprehensive service pool initialization timed out - service will operate without pool")
-                self.pool = None
-            except asyncpg.InvalidAuthorizationSpecificationError:
-                logger.warning("Database authentication failed for comprehensive service - service will operate without pool")
-                self.pool = None
-            except asyncpg.CannotConnectNowError:
-                logger.warning("Database connection limit reached for comprehensive service - service will operate without pool")
-                self.pool = None
-            except Exception as pool_error:
-                logger.warning(f"Comprehensive service pool creation failed: {pool_error} - service will operate without pool")
-                self.pool = None
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize comprehensive service connection pool: {e}")
-            self.pool = None
     
     async def check_db_health(self, db: AsyncSession) -> bool:
         """Check if database connection is healthy"""
@@ -238,7 +193,13 @@ class ComprehensiveDataService:
                 print(f"DATABASE: Processing profile images metadata...")
                 await self._store_profile_images(db, profile.id, user_data)
                 print(f"DATABASE: Profile images metadata processed")
-                
+
+                # Detect and store creator location
+                logger.info(f"Running location detection for profile {profile.id}")
+                print(f"DATABASE: Running location detection...")
+                await self._detect_and_store_location(db, profile, user_data, raw_data)
+                print(f"DATABASE: Location detection completed")
+
                 logger.info(f"SUCCESS: Complete profile data stored for {username}")
             else:
                 logger.warning(f"No user data found for {username}, skipping post/related data processing")
@@ -1887,20 +1848,74 @@ class ComprehensiveDataService:
         except Exception as e:
             logger.error(f"Error checking team profile access: {e}")
             return None
-    
 
-    async def close_pool(self):
-        """Close the connection pool and reset state"""
+    async def _detect_and_store_location(self, db: AsyncSession, profile: Profile, user_data: Dict[str, Any], raw_data: Dict[str, Any]):
+        """Detect creator's primary country and store in database"""
         try:
-            if self.pool is not None:
-                await self.pool.close()
-                self.pool = None
-                logger.info("Comprehensive service connection pool closed")
+            # Prepare data for location detection
+            profile_data_for_detection = {
+                "biography": user_data.get("biography", ""),
+                "posts": []
+            }
+
+            # Get posts for content analysis if available
+            posts_data = user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
+            for post_edge in posts_data[:20]:  # Analyze up to 20 recent posts
+                post_node = post_edge.get("node", {})
+                caption_edges = post_node.get("edge_media_to_caption", {}).get("edges", [])
+                caption = ""
+                if caption_edges:
+                    caption = caption_edges[0].get("node", {}).get("text", "")
+
+                profile_data_for_detection["posts"].append({
+                    "caption": caption
+                })
+
+            # Add audience data if available (this would come from separate analysis)
+            # For now, we'll skip audience data since it's not in the standard Apify response
+            profile_data_for_detection["audience_top_countries"] = []
+
+            # Run location detection
+            location_result = self.location_service.detect_country(profile_data_for_detection)
+
+            # Update profile with location data
+            if location_result["country_code"]:
+                update_query = (
+                    update(Profile)
+                    .where(Profile.id == profile.id)
+                    .values(
+                        detected_country=location_result["country_code"],
+                        country_confidence=location_result["confidence"],
+                        country_signals=location_result["signals"],
+                        country_detected_at=datetime.now(timezone.utc)
+                    )
+                )
+
+                await db.execute(update_query)
+                await db.commit()
+
+                logger.info(
+                    f"Location detected for {profile.username}: "
+                    f"{location_result['country_code']} "
+                    f"(confidence: {location_result['confidence']:.2f})"
+                )
+                print(
+                    f"LOCATION: {profile.username} -> "
+                    f"{location_result['country_code']} "
+                    f"({location_result['confidence']:.1%})"
+                )
             else:
-                logger.debug("Comprehensive service connection pool was not initialized - nothing to close")
+                logger.info(f"No location detected for {profile.username}")
+                print(f"LOCATION: {profile.username} -> No country detected")
+
         except Exception as e:
-            logger.error(f"Error closing comprehensive service pool: {e}")
-            self.pool = None  # Ensure pool is reset even if close fails
+            logger.error(f"Error in location detection for {profile.username}: {e}")
+            print(f"LOCATION ERROR: {profile.username} -> {str(e)}")
+            # Don't raise - location detection failure shouldn't stop profile processing
+
+    async def cleanup(self):
+        """Clean up resources"""
+        logger.info("Comprehensive service cleanup completed")
 
 # Global service instance
 comprehensive_service = ComprehensiveDataService()

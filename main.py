@@ -58,15 +58,11 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Auth service failed: {e}")
     
-    # Initialize comprehensive service (may depend on database) 
+    # Initialize comprehensive service
     try:
-        await asyncio.wait_for(comprehensive_service.init_pool(), timeout=60.0)  # Production timeout
         print("Comprehensive service initialized")
-    except asyncio.TimeoutError:
-        print("Comprehensive service initialization timed out - will operate without connection pool")
     except Exception as e:
         print(f"Comprehensive service failed: {e}")
-        # Don't fail startup - the service can operate without the pool
     
     # Cache cleanup now handled by Redis cache manager
     print("Cache management integrated into Redis cache system")

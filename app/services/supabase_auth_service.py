@@ -9,6 +9,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -832,10 +833,47 @@ class ProductionSupabaseAuthService:
             logger.error(f"ERROR: Logout failed: {e}")
             return False
     
-    async def get_user_dashboard_stats(self, user_id: str):
+    async def get_user_dashboard_stats(self, user_id: str, db: AsyncSession):
         """Get comprehensive dashboard statistics for user with Redis caching for <500ms response"""
         await self.ensure_initialized()
-        
+
+        # CIRCUIT BREAKER: Check if service is degraded
+        from app.resilience.database_resilience import database_resilience
+        if database_resilience.should_circuit_break():
+            logger.warning(f"CIRCUIT BREAKER: Dashboard service degraded for user {user_id}")
+            # Return cached data or minimal fallback
+            cached_dashboard = await redis_cache.get_dashboard_data(user_id)
+            if cached_dashboard:
+                logger.info(f"🔄 CIRCUIT BREAKER: Serving cached data for user {user_id}")
+                from app.models.auth import UserDashboardStats, UserSearchHistory
+                return UserDashboardStats(
+                    total_searches=cached_dashboard['total_searches'],
+                    searches_this_month=cached_dashboard['searches_this_month'],
+                    favorite_profiles=cached_dashboard['favorite_profiles'],
+                    recent_searches=[
+                        UserSearchHistory(
+                            id=search['id'],
+                            user_id=search['user_id'],
+                            instagram_username=search['instagram_username'],
+                            search_timestamp=datetime.fromisoformat(search['search_timestamp']),
+                            analysis_type=search['analysis_type'],
+                            search_metadata=search['search_metadata']
+                        ) for search in cached_dashboard['recent_searches']
+                    ],
+                    account_created=datetime.fromisoformat(cached_dashboard['account_created']),
+                    last_active=datetime.fromisoformat(cached_dashboard['last_active'])
+                )
+            else:
+                # No cache available, return minimal stats
+                return UserDashboardStats(
+                    total_searches=0,
+                    searches_this_month=0,
+                    favorite_profiles=[],
+                    recent_searches=[],
+                    account_created=datetime.now(),
+                    last_active=datetime.now()
+                )
+
         try:
             # Check Redis cache first for instant dashboard loading
             cached_dashboard = await redis_cache.get_dashboard_data(user_id)
@@ -863,97 +901,126 @@ class ProductionSupabaseAuthService:
             logger.info(f"🔍 DASHBOARD CACHE MISS: Fetching fresh data for user {user_id}")
             
             from app.models.auth import UserDashboardStats, UserSearchHistory
-            from app.database.connection import async_engine
             from sqlalchemy import text
-            
-            # Use connection pool with balanced timeout for dashboard stability
-            async with asyncio.timeout(30.0):  # 30 second timeout for dashboard queries
-                async with async_engine.begin() as conn:
-                    
-                    # Optimized query: Get user ID and basic info in one query with LIMIT
-                    user_result = await conn.execute(text("""
-                        SELECT id, created_at FROM users WHERE supabase_user_id = :user_id LIMIT 1
-                    """), {"user_id": str(user_id)})
-                
-                    user_row = user_result.fetchone()
-                    
-                    if not user_row:
-                        logger.warning(f"No database user found for Supabase ID: {user_id}")
-                        return UserDashboardStats(
-                            total_searches=0,
-                            searches_this_month=0,
-                            favorite_profiles=[],
-                            recent_searches=[],
-                            account_created=datetime.now(),
-                            last_active=datetime.now()
-                        )
-                    
-                    db_user_id = user_row.id
-                    user_created = user_row.created_at
-                
-                    # Optimized query: Get search statistics in one query
-                    search_stats_result = await conn.execute(text("""
-                        SELECT 
-                            COUNT(*) as total_searches,
-                            COUNT(*) FILTER (WHERE search_timestamp >= date_trunc('month', CURRENT_DATE)) as searches_this_month
-                        FROM user_searches 
-                        WHERE user_id = :user_id
-                    """), {"user_id": str(db_user_id)})
-                    
-                    stats_row = search_stats_result.fetchone()
-                    total_searches = stats_row.total_searches or 0
-                    searches_this_month = stats_row.searches_this_month or 0
-                    
-                    # Get recent searches
-                    recent_search_result = await conn.execute(text("""
-                        SELECT id, user_id, instagram_username, search_timestamp, 
-                               analysis_type, search_metadata
-                        FROM user_searches 
-                        WHERE user_id = :user_id
-                        ORDER BY search_timestamp DESC 
+
+            # Use session-based approach with optimized timeout
+            async with asyncio.timeout(5.0):  # Industry standard: aggressive timeout for UX
+
+                # ENTERPRISE OPTIMIZATION: Single CTE query for ALL dashboard data
+                result = await db.execute(text("""
+                    WITH user_data AS (
+                        SELECT id, created_at
+                        FROM users
+                        WHERE supabase_user_id = :user_id
+                        LIMIT 1
+                    ),
+                    search_stats AS (
+                        SELECT
+                            COALESCE(COUNT(*), 0) as total_searches,
+                            COALESCE(COUNT(*) FILTER (WHERE search_timestamp >= date_trunc('month', CURRENT_DATE)), 0) as searches_this_month
+                        FROM user_searches us
+                        INNER JOIN user_data ud ON us.user_id = ud.id
+                    ),
+                    recent_searches AS (
+                        SELECT
+                            us.id::text as search_id,
+                            us.user_id::text as search_user_id,
+                            us.instagram_username,
+                            us.search_timestamp,
+                            us.analysis_type,
+                            COALESCE(us.search_metadata, '{}'::jsonb) as search_metadata
+                        FROM user_searches us
+                        INNER JOIN user_data ud ON us.user_id = ud.id
+                        ORDER BY us.search_timestamp DESC
                         LIMIT 10
-                    """), {"user_id": str(db_user_id)})
-                
-                    recent_searches = [
-                        UserSearchHistory(
-                            id=str(row.id),
-                            user_id=str(row.user_id),
-                            instagram_username=row.instagram_username,
-                            search_timestamp=row.search_timestamp,
-                            analysis_type=row.analysis_type,
-                            search_metadata=row.search_metadata or {}
-                        )
-                        for row in recent_search_result.fetchall()
-                    ]
-                    
-                    # Get favorite profiles (unlocked profiles) - use database user ID (UUID)
-                    favorite_profiles_result = await conn.execute(text("""
-                        SELECT p.username FROM user_profile_access upa
-                        JOIN profiles p ON p.id = upa.profile_id
-                        WHERE upa.user_id = :db_user_id
+                    ),
+                    favorite_profiles AS (
+                        SELECT p.username
+                        FROM user_profile_access upa
+                        INNER JOIN profiles p ON p.id = upa.profile_id
+                        INNER JOIN user_data ud ON upa.user_id = ud.id
                         ORDER BY upa.granted_at DESC
                         LIMIT 10
-                    """), {"db_user_id": db_user_id})
-                    
-                    favorite_profile_list = [row.username for row in favorite_profiles_result.fetchall()]
-                    
-                    dashboard_stats = UserDashboardStats(
-                        total_searches=total_searches,
-                        searches_this_month=searches_this_month,
-                        favorite_profiles=favorite_profile_list,
-                        recent_searches=recent_searches,
-                        account_created=user_created,
+                    )
+                    SELECT
+                        ud.id as user_id,
+                        ud.created_at,
+                        COALESCE(ss.total_searches, 0) as total_searches,
+                        COALESCE(ss.searches_this_month, 0) as searches_this_month,
+                        COALESCE(
+                            json_agg(
+                                json_build_object(
+                                    'id', rs.search_id,
+                                    'user_id', rs.search_user_id,
+                                    'instagram_username', rs.instagram_username,
+                                    'search_timestamp', rs.search_timestamp,
+                                    'analysis_type', rs.analysis_type,
+                                    'search_metadata', rs.search_metadata
+                                ) ORDER BY rs.search_timestamp DESC
+                            ) FILTER (WHERE rs.search_id IS NOT NULL),
+                            '[]'::json
+                        ) as recent_searches_json,
+                        COALESCE(
+                            array_agg(fp.username ORDER BY fp.username) FILTER (WHERE fp.username IS NOT NULL),
+                            ARRAY[]::text[]
+                        ) as favorite_profiles_array
+                    FROM user_data ud
+                    LEFT JOIN search_stats ss ON true
+                    LEFT JOIN recent_searches rs ON true
+                    LEFT JOIN favorite_profiles fp ON true
+                    GROUP BY ud.id, ud.created_at, ss.total_searches, ss.searches_this_month
+                """), {"user_id": str(user_id)})
+
+                row = result.fetchone()
+
+                if not row or not row.user_id:
+                    logger.warning(f"No database user found for Supabase ID: {user_id}")
+                    return UserDashboardStats(
+                        total_searches=0,
+                        searches_this_month=0,
+                        favorite_profiles=[],
+                        recent_searches=[],
+                        account_created=datetime.now(),
                         last_active=datetime.now()
                     )
-                    
-                    # Cache dashboard data for 5 minutes for instant subsequent loads
-                    await self._cache_dashboard_stats(user_id, dashboard_stats)
-                    
-                    return dashboard_stats
+
+                # Parse JSON search data efficiently
+                import json
+                recent_searches_data = json.loads(row.recent_searches_json) if row.recent_searches_json else []
+                recent_searches = [
+                    UserSearchHistory(
+                        id=search['id'],
+                        user_id=search['user_id'],
+                        instagram_username=search['instagram_username'],
+                        search_timestamp=datetime.fromisoformat(search['search_timestamp'].replace('Z', '+00:00')) if isinstance(search['search_timestamp'], str) else search['search_timestamp'],
+                        analysis_type=search['analysis_type'],
+                        search_metadata=search['search_metadata'] or {}
+                    )
+                    for search in recent_searches_data
+                ]
+
+                dashboard_stats = UserDashboardStats(
+                    total_searches=row.total_searches,
+                    searches_this_month=row.searches_this_month,
+                    favorite_profiles=list(row.favorite_profiles_array) if row.favorite_profiles_array else [],
+                    recent_searches=recent_searches,
+                    account_created=row.created_at,
+                    last_active=datetime.now()
+                )
+
+                # Cache dashboard data for 5 minutes for instant subsequent loads
+                await self._cache_dashboard_stats(user_id, dashboard_stats)
+
+                # RESILIENCE: Record successful operation
+                database_resilience.record_success()
+
+                return dashboard_stats
                 
         except asyncio.TimeoutError:
-            logger.error(f"DASHBOARD: Database timeout after 30s for user {user_id} - connection issue")
-            # Return empty stats on timeout
+            logger.error(f"DASHBOARD: Database timeout after 5s for user {user_id} - circuit breaker activated")
+            # RESILIENCE: Record timeout failure
+            database_resilience.record_failure()
+            # CIRCUIT BREAKER: Return cached fallback or minimal stats
             return UserDashboardStats(
                 total_searches=0,
                 searches_this_month=0,
@@ -964,6 +1031,8 @@ class ProductionSupabaseAuthService:
             )
         except Exception as e:
             logger.error(f"ERROR: Failed to get dashboard stats for user {user_id}: {e}")
+            # RESILIENCE: Record general failure
+            database_resilience.record_failure()
             # Return empty stats on error
             return UserDashboardStats(
                 total_searches=0,

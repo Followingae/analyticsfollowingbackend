@@ -280,21 +280,16 @@ class StartupInitializationService:
     async def _initialize_database_services(self):
         """Initialize Database Services - WARNING IF FAIL (non-critical)"""
         try:
-            logger.info("Initializing Database connection pools...")
-            
-            # Initialize comprehensive service pool
-            await comprehensive_service.init_pool()
-            
+            logger.info("Initializing Database services...")
+
+            # Comprehensive service uses shared database engine
             self.initialization_results["database_services"] = {
-                "status": "success" if comprehensive_service.pool else "warning",
-                "pool_initialized": comprehensive_service.pool is not None,
-                "note": "Service operates with fallback if pool unavailable"
+                "status": "success",
+                "shared_engine": True,
+                "note": "Using shared SQLAlchemy async engine for optimal connection pooling"
             }
-            
-            if comprehensive_service.pool:
-                logger.info("SUCCESS: Database connection pool initialized")
-            else:
-                logger.warning("[WARNING] Database pool not initialized - service will use fallback connections")
+
+            logger.info("SUCCESS: Database services using shared engine configuration")
             
         except Exception as e:
             logger.warning(f"[WARNING] Database services initialization warning: {e}")

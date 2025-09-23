@@ -99,11 +99,11 @@ async def _test_connection_with_resilience(engine):
 class DatabaseConfig:
     """Enterprise-scale database configuration for high-traffic analytics platforms"""
 
-    # ENTERPRISE SCALE: Production-grade pool settings for Modash-scale platform
-    POOL_SIZE = 30                    # Increased connection pool for stability
-    MAX_OVERFLOW = 50                 # Increased overflow for burst capacity
-    POOL_TIMEOUT = 5                  # Reduced timeout to fail fast and prevent blocking
-    POOL_RECYCLE = 1800              # 30 minute recycle for faster recovery
+    # SUPABASE OPTIMIZED: Session Pooler optimized settings
+    POOL_SIZE = 10                    # Industry standard for Session Pooler
+    MAX_OVERFLOW = 15                 # Optimal overflow for high concurrency
+    POOL_TIMEOUT = 30                 # Standard timeout for Session Pooler
+    POOL_RECYCLE = 3600              # 1 hour recycle for Session Pooler
     POOL_PRE_PING = True             # Always validate connections
     POOL_RESET_ON_RETURN = 'commit'   # Clean connection state on return
 
@@ -162,8 +162,8 @@ async def init_database():
             async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
             async_engine = create_async_engine(
                 async_url,
-                pool_size=10,  # Reduced for resilient mode
-                max_overflow=15,
+                pool_size=3,  # Minimal for resilient mode
+                max_overflow=5,
                 pool_timeout=DatabaseConfig.POOL_TIMEOUT,
                 pool_recycle=DatabaseConfig.POOL_RECYCLE,
                 pool_pre_ping=False,  # Disable pre-ping when network unavailable
@@ -258,8 +258,8 @@ async def init_database():
                 async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
                 async_engine = create_async_engine(
                     async_url,
-                    pool_size=5,  # Minimal for emergency mode
-                    max_overflow=5,
+                    pool_size=2,  # Minimal for emergency mode
+                    max_overflow=3,
                     pool_timeout=DatabaseConfig.POOL_TIMEOUT,
                     pool_recycle=DatabaseConfig.POOL_RECYCLE,
                     pool_pre_ping=False,  # Disable pre-ping in emergency mode
