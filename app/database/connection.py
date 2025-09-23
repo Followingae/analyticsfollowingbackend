@@ -99,11 +99,11 @@ async def _test_connection_with_resilience(engine):
 class DatabaseConfig:
     """Enterprise-scale database configuration for high-traffic analytics platforms"""
 
-    # SUPABASE OPTIMIZED: Session Pooler optimized settings
-    POOL_SIZE = 10                    # Industry standard for Session Pooler
-    MAX_OVERFLOW = 15                 # Optimal overflow for high concurrency
-    POOL_TIMEOUT = 30                 # Standard timeout for Session Pooler
-    POOL_RECYCLE = 3600              # 1 hour recycle for Session Pooler
+    # ✅ PRODUCTION: Session Pooler optimized settings
+    POOL_SIZE = 10                    # Proper production pool size
+    MAX_OVERFLOW = 10                 # Reasonable overflow
+    POOL_TIMEOUT = 10                 # Fast timeout - production standard
+    POOL_RECYCLE = 3600              # 1 hour recycle - production standard
     POOL_PRE_PING = True             # Always validate connections
     POOL_RESET_ON_RETURN = 'commit'   # Clean connection state on return
 
@@ -112,21 +112,16 @@ class DatabaseConfig:
     SESSION_AUTOFLUSH = False        # Manual flush for better control
     SESSION_AUTOCOMMIT = False       # Explicit transaction control
 
-    # Connection Health - Enterprise-grade timeouts for scale
-    CONNECT_TIMEOUT = 20             # Increased connection timeout for stability
-    QUERY_TIMEOUT = 60               # Increased for complex dashboard queries
+    # ✅ PRODUCTION: Session Pooler optimized timeouts
+    CONNECT_TIMEOUT = 15             # Fast connection for Session Pooler
+    QUERY_TIMEOUT = 30               # Production query timeout
     HEALTH_CHECK_INTERVAL = 30       # Standard health check frequency
 
-    # Async Connection Settings - Enterprise AsyncPG configuration
-    ASYNCPG_COMMAND_TIMEOUT = 30     # Balanced command timeout for stability
+    # ✅ ASYNCPG PRODUCTION CONFIG
+    ASYNCPG_COMMAND_TIMEOUT = 30     # Production command timeout
+    # Session Pooler compatible settings (minimal for maximum compatibility)
     ASYNCPG_SERVER_SETTINGS = {
-        "application_name": "analytics_following_production",
-        "statement_timeout": "30s",    # Balanced statement timeout
-        "idle_in_transaction_session_timeout": "30000",    # 30 seconds - faster cleanup
-        "tcp_keepalives_idle": "120",       # 2 minutes TCP keepalive - more aggressive
-        "tcp_keepalives_interval": "10",    # 10 second keepalive interval - faster detection
-        "tcp_keepalives_count": "2",        # 2 keepalive attempts - fail faster
-        "lock_timeout": "15s"               # Reduced lock timeout for faster recovery
+        "application_name": "analytics_following_enterprise"
     }
 
 # Database instances  
@@ -168,9 +163,15 @@ async def init_database():
                 pool_recycle=DatabaseConfig.POOL_RECYCLE,
                 pool_pre_ping=False,  # Disable pre-ping when network unavailable
                 echo=False,
+                # CRITICAL: Disable all statement caching for Session Pooler compatibility
+                query_cache_size=0,
+                execution_options={"compiled_cache": {}},  # Disable compilation caching
                 connect_args={
                     "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                    "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS
+                    "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS,
+                    "statement_cache_size": 0,  # Disable asyncpg prepared statements
+                    "prepared_statement_cache_size": 0,  # Disable driver prepared statements
+                    "prepared_statement_name_func": None  # Disable prepared statement naming
                 }
             )
             SessionLocal = sessionmaker(
@@ -187,9 +188,14 @@ async def init_database():
         logger.info("Initializing database connections...")
         
         # Create SQLAlchemy engines with UNIFIED configuration
-        async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+        # Handle both postgres:// and postgresql:// formats from Supabase
+        async_url = settings.DATABASE_URL
+        if async_url.startswith("postgres://"):
+            async_url = async_url.replace("postgres://", "postgresql+asyncpg://")
+        else:
+            async_url = async_url.replace("postgresql://", "postgresql+asyncpg://")
 
-        # INDUSTRY STANDARD: Production-grade configuration like Modash/HypeAuditor
+        # SESSION POOLER COMPATIBLE: Configuration for pgbouncer transaction mode
         async_engine = create_async_engine(
             async_url,
             pool_size=DatabaseConfig.POOL_SIZE,
@@ -199,9 +205,15 @@ async def init_database():
             pool_pre_ping=DatabaseConfig.POOL_PRE_PING,
             pool_reset_on_return=DatabaseConfig.POOL_RESET_ON_RETURN,
             echo=False,
+            # CRITICAL: Disable all statement caching for Session Pooler compatibility
+            query_cache_size=0,
+            execution_options={"compiled_cache": {}},  # Disable compilation caching
             connect_args={
                 "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS
+                "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS,
+                "statement_cache_size": 0,  # Disable asyncpg prepared statements
+                "prepared_statement_cache_size": 0,  # Disable driver prepared statements
+                "prepared_statement_name_func": None  # Disable prepared statement naming
             }
         )
         
@@ -214,21 +226,9 @@ async def init_database():
             autocommit=DatabaseConfig.SESSION_AUTOCOMMIT
         )
         
-        # Test database connection with proper timeout
-        logger.info("TESTING: Database connection with timeout protection...")
-        try:
-            connection_test_result = await asyncio.wait_for(
-                _test_connection_with_resilience(async_engine), 
-                timeout=30.0
-            )
-            if connection_test_result:
-                logger.info("SUCCESS: Database connection test passed")
-            else:
-                logger.warning("WARNING: Database connection test failed - continuing with pool")
-        except asyncio.TimeoutError:
-            logger.warning("WARNING: Connection test timed out after 30s - continuing with pool")
-        except Exception as test_error:
-            logger.warning(f"WARNING: Connection test failed: {test_error} - continuing with pool")
+        # Skip connection test for Session Pooler - pgbouncer doesn't support prepared statements
+        logger.info("SKIPPING: Database connection test (Session Pooler/pgbouncer compatibility)")
+        logger.info("SESSION POOLER: Direct connection pooling enabled - test not required")
         
         # Using SQLAlchemy async only - databases library not needed
         database = None
@@ -264,9 +264,15 @@ async def init_database():
                     pool_recycle=DatabaseConfig.POOL_RECYCLE,
                     pool_pre_ping=False,  # Disable pre-ping in emergency mode
                     echo=False,
+                    # CRITICAL: Disable all statement caching for Session Pooler compatibility
+                    query_cache_size=0,
+                    execution_options={"compiled_cache": {}},  # Disable compilation caching
                     connect_args={
                         "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                        "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS
+                        "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS,
+                        "statement_cache_size": 0,  # Disable asyncpg prepared statements
+                        "prepared_statement_cache_size": 0,  # Disable driver prepared statements
+                        "prepared_statement_name_func": None  # Disable prepared statement naming
                     }
                 )
                 SessionLocal = sessionmaker(

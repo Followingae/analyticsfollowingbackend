@@ -313,7 +313,7 @@ class StartupInitializationService:
             
             # Start monitoring in background (don't await - it's a continuous loop)
             import asyncio
-            monitoring_task = asyncio.create_task(network_health_monitor.start_monitoring())
+            # monitoring_task = asyncio.create_task(network_health_monitor.start_monitoring())
             
             # Give the monitoring a moment to initialize
             await asyncio.sleep(0.5)

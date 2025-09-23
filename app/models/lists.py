@@ -29,7 +29,7 @@ class UserListCreate(BaseModel):
     """Request model for creating a new list"""
     name: str = Field(..., min_length=1, max_length=255, description="List name")
     description: Optional[str] = Field(None, max_length=1000, description="List description")
-    color: Optional[str] = Field("#3B82F6", pattern=r"^#[0-9A-Fa-f]{6}$", description="Hex color code")
+    color: Optional[str] = Field("#3B82F6", description="Color (hex, hsl, rgb, or CSS var)")
     icon: Optional[str] = Field("list", max_length=50, description="Icon identifier")
     is_favorite: Optional[bool] = Field(False, description="Mark as favorite list")
 
@@ -43,7 +43,7 @@ class UserListUpdate(BaseModel):
     """Request model for updating a list"""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=1000)
-    color: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
+    color: Optional[str] = Field(None, description="Color (hex, hsl, rgb, or CSS var)")
     icon: Optional[str] = Field(None, max_length=50)
     is_favorite: Optional[bool] = None
 
@@ -117,7 +117,7 @@ class UserListItemCreate(BaseModel):
     notes: Optional[str] = Field(None, max_length=1000, description="User notes")
     tags: Optional[List[str]] = Field([], description="User tags")
     is_pinned: Optional[bool] = Field(False, description="Pin to top")
-    color_label: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$", description="Color label")
+    color_label: Optional[str] = Field(None, description="Color label")
 
     @validator('profile_username')
     def validate_profile_identifier(cls, v, values):
@@ -134,7 +134,7 @@ class UserListItemUpdate(BaseModel):
     notes: Optional[str] = Field(None, max_length=1000)
     tags: Optional[List[str]] = None
     is_pinned: Optional[bool] = None
-    color_label: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
+    color_label: Optional[str] = Field(None, description="Color label")
 
 class UserListItemBulkCreate(BaseModel):
     """Request model for bulk adding profiles to list"""

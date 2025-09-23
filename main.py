@@ -64,7 +64,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"Comprehensive service failed: {e}")
     
-    # Cache cleanup now handled by Redis cache manager
+    # Simple cache management
     print("Cache management integrated into Redis cache system")
     
     # MANDATORY SYSTEM INITIALIZATION - SIMPLE API SYSTEM
@@ -1474,6 +1474,7 @@ app.include_router(cdn_monitoring_router)
 @app.get("/")
 async def root():
     return {"message": "Analytics Following Backend API", "status": "running"}
+
 
 
 @app.get("/health")

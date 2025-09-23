@@ -431,7 +431,7 @@ async def get_user_dashboard(
         import asyncio
 
         # Enterprise-grade dashboard with balanced timeout for stability
-        async with asyncio.timeout(30.0):  # 30 second timeout for dashboard queries
+        async with asyncio.timeout(30.0):  # ✅ PRODUCTION: Standard timeout
             # Get user profile data with optimized query
             user_result = await db_session.execute(text("""
                 SELECT id, email, full_name, role, status, created_at, last_login,

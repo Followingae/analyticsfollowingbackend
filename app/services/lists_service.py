@@ -313,16 +313,7 @@ class ListsService:
                 description=list_data.description,
                 color=list_data.color or "#3B82F6",
                 icon=list_data.icon or "list",
-                is_favorite=list_data.is_favorite or False,
-                # Enhanced fields
-                list_type=getattr(list_data, 'list_type', 'custom'),
-                template_id=getattr(list_data, 'template_id', None),
-                sharing_mode=getattr(list_data, 'sharing_mode', 'private'),
-                collaboration_mode=getattr(list_data, 'collaboration_mode', 'owner_only'),
-                max_items=getattr(list_data, 'max_items', 1000),
-                auto_sync=getattr(list_data, 'auto_sync', False),
-                settings=getattr(list_data, 'settings', {}),
-                folder_path=getattr(list_data, 'folder_path', None)
+                is_favorite=list_data.is_favorite or False
             )
             
             db.add(new_list)
@@ -848,11 +839,8 @@ class ListsService:
                 user_id=database_user_id,
                 name=list_name,
                 description=template.description,
-                list_type=template.category,
-                template_id=template_id,
-                settings=template_settings,
-                max_items=template_settings.get('max_items', 1000),
-                auto_sync=template_settings.get('auto_sync', False)
+                color=template.color or "#3B82F6",
+                icon=template.icon or "list"
             )
             
             db.add(new_list)
