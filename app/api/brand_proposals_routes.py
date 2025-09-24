@@ -24,27 +24,14 @@ async def get_brand_proposals(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Get available proposals for brands - SUPERADMIN UNLOCK REQUIRED
-    
-    Proposals are locked by default for all subscription tiers.
-    Only superadmin can unlock proposal access for specific teams (agency clients).
+    Get available proposals for brands - OPEN ACCESS
+
+    Proposals are now available to all authenticated users.
+    No team membership or superadmin approval required.
     """
     try:
-        # Check if user's team has proposal access granted by superadmin
-        team_id = await _get_user_team_id(current_user.id, db)
-        if not team_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Proposals feature locked. Team membership required."
-            )
-        
-        access_granted = await _check_proposal_access(team_id, db)
-        if not access_granted:
-            raise HTTPException(
-                status_code=status.HTTP_402_PAYMENT_REQUIRED,
-                detail="Proposals feature locked. Contact support for agency access.",
-                headers={"X-Feature-Locked": "proposals"}
-            )
+        # REMOVED: Access control restrictions - now available to all users
+        # Previous restrictions: team membership and superadmin approval
         
         # Query the admin_brand_proposals table for proposals sent to this brand user
         query = """
@@ -118,35 +105,9 @@ async def get_brand_proposals(
         )
 
 
-async def _get_user_team_id(user_id: UUID, db: AsyncSession) -> Optional[UUID]:
-    """Get user's team ID"""
-    try:
-        query = """
-        SELECT team_id FROM team_members 
-        WHERE user_id = :user_id AND status = 'active'
-        LIMIT 1
-        """
-        result = await db.execute(text(query), {"user_id": str(user_id)})
-        row = result.first()
-        return UUID(str(row[0])) if row else None
-    except Exception:
-        return None
-
-
-async def _check_proposal_access(team_id: UUID, db: AsyncSession) -> bool:
-    """Check if team has proposal access granted by superadmin"""
-    try:
-        query = """
-        SELECT COUNT(*) FROM proposal_access_grants 
-        WHERE team_id = :team_id 
-        AND status = 'active' 
-        AND (expires_at IS NULL OR expires_at > now())
-        """
-        result = await db.execute(text(query), {"team_id": str(team_id)})
-        count = result.scalar()
-        return count > 0
-    except Exception:
-        return False
+# REMOVED: Access control functions - no longer needed with open access
+# async def _get_user_team_id(user_id: UUID, db: AsyncSession) -> Optional[UUID]:
+# async def _check_proposal_access(team_id: UUID, db: AsyncSession) -> bool:
 
 @router.get("/proposals/{proposal_id}")
 async def get_brand_proposal(
