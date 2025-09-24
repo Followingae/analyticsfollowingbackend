@@ -1831,3 +1831,381 @@ async def get_feature_access_grants(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get feature access grants: {str(e)}"
         )
+
+# ==================== ROLES & PERMISSIONS MANAGEMENT ====================
+
+@router.get("/roles")
+async def get_roles(
+    current_user: UserInDB = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all available roles and their permission levels
+    """
+    try:
+        # Get all roles from users table and user_roles table
+        roles_query = text("""
+            SELECT DISTINCT role, COUNT(*) as user_count
+            FROM users
+            WHERE role IS NOT NULL
+            GROUP BY role
+            ORDER BY user_count DESC
+        """)
+
+        roles_result = await db.execute(roles_query)
+        roles_data = roles_result.fetchall()
+
+        # Get user_roles table data if it exists
+        user_roles_query = text("""
+            SELECT id, name, description, permissions, role_level, created_at
+            FROM user_roles
+            ORDER BY role_level ASC
+        """)
+
+        try:
+            user_roles_result = await db.execute(user_roles_query)
+            user_roles_data = user_roles_result.fetchall()
+        except:
+            user_roles_data = []
+
+        # Define standard role hierarchy and permissions
+        role_hierarchy = {
+            "superadmin": {
+                "level": 1,
+                "description": "Full system access and control",
+                "permissions": {
+                    "users": ["create", "read", "update", "delete", "impersonate"],
+                    "teams": ["create", "read", "update", "delete", "manage_members"],
+                    "credits": ["create", "read", "update", "delete", "adjust_balance"],
+                    "proposals": ["create", "read", "update", "delete", "grant_access"],
+                    "analytics": ["read", "export", "real_time"],
+                    "system": ["configuration", "maintenance", "health_monitoring"],
+                    "profiles": ["unlimited_access", "export", "analytics"],
+                    "billing": ["view_all", "adjust", "refund"]
+                }
+            },
+            "admin": {
+                "level": 2,
+                "description": "Administrative access with some restrictions",
+                "permissions": {
+                    "users": ["create", "read", "update"],
+                    "teams": ["read", "update", "manage_members"],
+                    "credits": ["read", "adjust_balance"],
+                    "proposals": ["read", "update"],
+                    "analytics": ["read", "export"],
+                    "system": ["health_monitoring"],
+                    "profiles": ["unlimited_access", "analytics"],
+                    "billing": ["view_own_team"]
+                }
+            },
+            "premium": {
+                "level": 3,
+                "description": "Premium subscription user",
+                "permissions": {
+                    "users": ["read_own"],
+                    "teams": ["read", "manage_own"],
+                    "credits": ["read_own"],
+                    "proposals": ["read_own", "create", "update_own"],
+                    "analytics": ["read_own"],
+                    "profiles": ["limited_access", "export_own"],
+                    "billing": ["view_own"]
+                }
+            },
+            "standard": {
+                "level": 4,
+                "description": "Standard subscription user",
+                "permissions": {
+                    "users": ["read_own"],
+                    "teams": ["read_own"],
+                    "credits": ["read_own"],
+                    "profiles": ["limited_access"],
+                    "billing": ["view_own"]
+                }
+            },
+            "free": {
+                "level": 5,
+                "description": "Free tier user",
+                "permissions": {
+                    "users": ["read_own"],
+                    "profiles": ["very_limited_access"]
+                }
+            }
+        }
+
+        # Combine database roles with hierarchy
+        roles = []
+        for role_data in roles_data:
+            role_name = role_data.role
+            user_count = role_data.user_count
+
+            role_info = role_hierarchy.get(role_name, {
+                "level": 99,
+                "description": f"Custom role: {role_name}",
+                "permissions": {}
+            })
+
+            roles.append({
+                "role_name": role_name,
+                "user_count": user_count,
+                "level": role_info["level"],
+                "description": role_info["description"],
+                "permissions": role_info["permissions"],
+                "is_system_role": role_name in role_hierarchy
+            })
+
+        # Add custom roles from user_roles table
+        for custom_role in user_roles_data:
+            roles.append({
+                "role_id": str(custom_role.id),
+                "role_name": custom_role.name,
+                "user_count": 0,  # Would need to count separately
+                "level": custom_role.role_level,
+                "description": custom_role.description,
+                "permissions": custom_role.permissions or {},
+                "is_system_role": False,
+                "is_custom_role": True,
+                "created_at": custom_role.created_at
+            })
+
+        # Get role statistics
+        total_users_result = await db.execute(text("SELECT COUNT(*) FROM users"))
+        total_users = total_users_result.scalar()
+
+        return {
+            "success": True,
+            "roles": roles,
+            "role_hierarchy": role_hierarchy,
+            "statistics": {
+                "total_users": total_users,
+                "total_roles": len(roles),
+                "system_roles": len([r for r in roles if r.get("is_system_role", False)]),
+                "custom_roles": len([r for r in roles if r.get("is_custom_role", False)])
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting roles: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get roles: {str(e)}"
+        )
+
+@router.get("/permissions/matrix")
+async def get_permissions_matrix(
+    current_user: UserInDB = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get complete permission matrix across all features and roles
+    """
+    try:
+        # Define comprehensive permission matrix
+        permission_matrix = {
+            "features": {
+                "user_management": {
+                    "description": "User account management and administration",
+                    "actions": ["create", "read", "update", "delete", "impersonate", "reset_password"],
+                    "role_permissions": {
+                        "superadmin": ["create", "read", "update", "delete", "impersonate", "reset_password"],
+                        "admin": ["create", "read", "update", "reset_password"],
+                        "premium": ["read_own"],
+                        "standard": ["read_own"],
+                        "free": ["read_own"]
+                    }
+                },
+                "team_management": {
+                    "description": "Team and collaboration management",
+                    "actions": ["create", "read", "update", "delete", "manage_members", "assign_roles"],
+                    "role_permissions": {
+                        "superadmin": ["create", "read", "update", "delete", "manage_members", "assign_roles"],
+                        "admin": ["read", "update", "manage_members"],
+                        "premium": ["create_own", "read", "update_own", "manage_own_members"],
+                        "standard": ["read_own"],
+                        "free": []
+                    }
+                },
+                "credit_management": {
+                    "description": "Credits and billing system management",
+                    "actions": ["view_balance", "adjust_balance", "view_transactions", "create_packages", "refunds"],
+                    "role_permissions": {
+                        "superadmin": ["view_balance", "adjust_balance", "view_transactions", "create_packages", "refunds"],
+                        "admin": ["view_balance", "adjust_balance", "view_transactions"],
+                        "premium": ["view_balance", "view_transactions"],
+                        "standard": ["view_balance", "view_transactions"],
+                        "free": ["view_balance"]
+                    }
+                },
+                "profile_analytics": {
+                    "description": "Instagram profile analysis and insights",
+                    "actions": ["analyze_profile", "view_analytics", "export_data", "unlimited_access"],
+                    "role_permissions": {
+                        "superadmin": ["analyze_profile", "view_analytics", "export_data", "unlimited_access"],
+                        "admin": ["analyze_profile", "view_analytics", "export_data", "unlimited_access"],
+                        "premium": ["analyze_profile", "view_analytics", "export_data"],
+                        "standard": ["analyze_profile", "view_analytics"],
+                        "free": ["analyze_profile"]
+                    },
+                    "limits": {
+                        "free": {"profiles_per_month": 5},
+                        "standard": {"profiles_per_month": 500},
+                        "premium": {"profiles_per_month": 2000},
+                        "admin": {"profiles_per_month": "unlimited"},
+                        "superadmin": {"profiles_per_month": "unlimited"}
+                    }
+                },
+                "proposals_system": {
+                    "description": "Brand proposal management system",
+                    "actions": ["view_proposals", "create_proposals", "manage_proposals", "grant_access"],
+                    "role_permissions": {
+                        "superadmin": ["view_proposals", "create_proposals", "manage_proposals", "grant_access"],
+                        "admin": ["view_proposals", "manage_proposals"],
+                        "premium": [],  # Access granted via superadmin
+                        "standard": [],  # Access granted via superadmin
+                        "free": []
+                    },
+                    "access_control": "Locked by default - requires superadmin grant"
+                },
+                "analytics_dashboard": {
+                    "description": "Business intelligence and analytics",
+                    "actions": ["view_dashboard", "export_reports", "real_time_metrics", "advanced_analytics"],
+                    "role_permissions": {
+                        "superadmin": ["view_dashboard", "export_reports", "real_time_metrics", "advanced_analytics"],
+                        "admin": ["view_dashboard", "export_reports", "real_time_metrics"],
+                        "premium": ["view_dashboard"],
+                        "standard": ["view_dashboard"],
+                        "free": []
+                    }
+                },
+                "system_administration": {
+                    "description": "System configuration and maintenance",
+                    "actions": ["view_health", "configure_system", "manage_features", "maintenance"],
+                    "role_permissions": {
+                        "superadmin": ["view_health", "configure_system", "manage_features", "maintenance"],
+                        "admin": ["view_health"],
+                        "premium": [],
+                        "standard": [],
+                        "free": []
+                    }
+                }
+            },
+            "api_endpoints": {
+                "user_endpoints": {
+                    "POST /api/superadmin/users/create": ["superadmin", "admin"],
+                    "GET /api/superadmin/users": ["superadmin", "admin"],
+                    "PUT /api/superadmin/users/{id}": ["superadmin", "admin"],
+                    "DELETE /api/superadmin/users/{id}": ["superadmin"],
+                    "POST /api/superadmin/users/{id}/impersonate": ["superadmin"]
+                },
+                "credit_endpoints": {
+                    "GET /api/superadmin/credits/overview": ["superadmin", "admin"],
+                    "POST /api/superadmin/credits/users/{id}/adjust": ["superadmin", "admin"],
+                    "GET /api/superadmin/billing/transactions": ["superadmin", "admin"]
+                },
+                "proposal_endpoints": {
+                    "POST /api/superadmin/users/{id}/features/proposals/grant": ["superadmin"],
+                    "POST /api/superadmin/users/{id}/features/proposals/revoke": ["superadmin"],
+                    "GET /api/superadmin/features/access-grants": ["superadmin", "admin"]
+                },
+                "system_endpoints": {
+                    "GET /api/superadmin/system/health": ["superadmin", "admin"],
+                    "GET /api/superadmin/system/stats": ["superadmin"],
+                    "GET /api/superadmin/dashboard": ["superadmin", "admin"]
+                }
+            },
+            "data_access": {
+                "user_data": {
+                    "own_data": ["superadmin", "admin", "premium", "standard", "free"],
+                    "team_data": ["superadmin", "admin", "premium", "standard"],
+                    "all_users": ["superadmin", "admin"],
+                    "pii_access": ["superadmin", "admin"]
+                },
+                "analytics_data": {
+                    "own_analytics": ["superadmin", "admin", "premium", "standard"],
+                    "team_analytics": ["superadmin", "admin", "premium"],
+                    "platform_analytics": ["superadmin", "admin"],
+                    "real_time_data": ["superadmin", "admin"]
+                },
+                "financial_data": {
+                    "own_billing": ["superadmin", "admin", "premium", "standard", "free"],
+                    "team_billing": ["superadmin", "admin", "premium"],
+                    "platform_revenue": ["superadmin", "admin"],
+                    "transaction_details": ["superadmin"]
+                }
+            },
+            "feature_gates": {
+                "proposals_access": {
+                    "default_access": [],
+                    "grant_mechanism": "superadmin_controlled",
+                    "description": "Locked feature requiring superadmin approval"
+                },
+                "advanced_analytics": {
+                    "default_access": ["premium", "admin", "superadmin"],
+                    "grant_mechanism": "subscription_based",
+                    "description": "Premium feature included in paid tiers"
+                },
+                "white_label_features": {
+                    "default_access": [],
+                    "grant_mechanism": "enterprise_contract",
+                    "description": "Enterprise feature requiring custom agreement"
+                },
+                "api_integration": {
+                    "default_access": ["standard", "premium", "admin", "superadmin"],
+                    "grant_mechanism": "subscription_based",
+                    "description": "API access included in paid subscriptions"
+                }
+            }
+        }
+
+        # Get current permission usage statistics
+        stats_query = text("""
+            SELECT
+                role,
+                COUNT(*) as user_count,
+                COUNT(CASE WHEN status = 'active' THEN 1 END) as active_users
+            FROM users
+            GROUP BY role
+        """)
+
+        stats_result = await db.execute(stats_query)
+        role_stats = {}
+        for stat in stats_result.fetchall():
+            role_stats[stat.role] = {
+                "total_users": stat.user_count,
+                "active_users": stat.active_users
+            }
+
+        # Check proposal access grants
+        grants_query = text("""
+            SELECT COUNT(*) as total_grants,
+                   COUNT(CASE WHEN status = 'active' THEN 1 END) as active_grants
+            FROM proposal_access_grants
+        """)
+
+        grants_result = await db.execute(grants_query)
+        grants_stats = grants_result.first()
+
+        return {
+            "success": True,
+            "permission_matrix": permission_matrix,
+            "role_statistics": role_stats,
+            "feature_access_stats": {
+                "proposal_grants": {
+                    "total_grants": grants_stats.total_grants if grants_stats else 0,
+                    "active_grants": grants_stats.active_grants if grants_stats else 0
+                }
+            },
+            "matrix_metadata": {
+                "total_features": len(permission_matrix["features"]),
+                "total_endpoints": sum(len(endpoints) for endpoints in permission_matrix["api_endpoints"].values()),
+                "total_roles": len(set().union(*[perms for feature in permission_matrix["features"].values() for perms in feature["role_permissions"].values()])),
+                "feature_gates": len(permission_matrix["feature_gates"]),
+                "last_updated": datetime.utcnow().isoformat()
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting permissions matrix: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get permissions matrix: {str(e)}"
+        )
