@@ -108,6 +108,8 @@ async def get_brand_proposals(
             "offset": offset
         }
         
+    except HTTPException:
+        raise  # Let access control errors (402/403) pass through to frontend
     except Exception as e:
         logger.error(f"Error getting brand proposals: {e}")
         raise HTTPException(

@@ -573,7 +573,7 @@ async def get_security_alerts(
                 .select_from(
                     CreditTransaction
                     .join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
-                    .join(User, CreditWallet.user_id == User.id.cast(Text))
+                    .join(User, CreditWallet.user_id == User.id)
                 )
                 .where(
                     and_(

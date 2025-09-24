@@ -4,7 +4,7 @@ This file contains the expanded functionality requested for the super admin syst
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, func, desc, text, distinct, Text
+from sqlalchemy import select, and_, or_, func, desc, text, distinct, Text, case
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime, date, timedelta
@@ -71,8 +71,8 @@ async def delete_user(
             credit_transactions = await db.execute(
                 select(func.count(CreditTransaction.id))
                 .select_from(
-                    CreditTransaction.join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
-                )
+                    CreditTransaction
+                ).join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
                 .where(CreditWallet.user_id == str(user_id))
             )
             transaction_count = credit_transactions.scalar() or 0
@@ -320,7 +320,8 @@ async def get_user_activities(
                 CreditTransaction.transaction_type,
                 CreditTransaction.description
             ).select_from(
-                CreditTransaction.join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
+                CreditTransaction
+            ).join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id
             ).where(CreditWallet.user_id == str(user_id))
             
             if date_filters:
@@ -370,10 +371,11 @@ async def get_user_activities(
         credit_summary_result = await db.execute(
             select(
                 func.count(CreditTransaction.id),
-                func.sum(func.case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)),
-                func.sum(func.case((CreditTransaction.amount > 0, CreditTransaction.amount), else_=0))
+                func.sum(case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)),
+                func.sum(case((CreditTransaction.amount > 0, CreditTransaction.amount), else_=0))
             ).select_from(
-                CreditTransaction.join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
+                CreditTransaction
+            ).join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id
             ).where(CreditWallet.user_id == str(user_id))
         )
         
@@ -461,7 +463,8 @@ async def get_credits_overview(
                 CreditWallet.lifetime_spent,
                 CreditWallet.current_balance
             ).select_from(
-                CreditWallet.join(User, CreditWallet.user_id == User.id.cast(Text))
+                CreditWallet
+            ).join(User, CreditWallet.user_id == User.id
             ).order_by(desc(CreditWallet.lifetime_spent)).limit(10)
         )
         
@@ -481,7 +484,7 @@ async def get_credits_overview(
             pricing_rules.append({
                 "action_type": rule.action_type,
                 "cost_per_action": rule.cost_per_action,
-                "free_monthly_allowance": rule.free_monthly_allowance,
+                "free_monthly_allowance": getattr(rule, 'free_monthly_allowance', 0),
                 "is_active": rule.is_active
             })
         
@@ -586,7 +589,7 @@ async def adjust_user_credits(
             amount=transaction_amount,
             transaction_type=operation_data.transaction_type,
             description=operation_data.reason,
-            metadata={
+            transaction_metadata={
                 "admin_user": current_user.email,
                 "operation": operation_data.operation,
                 "old_balance": old_balance,
@@ -647,21 +650,19 @@ async def get_all_transactions(
             CreditTransaction.amount,
             CreditTransaction.transaction_type,
             CreditTransaction.description,
-            CreditTransaction.metadata,
+            CreditTransaction.transaction_metadata,
             User.email,
             User.full_name,
             CreditWallet.current_balance
         ).select_from(
             CreditTransaction
-            .join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
-            .join(User, CreditWallet.user_id == User.id.cast(Text))
-        )
+        ).join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id
+        ).join(User, CreditWallet.user_id == User.id)
         
         count_query = select(func.count(CreditTransaction.id)).select_from(
             CreditTransaction
-            .join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
-            .join(User, CreditWallet.user_id == User.id.cast(Text))
-        )
+        ).join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id
+        ).join(User, CreditWallet.user_id == User.id)
         
         # Apply filters
         filters = []
@@ -705,23 +706,23 @@ async def get_all_transactions(
                 "type": txn.transaction_type,
                 "description": txn.description,
                 "current_balance": float(txn.current_balance),
-                "metadata": txn.metadata or {},
+                "metadata": txn.transaction_metadata or {},
                 "status": "completed"  # All transactions are completed in our system
             })
         
         # Get transaction summary for the filtered results
         summary_result = await db.execute(
             select(
-                func.sum(func.case((CreditTransaction.amount > 0, CreditTransaction.amount), else_=0)).label('total_earned'),
-                func.sum(func.case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('total_spent'),
+                func.sum(case((CreditTransaction.amount > 0, CreditTransaction.amount), else_=0)).label('total_earned'),
+                func.sum(case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('total_spent'),
                 func.count(func.distinct(CreditTransaction.wallet_id)).label('unique_users')
             ).select_from(
                 CreditTransaction
                 .join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
-                .join(User, CreditWallet.user_id == User.id.cast(Text))
+                .join(User, CreditWallet.user_id == User.id)
             ).where(and_(*filters)) if filters else select(
-                func.sum(func.case((CreditTransaction.amount > 0, CreditTransaction.amount), else_=0)).label('total_earned'),
-                func.sum(func.case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('total_spent'),
+                func.sum(case((CreditTransaction.amount > 0, CreditTransaction.amount), else_=0)).label('total_earned'),
+                func.sum(case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('total_spent'),
                 func.count(func.distinct(CreditTransaction.wallet_id)).label('unique_users')
             )
         )
@@ -800,7 +801,7 @@ async def get_revenue_analytics(
         revenue_sources_query = await db.execute(
             select(
                 CreditTransaction.transaction_type,
-                func.sum(func.case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('revenue'),
+                func.sum(case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('revenue'),
                 func.count(CreditTransaction.id).label('count')
             ).where(
                 and_(
@@ -822,9 +823,10 @@ async def get_revenue_analytics(
         # Get user spending distribution
         user_spending_query = await db.execute(
             select(
-                func.sum(func.case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('total_spent')
+                func.sum(case((CreditTransaction.amount < 0, func.abs(CreditTransaction.amount)), else_=0)).label('total_spent')
             ).select_from(
-                CreditTransaction.join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id)
+                CreditTransaction
+            ).join(CreditWallet, CreditTransaction.wallet_id == CreditWallet.id
             ).where(CreditTransaction.created_at >= start_date)
             .group_by(CreditWallet.user_id)
         )
@@ -1077,7 +1079,7 @@ async def get_master_influencer_database(
                 "followers_count": profile.followers_count or 0,
                 "following_count": profile.following_count or 0,
                 "posts_count": profile.posts_count or 0,
-                "profile_image_url": profile.profile_image_url,
+                "profile_image_url": profile.profile_pic_url,
                 "is_verified": profile.is_verified or False,
                 "is_private": profile.is_private or False,
                 "created_at": profile.created_at,
@@ -1240,7 +1242,7 @@ async def get_influencer_detailed(
                 "followers_count": profile.followers_count or 0,
                 "following_count": profile.following_count or 0,
                 "posts_count": profile.posts_count or 0,
-                "profile_image_url": profile.profile_image_url,
+                "profile_image_url": profile.profile_pic_url,
                 "is_verified": profile.is_verified or False,
                 "is_private": profile.is_private or False,
                 "created_at": profile.created_at,

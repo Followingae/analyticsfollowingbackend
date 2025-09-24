@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from app.database.unified_models import (
     User, UserList, UserListItem, Profile, UserProfileAccess,
-    ListTemplate, ListCollaboration, ListActivityLog, ListPerformanceMetrics, ListExportJob
+    ListTemplate, ListCollaboration, ListPerformanceMetrics, ListExportJob
 )
 from app.models.lists import (
     UserListCreate, UserListUpdate, UserListResponse, UserListSummary,
@@ -88,31 +88,22 @@ class ListsService:
             raise ValueError("Either profile_ids or profile_usernames must be provided")
     
     async def _log_activity(
-        self, 
-        db: AsyncSession, 
-        list_id: UUID, 
-        list_item_id: Optional[UUID], 
-        user_id: UUID, 
-        action_type: str, 
+        self,
+        db: AsyncSession,
+        list_id: UUID,
+        list_item_id: Optional[UUID],
+        user_id: UUID,
+        action_type: str,
         action_description: str,
         old_values: Optional[Dict] = None,
         new_values: Optional[Dict] = None,
         affected_fields: Optional[List[str]] = None
     ):
-        """Log activity for audit trail"""
+        """Log activity for audit trail - temporarily disabled due to missing table"""
         try:
-            activity_log = ListActivityLog(
-                list_id=list_id,
-                list_item_id=list_item_id,
-                user_id=user_id,
-                action_type=action_type,
-                action_description=action_description,
-                old_values=old_values or {},
-                new_values=new_values or {},
-                affected_fields=affected_fields or []
-            )
-            db.add(activity_log)
-            # Don't commit here - let the calling method handle it
+            # TODO: Re-enable when list_activity_logs table is created
+            logger.info(f"List activity: {action_type} - {action_description} for list {list_id}")
+            pass
         except Exception as e:
             logger.error(f"Error logging activity: {e}")
     
@@ -988,29 +979,9 @@ class ListsService:
             
             offset = (page - 1) * page_size
             
-            # Get activities with user info
-            query = select(ListActivityLog, User.full_name).join(
-                User, ListActivityLog.user_id == User.id
-            ).where(
-                ListActivityLog.list_id == list_id
-            ).order_by(
-                ListActivityLog.created_at.desc()
-            ).offset(offset).limit(page_size)
-            
-            result = await db.execute(query)
+            # Activity logs temporarily disabled - return empty result
             activities = []
-            
-            for activity, user_name in result:
-                activity_dict = activity.__dict__.copy()
-                activity_dict['user_name'] = user_name
-                activities.append(activity_dict)
-            
-            # Get total count
-            count_query = select(func.count(ListActivityLog.id)).where(
-                ListActivityLog.list_id == list_id
-            )
-            total_result = await db.execute(count_query)
-            total_items = total_result.scalar() or 0
+            total_items = 0
             
             total_pages = (total_items + page_size - 1) // page_size
             pagination = PaginationInfo(

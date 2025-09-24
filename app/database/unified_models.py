@@ -883,36 +883,36 @@ class ListCollaboration(Base):
     )
 
 
-class ListActivityLog(Base):
-    """Activity log for list changes and collaboration"""
-    __tablename__ = "list_activity_logs"
-    
-    # Primary identification
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
-    list_id = Column(UUID(as_uuid=True), ForeignKey('user_lists.id', ondelete='CASCADE'), nullable=False, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
-    
-    # Activity details
-    activity_type = Column(String(50), nullable=False, index=True)  # created, updated, item_added, item_removed, shared, etc.
-    description = Column(Text, nullable=False)
-    
-    # Context data
-    affected_item_id = Column(UUID(as_uuid=True))  # Profile ID if activity affects an item
-    activity_metadata = Column(JSONB, default='{}')
-    
-    # Timestamps
-    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    
-    # Relationships
-    user_list = relationship("UserList")
-    user = relationship("User", foreign_keys=[user_id])
-    
-    # Database constraints and indexes
-    __table_args__ = (
-        Index('idx_list_activity_list_created', 'list_id', 'created_at'),
-        Index('idx_list_activity_user_created', 'user_id', 'created_at'),
-        Index('idx_list_activity_type_created', 'activity_type', 'created_at'),
-    )
+# class ListActivityLog(Base):
+#     """Activity log for list changes and collaboration - TEMPORARILY DISABLED"""
+#     __tablename__ = "list_activity_logs"
+#
+#     # Primary identification
+#     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+#     list_id = Column(UUID(as_uuid=True), ForeignKey('user_lists.id', ondelete='CASCADE'), nullable=False, index=True)
+#     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+#
+#     # Activity details
+#     activity_type = Column(String(50), nullable=False, index=True)  # created, updated, item_added, item_removed, shared, etc.
+#     description = Column(Text, nullable=False)
+#
+#     # Context data
+#     affected_item_id = Column(UUID(as_uuid=True))  # Profile ID if activity affects an item
+#     activity_metadata = Column(JSONB, default='{}')
+#
+#     # Timestamps
+#     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+#
+#     # Relationships
+#     user_list = relationship("UserList")
+#     user = relationship("User", foreign_keys=[user_id])
+#
+#     # Database constraints and indexes
+#     __table_args__ = (
+#         Index('idx_list_activity_list_created', 'list_id', 'created_at'),
+#         Index('idx_list_activity_user_created', 'user_id', 'created_at'),
+#         Index('idx_list_activity_type_created', 'activity_type', 'created_at'),
+#     )
 
 
 class ListPerformanceMetrics(Base):
