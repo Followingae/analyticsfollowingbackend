@@ -169,7 +169,7 @@ async def init_database():
                 connect_args={
                     "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
                     "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS,
-                    "statement_cache_size": 0,  # Disable asyncpg prepared statements
+                    "statement_cache_size": 0,  # FIX: Supabase pgbouncer prepared statement conflicts
                     "prepared_statement_cache_size": 0,  # Disable driver prepared statements
                     "prepared_statement_name_func": None  # Disable prepared statement naming
                 }
