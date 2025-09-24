@@ -1542,3 +1542,292 @@ async def update_proposal_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update proposal status: {str(e)}"
         )
+
+# ==================== FEATURE ACCESS MANAGEMENT ====================
+
+@router.post("/users/{user_id}/features/proposals/grant")
+async def grant_proposal_access(
+    user_id: UUID,
+    access_level: str = "full",
+    expires_at: Optional[datetime] = None,
+    reason: str = "Administrative grant",
+    current_user: UserInDB = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Grant proposal access to a specific user
+    """
+    try:
+        # Validate access level
+        valid_levels = ["full", "read_only", "custom"]
+        if access_level not in valid_levels:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid access level. Must be one of: {', '.join(valid_levels)}"
+            )
+
+        # Check if user exists
+        user_query = select(User).where(User.id == user_id)
+        user_result = await db.execute(user_query)
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        # Get user's team if they have one
+        team_query = text("""
+            SELECT team_id FROM team_members
+            WHERE user_id = :user_id AND status = 'active'
+            LIMIT 1
+        """)
+        team_result = await db.execute(team_query, {"user_id": str(user_id)})
+        team_row = team_result.first()
+        team_id = team_row[0] if team_row else None
+
+        # Check if access grant already exists
+        existing_query = text("""
+            SELECT id FROM proposal_access_grants
+            WHERE team_id = :team_id
+            AND status = 'active'
+            AND (expires_at IS NULL OR expires_at > now())
+        """)
+        existing_result = await db.execute(existing_query, {"team_id": str(team_id) if team_id else None})
+        existing_grant = existing_result.first()
+
+        if existing_grant:
+            return {
+                "success": True,
+                "message": "User already has active proposal access",
+                "access_id": str(existing_grant[0]),
+                "access_level": access_level,
+                "user_id": str(user_id),
+                "team_id": str(team_id) if team_id else None,
+                "status": "already_granted"
+            }
+
+        # Create new access grant
+        if team_id:
+            grant_query = text("""
+                INSERT INTO proposal_access_grants
+                (team_id, granted_by, granted_at, access_level, expires_at, reason, status)
+                VALUES (:team_id, :granted_by, now(), :access_level, :expires_at, :reason, 'active')
+                RETURNING id
+            """)
+            grant_result = await db.execute(grant_query, {
+                "team_id": str(team_id),
+                "granted_by": str(current_user.id),
+                "access_level": access_level,
+                "expires_at": expires_at,
+                "reason": reason
+            })
+            await db.commit()
+
+            grant_id = grant_result.scalar()
+
+            return {
+                "success": True,
+                "message": "Proposal access granted successfully",
+                "access_id": str(grant_id),
+                "access_level": access_level,
+                "user_id": str(user_id),
+                "team_id": str(team_id),
+                "expires_at": expires_at.isoformat() if expires_at else None,
+                "reason": reason,
+                "granted_by": current_user.email,
+                "granted_at": datetime.utcnow().isoformat(),
+                "status": "granted"
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User must be part of a team to grant proposal access"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error granting proposal access: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to grant proposal access: {str(e)}"
+        )
+
+@router.post("/users/{user_id}/features/proposals/revoke")
+async def revoke_proposal_access(
+    user_id: UUID,
+    reason: str = "Administrative revocation",
+    immediate: bool = True,
+    current_user: UserInDB = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Revoke proposal access from a specific user
+    """
+    try:
+        # Check if user exists
+        user_query = select(User).where(User.id == user_id)
+        user_result = await db.execute(user_query)
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+
+        # Get user's team
+        team_query = text("""
+            SELECT team_id FROM team_members
+            WHERE user_id = :user_id AND status = 'active'
+            LIMIT 1
+        """)
+        team_result = await db.execute(team_query, {"user_id": str(user_id)})
+        team_row = team_result.first()
+        team_id = team_row[0] if team_row else None
+
+        if not team_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User is not part of any team"
+            )
+
+        # Revoke access
+        revoke_query = text("""
+            UPDATE proposal_access_grants
+            SET status = 'revoked',
+                revoked_at = now(),
+                revoked_by = :revoked_by,
+                revoked_reason = :reason
+            WHERE team_id = :team_id
+            AND status = 'active'
+            RETURNING id, access_level
+        """)
+        revoke_result = await db.execute(revoke_query, {
+            "team_id": str(team_id),
+            "revoked_by": str(current_user.id),
+            "reason": reason
+        })
+        revoked_grant = revoke_result.first()
+
+        if not revoked_grant:
+            return {
+                "success": True,
+                "message": "No active proposal access found to revoke",
+                "user_id": str(user_id),
+                "team_id": str(team_id),
+                "status": "no_access_found"
+            }
+
+        await db.commit()
+
+        return {
+            "success": True,
+            "message": "Proposal access revoked successfully",
+            "access_id": str(revoked_grant[0]),
+            "previous_access_level": revoked_grant[1],
+            "user_id": str(user_id),
+            "team_id": str(team_id),
+            "reason": reason,
+            "revoked_by": current_user.email,
+            "revoked_at": datetime.utcnow().isoformat(),
+            "status": "revoked"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error revoking proposal access: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to revoke proposal access: {str(e)}"
+        )
+
+@router.get("/features/access-grants")
+async def get_feature_access_grants(
+    feature_type: Optional[str] = Query("proposals", description="Feature type to check"),
+    user_id: Optional[UUID] = Query(None, description="Filter by specific user"),
+    team_id: Optional[UUID] = Query(None, description="Filter by specific team"),
+    status: Optional[str] = Query("active", description="Filter by status"),
+    current_user: UserInDB = Depends(require_super_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get all feature access grants across the platform
+    """
+    try:
+        # Build query based on filters
+        base_query = """
+            SELECT
+                pag.id,
+                pag.team_id,
+                pag.access_level,
+                pag.granted_at,
+                pag.expires_at,
+                pag.reason,
+                pag.status,
+                t.name as team_name,
+                u.email as granted_by_email,
+                COUNT(tm.user_id) as team_member_count
+            FROM proposal_access_grants pag
+            LEFT JOIN teams t ON pag.team_id = t.id
+            LEFT JOIN users u ON pag.granted_by = u.id
+            LEFT JOIN team_members tm ON pag.team_id = tm.team_id AND tm.status = 'active'
+            WHERE 1=1
+        """
+
+        params = {}
+
+        if status:
+            base_query += " AND pag.status = :status"
+            params["status"] = status
+
+        if team_id:
+            base_query += " AND pag.team_id = :team_id"
+            params["team_id"] = str(team_id)
+
+        if user_id:
+            base_query += " AND tm.user_id = :user_id"
+            params["user_id"] = str(user_id)
+
+        base_query += """
+            GROUP BY pag.id, pag.team_id, pag.access_level, pag.granted_at,
+                     pag.expires_at, pag.reason, pag.status, t.name, u.email
+            ORDER BY pag.granted_at DESC
+        """
+
+        result = await db.execute(text(base_query), params)
+        grants = result.fetchall()
+
+        grants_list = []
+        for grant in grants:
+            grants_list.append({
+                "access_id": str(grant.id),
+                "team_id": str(grant.team_id),
+                "team_name": grant.team_name,
+                "access_level": grant.access_level,
+                "status": grant.status,
+                "granted_at": grant.granted_at.isoformat() if grant.granted_at else None,
+                "expires_at": grant.expires_at.isoformat() if grant.expires_at else None,
+                "reason": grant.reason,
+                "granted_by": grant.granted_by_email,
+                "team_member_count": grant.team_member_count,
+                "is_expired": grant.expires_at < datetime.utcnow() if grant.expires_at else False
+            })
+
+        return {
+            "success": True,
+            "feature_type": feature_type,
+            "total_grants": len(grants_list),
+            "active_grants": len([g for g in grants_list if g["status"] == "active" and not g["is_expired"]]),
+            "grants": grants_list
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting feature access grants: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get feature access grants: {str(e)}"
+        )
