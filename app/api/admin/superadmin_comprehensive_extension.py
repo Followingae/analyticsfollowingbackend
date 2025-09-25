@@ -1312,7 +1312,7 @@ async def get_proposals_overview(
             select(
                 AdminBrandProposal.id,
                 AdminBrandProposal.proposal_title,
-                AdminBrandProposal.brand_name,
+                AdminBrandProposal.brand_user_id,
                 AdminBrandProposal.proposed_budget_usd,
                 AdminBrandProposal.status,
                 AdminBrandProposal.created_at,
@@ -1327,7 +1327,7 @@ async def get_proposals_overview(
             recent_proposals.append({
                 "id": str(proposal.id),
                 "title": proposal.proposal_title,
-                "brand_name": proposal.brand_name,
+                "brand_user_id": str(proposal.brand_user_id),
                 "budget": float(proposal.proposed_budget_usd or 0),
                 "status": proposal.status,
                 "created_at": proposal.created_at,
@@ -1336,7 +1336,7 @@ async def get_proposals_overview(
         
         # Get revenue from proposals
         revenue_result = await db.execute(
-            select(func.sum(AdminBrandProposal.budget))
+            select(func.sum(AdminBrandProposal.proposed_budget_usd))
             .where(AdminBrandProposal.status == 'completed')
         )
         total_revenue = float(revenue_result.scalar() or 0)

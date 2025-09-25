@@ -64,7 +64,28 @@
       "Bash(for:*)",
       "Bash(do echo \"=== $file ===\")",
       "Bash(grep:*)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(dir \".claude\")",
+      "Bash(dir:*)",
+      "Bash(pip --version)",
+      "Bash(where cmake)",
+      "Bash(winget install:*)",
+      "Bash(choco install:*)",
+      "Bash(start /wait msiexec /i:*)",
+      "Bash(refreshenv)",
+      "Bash(cmake:*)",
+      "Bash(\"C:\\Program Files\\CMake\\bin\\cmake.exe\" --version)",
+      "Bash(start /wait:*)",
+      "Bash(export:*)",
+      "mcp__ide__executeCode",
+      "Bash(npx @modelcontextprotocol/server-cloudflare:*)",
+      "Bash(npm search:*)",
+      "Bash(npm install:*)",
+      "Bash(claude doctor)",
+      "Bash(claude mcp)",
+      "Bash(claude mcp:*)",
+      "WebFetch(domain:github.com)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": [],
@@ -78,6 +99,7 @@
   },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
-    "supabase"
+    "supabase",
+    "cloudflare"
   ]
 }
