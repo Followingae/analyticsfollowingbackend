@@ -85,7 +85,8 @@
       "Bash(claude mcp)",
       "Bash(claude mcp:*)",
       "WebFetch(domain:github.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(py:*)"
     ],
     "deny": [],
     "ask": [],

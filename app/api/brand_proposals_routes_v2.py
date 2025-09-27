@@ -12,6 +12,7 @@ from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
 from app.database.connection import get_db
 from app.services.refined_proposals_service import refined_proposals_service
+from app.services.currency_service import currency_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/brand/proposals", tags=["Brand Proposals V2"])
@@ -350,13 +351,22 @@ async def get_proposals_summary(
                 if datetime.now(deadline.tzinfo) > deadline:
                     overdue_count += 1
         
+        # Get user's currency for proper formatting
+        user_currency = await currency_service.get_user_currency(str(current_user.id), db)
+        formatted_budget = await currency_service.format_amount(
+            total_budget,
+            currency_info=user_currency
+        )
+
         summary_data = {
             "overview": {
                 "total_proposals": len(proposals),
                 "pending_response": status_counts.get("sent", 0),
                 "approved_proposals": status_counts.get("approved", 0),
                 "overdue_responses": overdue_count,
-                "total_budget_usd_cents": total_budget
+                "total_budget_cents": total_budget,
+                "total_budget_formatted": formatted_budget,
+                "currency_info": user_currency
             },
             "status_distribution": status_counts,
             "priority_distribution": priority_counts,

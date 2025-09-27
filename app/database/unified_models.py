@@ -1936,6 +1936,7 @@ class Team(Base):
     members = relationship("TeamMember", back_populates="team", cascade="all, delete-orphan")
     invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
     profile_access = relationship("TeamProfileAccess", back_populates="team", cascade="all, delete-orphan")
+    currency_settings = relationship("TeamCurrencySettings", back_populates="team", uselist=False, cascade="all, delete-orphan")
     
     # Database constraints and indexes
     __table_args__ = (
@@ -1949,6 +1950,37 @@ class Team(Base):
         Index('idx_teams_subscription', 'subscription_tier', 'subscription_status'),
         Index('idx_teams_usage', 'profiles_used_this_month', 'emails_used_this_month'),
     )
+
+
+class TeamCurrencySettings(Base):
+    """
+    Currency configuration per team (Industry Standard Pattern)
+    Each team operates in one currency - eliminates currency complexity
+    """
+    __tablename__ = 'team_currency_settings'
+
+    # Primary key is team_id (one currency per team)
+    team_id = Column(UUID(as_uuid=True), ForeignKey('teams.id', ondelete='CASCADE'), primary_key=True)
+
+    # Currency configuration
+    currency_code = Column(String(3), nullable=False, default='USD')  # ISO 4217 codes
+    currency_symbol = Column(String(10), nullable=False, default='$')
+    decimal_places = Column(Integer, nullable=False, default=2)
+
+    # Metadata
+    created_at = Column(DateTime(timezone=True), default=func.now())
+    updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
+
+    # Relationships
+    team = relationship("Team", back_populates="currency_settings")
+
+    # Database constraints and indexes
+    __table_args__ = (
+        CheckConstraint("decimal_places >= 0 AND decimal_places <= 4", name='currency_decimal_places_range'),
+        CheckConstraint("LENGTH(currency_code) = 3", name='currency_code_length'),
+        Index('idx_team_currency_settings_currency_code', 'currency_code'),
+    )
+
 
 class TeamMember(Base):
     """

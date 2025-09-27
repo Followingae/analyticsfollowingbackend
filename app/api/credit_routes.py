@@ -20,6 +20,7 @@ from app.models.credits import (
 from app.services.credit_wallet_service import credit_wallet_service
 from app.services.credit_transaction_service import credit_transaction_service
 from app.services.credit_pricing_service import credit_pricing_service
+from app.services.currency_service import currency_service
 from app.middleware.credit_gate import check_credits_only
 
 logger = logging.getLogger(__name__)
@@ -414,11 +415,20 @@ async def estimate_credit_purchase(
         price_per_credit = 0.01  # $0.01 per credit
         total_price_usd = credits_amount * price_per_credit
         
+        # Get user's currency for proper formatting
+        user_currency = await currency_service.get_user_currency(str(current_user.id))
+        total_price_cents = int(total_price_usd * 100)  # Convert to cents
+        formatted_total = await currency_service.format_amount(
+            total_price_cents,
+            currency_info=user_currency
+        )
+
         return {
             "credits_amount": credits_amount,
-            "price_per_credit_usd": price_per_credit,
-            "total_price_usd": total_price_usd,
-            "currency": "USD",
+            "price_per_credit_cents": int(price_per_credit * 100),
+            "total_price_cents": total_price_cents,
+            "total_price_formatted": formatted_total,
+            "currency_info": user_currency,
             "estimated": True,
             "message": "Pricing estimation - Stripe integration pending"
         }

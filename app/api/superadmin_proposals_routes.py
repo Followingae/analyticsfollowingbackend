@@ -4,6 +4,7 @@ Handles proposal creation, influencer management, and invite campaigns
 """
 from fastapi import APIRouter, HTTPException, status, Depends, Query, Form, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 from typing import Optional, List, Dict, Any
 from uuid import UUID
 from datetime import datetime, date
@@ -13,6 +14,7 @@ from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
 from app.database.connection import get_db
 from app.services.refined_proposals_service import refined_proposals_service
+from app.services.currency_service import currency_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/superadmin/proposals", tags=["Superadmin Proposals"])
@@ -559,10 +561,19 @@ async def get_proposals_dashboard(
             # Budget totals
             total_budget += proposal.get("total_campaign_budget_usd_cents", 0)
         
+        # Get user's currency for proper formatting
+        user_currency = await currency_service.get_user_currency(str(current_user.id), db)
+        formatted_budget = await currency_service.format_amount(
+            total_budget,
+            currency_info=user_currency
+        )
+
         dashboard_data = {
             "overview": {
                 "total_proposals": total_proposals,
-                "total_budget_usd_cents": total_budget,
+                "total_budget_cents": total_budget,
+                "total_budget_formatted": formatted_budget,
+                "currency_info": user_currency,
                 "active_proposals": status_counts.get("sent", 0) + status_counts.get("under_review", 0),
                 "approved_proposals": status_counts.get("approved", 0)
             },
@@ -585,6 +596,308 @@ async def get_proposals_dashboard(
         )
 
 # ============================================================================
+# PROPOSAL DRAFTS MANAGEMENT
+# ============================================================================
+
+@router.post("/brand-proposals/drafts")
+async def create_proposal_draft(
+    draft_data: Dict[str, Any],
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Create or update proposal draft (one per superadmin)
+
+    Body:
+    {
+        "current_step": 2,
+        "form_data": { "proposal_title": "...", "brand_user_ids": [...] },
+        "selected_brand": "brand_id",
+        "selected_brand_data": { "id": "...", "full_name": "..." }
+    }
+    """
+    require_superadmin_role(current_user)
+
+    try:
+        import json
+
+        # Get current step, default to 1
+        current_step = draft_data.get("current_step", 1)
+        form_data = draft_data.get("form_data", {})
+        selected_brand = draft_data.get("selected_brand")
+        selected_brand_data = draft_data.get("selected_brand_data")
+
+        # Check if draft already exists for this user (one draft per superadmin)
+        existing_draft = await db.execute(
+            text("SELECT id FROM proposal_drafts WHERE user_id = :user_id"),
+            {"user_id": str(current_user.supabase_user_id)}
+        )
+        existing = existing_draft.fetchone()
+
+        if existing:
+            # Update existing draft
+            await db.execute(
+                text("""
+                    UPDATE proposal_drafts
+                    SET current_step = :current_step,
+                        form_data = :form_data,
+                        selected_brand = :selected_brand,
+                        selected_brand_data = :selected_brand_data,
+                        last_saved = NOW(),
+                        updated_at = NOW()
+                    WHERE user_id = :user_id
+                    RETURNING id
+                """),
+                {
+                    "current_step": current_step,
+                    "form_data": json.dumps(form_data),
+                    "selected_brand": selected_brand,
+                    "selected_brand_data": json.dumps(selected_brand_data) if selected_brand_data else None,
+                    "user_id": str(current_user.supabase_user_id)
+                }
+            )
+            draft_id = str(existing.id)
+            action = "updated"
+        else:
+            # Create new draft
+            result = await db.execute(
+                text("""
+                    INSERT INTO proposal_drafts (user_id, current_step, form_data, selected_brand, selected_brand_data)
+                    VALUES (:user_id, :current_step, :form_data, :selected_brand, :selected_brand_data)
+                    RETURNING id
+                """),
+                {
+                    "user_id": str(current_user.supabase_user_id),
+                    "current_step": current_step,
+                    "form_data": json.dumps(form_data),
+                    "selected_brand": selected_brand,
+                    "selected_brand_data": json.dumps(selected_brand_data) if selected_brand_data else None,
+                }
+            )
+            draft_row = result.fetchone()
+            draft_id = str(draft_row.id)
+            action = "created"
+
+        await db.commit()
+
+        return {
+            "success": True,
+            "data": {
+                "draft_id": draft_id,
+                "action": action,
+                "current_step": current_step,
+                "last_saved": datetime.now().isoformat()
+            },
+            "message": f"Draft {action} successfully"
+        }
+
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error creating/updating proposal draft: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error saving proposal draft"
+        )
+
+@router.put("/brand-proposals/drafts/{draft_id}")
+async def update_proposal_draft(
+    draft_id: UUID,
+    draft_data: Dict[str, Any],
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update existing proposal draft by ID
+
+    Body:
+    {
+        "current_step": 3,
+        "form_data": { "proposal_title": "Updated", "brand_user_ids": [...] },
+        "selected_brand": "brand_id",
+        "selected_brand_data": { "id": "...", "full_name": "..." }
+    }
+    """
+    require_superadmin_role(current_user)
+
+    try:
+        import json
+
+        # Verify draft exists and belongs to current user
+        existing_draft = await db.execute(
+            text("SELECT id FROM proposal_drafts WHERE id = :draft_id AND user_id = :user_id"),
+            {"draft_id": str(draft_id), "user_id": str(current_user.supabase_user_id)}
+        )
+        draft = existing_draft.fetchone()
+
+        if not draft:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found or access denied"
+            )
+
+        # Update draft
+        current_step = draft_data.get("current_step", 1)
+        form_data = draft_data.get("form_data", {})
+        selected_brand = draft_data.get("selected_brand")
+        selected_brand_data = draft_data.get("selected_brand_data")
+
+        await db.execute(
+            text("""
+                UPDATE proposal_drafts
+                SET current_step = :current_step,
+                    form_data = :form_data,
+                    selected_brand = :selected_brand,
+                    selected_brand_data = :selected_brand_data,
+                    last_saved = NOW(),
+                    updated_at = NOW()
+                WHERE id = :draft_id
+            """),
+            {
+                "draft_id": str(draft_id),
+                "current_step": current_step,
+                "form_data": json.dumps(form_data),
+                "selected_brand": selected_brand,
+                "selected_brand_data": json.dumps(selected_brand_data) if selected_brand_data else None,
+            }
+        )
+
+        await db.commit()
+
+        return {
+            "success": True,
+            "data": {
+                "draft_id": str(draft_id),
+                "current_step": current_step,
+                "last_saved": datetime.now().isoformat()
+            },
+            "message": "Draft updated successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error updating proposal draft: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error updating proposal draft"
+        )
+
+@router.get("/brand-proposals/drafts/{draft_id}")
+async def get_proposal_draft(
+    draft_id: UUID,
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get specific proposal draft by ID"""
+    require_superadmin_role(current_user)
+
+    try:
+        result = await db.execute(
+            text("""
+                SELECT id, user_id, current_step, form_data, selected_brand,
+                       selected_brand_data, last_saved, created_at, updated_at
+                FROM proposal_drafts
+                WHERE id = :draft_id AND user_id = :user_id
+            """),
+            {"draft_id": str(draft_id), "user_id": str(current_user.supabase_user_id)}
+        )
+
+        draft = result.fetchone()
+
+        if not draft:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Draft not found or access denied"
+            )
+
+        # Parse JSON data
+        import json
+        form_data = json.loads(draft.form_data) if draft.form_data else {}
+        selected_brand_data = json.loads(draft.selected_brand_data) if draft.selected_brand_data else None
+
+        return {
+            "success": True,
+            "data": {
+                "draft_id": str(draft.id),
+                "user_id": str(draft.user_id),
+                "current_step": draft.current_step,
+                "form_data": form_data,
+                "selected_brand": draft.selected_brand,
+                "selected_brand_data": selected_brand_data,
+                "last_saved": draft.last_saved.isoformat(),
+                "created_at": draft.created_at.isoformat(),
+                "updated_at": draft.updated_at.isoformat()
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting proposal draft: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving proposal draft"
+        )
+
+@router.get("/brand-proposals/drafts/latest")
+async def get_latest_proposal_draft(
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get latest proposal draft for current superadmin"""
+    require_superadmin_role(current_user)
+
+    try:
+        result = await db.execute(
+            text("""
+                SELECT id, user_id, current_step, form_data, selected_brand,
+                       selected_brand_data, last_saved, created_at, updated_at
+                FROM proposal_drafts
+                WHERE user_id = :user_id
+                ORDER BY last_saved DESC
+                LIMIT 1
+            """),
+            {"user_id": str(current_user.supabase_user_id)}
+        )
+
+        draft = result.fetchone()
+
+        if not draft:
+            return {
+                "success": True,
+                "data": None,
+                "message": "No draft found"
+            }
+
+        # Parse JSON data
+        import json
+        form_data = json.loads(draft.form_data) if draft.form_data else {}
+        selected_brand_data = json.loads(draft.selected_brand_data) if draft.selected_brand_data else None
+
+        return {
+            "success": True,
+            "data": {
+                "draft_id": str(draft.id),
+                "user_id": str(draft.user_id),
+                "current_step": draft.current_step,
+                "form_data": form_data,
+                "selected_brand": draft.selected_brand,
+                "selected_brand_data": selected_brand_data,
+                "last_saved": draft.last_saved.isoformat(),
+                "created_at": draft.created_at.isoformat(),
+                "updated_at": draft.updated_at.isoformat()
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting latest proposal draft: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving latest proposal draft"
+        )
+
+# ============================================================================
 # PROPOSAL CREATION HELPERS
 # ============================================================================
 
@@ -600,29 +913,31 @@ async def get_available_brands(
     require_superadmin_role(current_user)
 
     try:
-        # Build query to get brand users
-        where_conditions = ["role IN ('brand', 'brand_premium', 'premium')"]
+        # Build query to get brand users (qualify column references to avoid ambiguity)
+        where_conditions = ["u.role IN ('brand', 'brand_premium', 'premium')"]
         params = {"limit": limit, "offset": offset}
 
         if search:
-            where_conditions.append("(email ILIKE :search OR full_name ILIKE :search)")
+            where_conditions.append("(u.email ILIKE :search OR u.full_name ILIKE :search OR u.company ILIKE :search)")
             params["search"] = f"%{search}%"
 
         where_clause = " AND ".join(where_conditions)
 
-        # Get brand users with their teams and recent activity
+        # Get brand users with their teams and recent activity (include company info)
         result = await db.execute(
             text(f"""
                 SELECT DISTINCT
                     u.id,
                     u.email,
                     u.full_name,
+                    u.company,
                     u.role,
                     u.subscription_tier,
                     u.status,
                     u.created_at,
                     t.name as team_name,
                     t.id as team_id,
+                    t.company_name as team_company_name,
                     COALESCE(proposal_count.total, 0) as total_proposals
                 FROM users u
                 LEFT JOIN team_members tm ON u.id = tm.user_id
@@ -633,7 +948,7 @@ async def get_available_brands(
                     GROUP BY brand_user_id
                 ) proposal_count ON u.id = proposal_count.brand_user_id
                 WHERE {where_clause}
-                ORDER BY u.full_name, u.email
+                ORDER BY u.company, u.full_name, u.email
                 LIMIT :limit OFFSET :offset
             """),
             params
@@ -650,16 +965,22 @@ async def get_available_brands(
 
         brands_data = []
         for brand in brands:
+            # Determine display name - prioritize company, fallback to full name
+            display_name = brand.company if brand.company else brand.full_name
+
             brands_data.append({
                 "id": str(brand.id),
                 "email": brand.email,
                 "full_name": brand.full_name,
+                "company": brand.company,
+                "display_name": display_name,  # What should show in dropdown
                 "role": brand.role,
                 "subscription_tier": brand.subscription_tier,
                 "status": brand.status,
                 "team": {
                     "id": str(brand.team_id) if brand.team_id else None,
-                    "name": brand.team_name
+                    "name": brand.team_name,
+                    "company_name": brand.team_company_name
                 } if brand.team_id else None,
                 "total_proposals": brand.total_proposals,
                 "created_at": brand.created_at.isoformat()
@@ -681,6 +1002,228 @@ async def get_available_brands(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error retrieving available brands"
+        )
+
+@router.get("/brands/teams")
+async def get_brand_teams(
+    search: Optional[str] = Query(None, description="Search teams by company name"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get brand teams with their members for proposal creation.
+    SUPERADMIN selects a team/company and gets all team members automatically.
+    """
+    require_superadmin_role(current_user)
+
+    try:
+        # Build query conditions for brand teams
+        team_where_conditions = ["tm.status = 'active'", "u.role IN ('brand', 'brand_premium', 'premium')"]
+        params = {"limit": limit, "offset": offset}
+
+        if search:
+            team_where_conditions.append("(t.company_name ILIKE :search OR t.name ILIKE :search)")
+            params["search"] = f"%{search}%"
+
+        team_where_clause = " AND ".join(team_where_conditions)
+
+        # Step 1: Get teams with basic info (avoiding complex JSON aggregation)
+        teams_result = await db.execute(
+            text(f"""
+                SELECT DISTINCT
+                    t.id as team_id,
+                    t.name as team_name,
+                    t.company_name,
+                    t.subscription_tier,
+                    t.created_at as team_created_at
+                FROM teams t
+                JOIN team_members tm ON t.id = tm.team_id
+                JOIN users u ON tm.user_id = u.id
+                WHERE {team_where_clause}
+                ORDER BY t.company_name, t.name
+                LIMIT :limit OFFSET :offset
+            """),
+            params
+        )
+
+        teams = teams_result.fetchall()
+
+        # Step 2: Get team members for each team
+        teams_data = []
+        for team in teams:
+            # Get members for this specific team
+            members_result = await db.execute(
+                text("""
+                    SELECT
+                        u.id,
+                        u.email,
+                        u.full_name,
+                        u.role,
+                        u.subscription_tier,
+                        u.status,
+                        tm.role as team_role,
+                        tm.joined_at
+                    FROM team_members tm
+                    JOIN users u ON tm.user_id = u.id
+                    WHERE tm.team_id = :team_id
+                      AND tm.status = 'active'
+                      AND u.role IN ('brand', 'brand_premium', 'premium')
+                    ORDER BY tm.role DESC, u.full_name
+                """),
+                {"team_id": str(team.team_id)}
+            )
+
+            members = members_result.fetchall()
+            team_members = []
+
+            for member in members:
+                team_members.append({
+                    "user_id": str(member.id),
+                    "email": member.email,
+                    "full_name": member.full_name,
+                    "role": member.role,
+                    "subscription_tier": member.subscription_tier,
+                    "status": member.status,
+                    "team_role": member.team_role,
+                    "joined_at": member.joined_at.isoformat()
+                })
+
+            teams_data.append({
+                "team_id": str(team.team_id),
+                "team_name": team.team_name,
+                "company_name": team.company_name,
+                "subscription_tier": team.subscription_tier,
+                "member_count": len(team_members),
+                "total_proposals": 0,  # Can be calculated later if needed
+                "created_at": team.team_created_at.isoformat(),
+                "team_members": team_members,
+                "auto_select_all": True  # Flag for frontend to auto-select all members
+            })
+
+        # Get total count
+        count_result = await db.execute(
+            text(f"""
+                SELECT COUNT(DISTINCT t.id)
+                FROM teams t
+                JOIN team_members tm ON t.id = tm.team_id
+                JOIN users u ON tm.user_id = u.id
+                WHERE {team_where_clause}
+            """),
+            {k: v for k, v in params.items() if k not in ['limit', 'offset']}
+        )
+        total_count = count_result.scalar()
+
+        return {
+            "success": True,
+            "data": {
+                "teams": teams_data,
+                "total_count": total_count,
+                "limit": limit,
+                "offset": offset,
+                "has_more": (offset + limit) < total_count
+            },
+            "instructions": {
+                "usage": "Select a team/company and all team members will be automatically included in the proposal",
+                "team_member_selection": "All active team members are pre-selected when you choose a team"
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting brand teams: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving brand teams"
+        )
+
+@router.get("/brands/teams/{team_id}/members")
+async def get_team_brand_members(
+    team_id: UUID,
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get all brand members of a specific team for auto-selection"""
+    require_superadmin_role(current_user)
+
+    try:
+        # Get team members who are brand users
+        result = await db.execute(
+            text("""
+                SELECT
+                    u.id,
+                    u.email,
+                    u.full_name,
+                    u.role,
+                    u.subscription_tier,
+                    u.status,
+                    tm.role as team_role,
+                    tm.joined_at,
+                    t.company_name,
+                    t.name as team_name,
+                    COALESCE(proposal_count.total, 0) as total_proposals
+                FROM teams t
+                JOIN team_members tm ON t.id = tm.team_id
+                JOIN users u ON tm.user_id = u.id
+                LEFT JOIN (
+                    SELECT brand_user_id, COUNT(*) as total
+                    FROM admin_brand_proposals
+                    GROUP BY brand_user_id
+                ) proposal_count ON u.id = proposal_count.brand_user_id
+                WHERE t.id = :team_id
+                  AND tm.status = 'active'
+                  AND u.role IN ('brand', 'brand_premium', 'premium')
+                ORDER BY tm.role DESC, u.full_name
+            """),
+            {"team_id": str(team_id)}
+        )
+
+        members = result.fetchall()
+
+        if not members:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No brand members found for this team"
+            )
+
+        team_info = {
+            "team_id": str(team_id),
+            "team_name": members[0].team_name,
+            "company_name": members[0].company_name
+        }
+
+        members_data = []
+        for member in members:
+            members_data.append({
+                "id": str(member.id),
+                "email": member.email,
+                "full_name": member.full_name,
+                "role": member.role,
+                "subscription_tier": member.subscription_tier,
+                "status": member.status,
+                "team_role": member.team_role,
+                "joined_at": member.joined_at.isoformat(),
+                "total_proposals": member.total_proposals
+            })
+
+        return {
+            "success": True,
+            "data": {
+                "team": team_info,
+                "members": members_data,
+                "member_count": len(members_data),
+                "all_user_ids": [member["id"] for member in members_data],  # Easy array for frontend
+                "auto_selection_ready": True
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting team brand members: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving team brand members"
         )
 
 @router.get("/influencers/available")
@@ -1204,13 +1747,20 @@ async def calculate_proposal_pricing(
                     "error": str(e)
                 })
 
+        # Get user's currency for proper formatting
+        user_currency = await currency_service.get_user_currency(str(current_user.id), db)
+        formatted_total = await currency_service.format_amount(
+            total_campaign_cost,
+            currency_info=user_currency
+        )
+
         return {
             "success": True,
             "data": {
                 "influencer_calculations": pricing_calculations,
-                "total_campaign_cost_usd_cents": total_campaign_cost,
-                "total_campaign_cost_usd": total_campaign_cost / 100,
-                "currency": "USD",
+                "total_campaign_cost_cents": total_campaign_cost,
+                "total_campaign_cost_formatted": formatted_total,
+                "currency_info": user_currency,
                 "calculation_date": datetime.now().isoformat()
             }
         }
