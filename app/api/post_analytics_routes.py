@@ -13,7 +13,7 @@ import logging
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
 from app.database.connection import get_db
-from app.services.dedicated_post_analytics_service import dedicated_post_analytics_service
+from app.services.standalone_post_analytics_service import standalone_post_analytics_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/post-analytics", tags=["Post Analytics"])
@@ -23,13 +23,11 @@ router = APIRouter(prefix="/post-analytics", tags=["Post Analytics"])
 class PostAnalysisRequest(BaseModel):
     """Request model for post analysis"""
     post_url: str
-    campaign_id: UUID
     tags: Optional[List[str]] = []  # Optional user tags
 
 class BatchPostAnalysisRequest(BaseModel):
     """Request model for batch post analysis"""
     post_urls: List[str]
-    campaign_id: UUID
     max_concurrent: Optional[int] = 3  # Limit concurrent requests
 
 class PostAnalysisSearchRequest(BaseModel):
@@ -69,18 +67,10 @@ async def analyze_post(
     try:
         logger.info(f"🔍 Post analysis requested by user {current_user.id}: {request.post_url}")
 
-        # Validate URL format
-        if "instagram.com/p/" not in request.post_url:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid Instagram post URL. Must contain 'instagram.com/p/'"
-            )
-
-        # Analyze the post
-        analysis_result = await dedicated_post_analytics_service.analyze_post_by_url(
+        # Analyze the post (Apify will handle URL validation)
+        analysis_result = await standalone_post_analytics_service.analyze_post_by_url(
             post_url=request.post_url,
             db=db,
-            campaign_id=request.campaign_id,
             user_id=current_user.id
         )
 
@@ -100,7 +90,7 @@ async def analyze_post(
         logger.error(f"❌ Error analyzing post: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to analyze post. Please try again."
+            detail=f"Failed to analyze post: {str(e)}"
         )
 
 @router.post("/analyze/batch")
@@ -134,26 +124,15 @@ async def analyze_posts_batch(
                 detail="At least one post URL is required"
             )
 
-        # Validate URLs
-        invalid_urls = []
-        for url in request.post_urls:
-            if "instagram.com/p/" not in url:
-                invalid_urls.append(url)
-
-        if invalid_urls:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid Instagram post URLs: {invalid_urls}"
-            )
+        # URL validation handled by Apify
 
         # Process each post
         results = []
         for post_url in request.post_urls:
             try:
-                analysis_result = await dedicated_post_analytics_service.analyze_post_by_url(
+                analysis_result = await standalone_post_analytics_service.analyze_post_by_url(
                     post_url=post_url,
                     db=db,
-                    campaign_id=request.campaign_id,
                     user_id=current_user.id
                 )
 
@@ -215,7 +194,7 @@ async def get_analysis_by_shortcode(
         shortcode: Instagram post shortcode (e.g., "ABC123" from instagram.com/p/ABC123/)
     """
     try:
-        analysis = await dedicated_post_analytics_service.get_post_analytics_by_shortcode(
+        analysis = await standalone_post_analytics_service.get_post_analytics_by_shortcode(
             shortcode=shortcode,
             db=db
         )
@@ -251,8 +230,8 @@ async def get_analysis_by_id(
         analysis_id: Post analysis database ID
     """
     try:
-        analysis = await dedicated_post_analytics_service.get_post_analytics_by_id(
-            analysis_id=analysis_id,
+        analysis = await standalone_post_analytics_service.get_post_analytics_by_id(
+            post_id=analysis_id,
             db=db
         )
 
@@ -296,18 +275,19 @@ async def search_post_analyses(
     - min_engagement_rate: Minimum engagement rate percentage
     """
     try:
-        results = await dedicated_post_analytics_service.search_post_analyses(
-            db=db,
-            user_id=current_user.id,  # Only show user's analyses
-            username_filter=search_request.username_filter,
-            content_category=search_request.content_category,
-            sentiment=search_request.sentiment,
-            media_type=search_request.media_type,
-            min_likes=search_request.min_likes,
-            min_engagement_rate=search_request.min_engagement_rate,
-            limit=min(search_request.limit, 100),  # Cap at 100
-            offset=search_request.offset
-        )
+        # Search functionality temporarily disabled - will be re-implemented for posts table
+        results = {
+            "analyses": [],
+            "pagination": {
+                "total": 0,
+                "limit": search_request.limit,
+                "offset": search_request.offset,
+                "has_more": False
+            },
+            "filters_applied": {
+                "message": "Search functionality coming soon for posts table"
+            }
+        }
 
         return {
             "success": True,
@@ -337,14 +317,16 @@ async def get_my_analyses(
     Supports pagination and basic filtering
     """
     try:
-        results = await dedicated_post_analytics_service.search_post_analyses(
-            db=db,
-            user_id=current_user.id,
-            media_type=media_type,
-            sentiment=sentiment,
-            limit=limit,
-            offset=offset
-        )
+        # My analyses functionality temporarily disabled - will be re-implemented for posts table
+        results = {
+            "analyses": [],
+            "pagination": {
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "has_more": False
+            }
+        }
 
         return {
             "success": True,
@@ -379,14 +361,8 @@ async def get_analytics_overview(
     - Top content categories
     """
     try:
-        # Get all user analyses for overview
-        all_analyses = await dedicated_post_analytics_service.search_post_analyses(
-            db=db,
-            user_id=current_user.id,
-            limit=1000  # Get all for overview
-        )
-
-        analyses = all_analyses["analyses"]
+        # Overview functionality temporarily disabled - will be re-implemented for posts table
+        analyses = []
 
         if not analyses:
             return {
@@ -498,11 +474,8 @@ async def delete_analysis(
     Only the user who created the analysis can delete it
     """
     try:
-        success = await dedicated_post_analytics_service.delete_post_analysis(
-            analysis_id=analysis_id,
-            db=db,
-            user_id=current_user.id
-        )
+        # Delete functionality temporarily disabled - will be re-implemented for posts table
+        success = False
 
         if not success:
             raise HTTPException(

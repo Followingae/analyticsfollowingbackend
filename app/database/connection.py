@@ -155,23 +155,25 @@ async def init_database():
             logger.warning("NETWORK: Network unavailable during startup - initializing with UNIFIED configuration")
             # Industry standard configuration for network unavailable mode
             async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+
             async_engine = create_async_engine(
                 async_url,
-                pool_size=3,  # Minimal for resilient mode
-                max_overflow=5,
-                pool_timeout=DatabaseConfig.POOL_TIMEOUT,
-                pool_recycle=DatabaseConfig.POOL_RECYCLE,
-                pool_pre_ping=False,  # Disable pre-ping when network unavailable
+                poolclass=NullPool,  # FORCE: No connection pooling
                 echo=False,
-                # CRITICAL: Disable all statement caching for Session Pooler compatibility
                 query_cache_size=0,
-                execution_options={"compiled_cache": {}},  # Disable compilation caching
+                execution_options={
+                    "compiled_cache": {},
+                    "autocommit": False,
+                    "isolation_level": None
+                },
                 connect_args={
                     "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                    "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS,
-                    "statement_cache_size": 0,  # FIX: Supabase pgbouncer prepared statement conflicts
-                    "prepared_statement_cache_size": 0,  # Disable driver prepared statements
-                    "prepared_statement_name_func": None  # Disable prepared statement naming
+                    "server_settings": {
+                        "application_name": "analytics_following_resilient"
+                    },
+                    "statement_cache_size": 0,
+                    "prepared_statement_cache_size": 0,
+                    "prepared_statement_name_func": lambda: None
                 }
             )
             SessionLocal = sessionmaker(
@@ -196,24 +198,29 @@ async def init_database():
             async_url = async_url.replace("postgresql://", "postgresql+asyncpg://")
 
         # SESSION POOLER COMPATIBLE: Configuration for pgbouncer transaction mode
+        # FORCE: Use the most basic connection with zero prepared statements
+        from urllib.parse import urlparse, parse_qs
+
+        # FORCE: No prepared statements at all - use text() with no caching
         async_engine = create_async_engine(
             async_url,
-            pool_size=DatabaseConfig.POOL_SIZE,
-            max_overflow=DatabaseConfig.MAX_OVERFLOW,
-            pool_timeout=DatabaseConfig.POOL_TIMEOUT,
-            pool_recycle=DatabaseConfig.POOL_RECYCLE,
-            pool_pre_ping=DatabaseConfig.POOL_PRE_PING,
-            pool_reset_on_return=DatabaseConfig.POOL_RESET_ON_RETURN,
+            poolclass=NullPool,  # FORCE: No connection pooling
             echo=False,
-            # CRITICAL: Disable all statement caching for Session Pooler compatibility
+            # CRITICAL: Disable ALL caching and compilation
             query_cache_size=0,
-            execution_options={"compiled_cache": {}},  # Disable compilation caching
+            execution_options={
+                "compiled_cache": {},  # No compilation cache
+                "autocommit": False
+            },
             connect_args={
                 "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS,
-                "statement_cache_size": 0,  # Disable asyncpg prepared statements
-                "prepared_statement_cache_size": 0,  # Disable driver prepared statements
-                "prepared_statement_name_func": None  # Disable prepared statement naming
+                "server_settings": {
+                    "application_name": "analytics_following_no_prepare"
+                },
+                # NUCLEAR OPTION: Disable all statement preparation
+                "statement_cache_size": 0,
+                "prepared_statement_cache_size": 0,
+                "prepared_statement_name_func": lambda: None  # Always return None for names
             }
         )
         
@@ -256,23 +263,25 @@ async def init_database():
             # Industry standard emergency configuration
             try:
                 async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+
                 async_engine = create_async_engine(
                     async_url,
-                    pool_size=2,  # Minimal for emergency mode
-                    max_overflow=3,
-                    pool_timeout=DatabaseConfig.POOL_TIMEOUT,
-                    pool_recycle=DatabaseConfig.POOL_RECYCLE,
-                    pool_pre_ping=False,  # Disable pre-ping in emergency mode
+                    poolclass=NullPool,  # FORCE: No connection pooling
                     echo=False,
-                    # CRITICAL: Disable all statement caching for Session Pooler compatibility
                     query_cache_size=0,
-                    execution_options={"compiled_cache": {}},  # Disable compilation caching
+                    execution_options={
+                        "compiled_cache": {},
+                        "autocommit": False,
+                        "isolation_level": None
+                    },
                     connect_args={
                         "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                        "server_settings": DatabaseConfig.ASYNCPG_SERVER_SETTINGS,
-                        "statement_cache_size": 0,  # Disable asyncpg prepared statements
-                        "prepared_statement_cache_size": 0,  # Disable driver prepared statements
-                        "prepared_statement_name_func": None  # Disable prepared statement naming
+                        "server_settings": {
+                            "application_name": "analytics_following_emergency"
+                        },
+                        "statement_cache_size": 0,
+                        "prepared_statement_cache_size": 0,
+                        "prepared_statement_name_func": lambda: None
                     }
                 )
                 SessionLocal = sessionmaker(

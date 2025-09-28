@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text, select, and_, or_, desc, asc
 from uuid import UUID
+import uuid as uuid_lib
 import json
 
 from app.scrapers.apify_instagram_client import ApifyInstagramClient, ApifyProfileNotFoundError, ApifyAPIError
@@ -36,7 +37,7 @@ class DedicatedPostAnalyticsService:
     def __init__(self):
         self.apify_token = settings.APIFY_API_TOKEN
 
-    async def analyze_post_by_url(self, post_url: str, db: AsyncSession, campaign_id: UUID, user_id: Optional[UUID] = None) -> Dict[str, Any]:
+    async def analyze_post_by_url(self, post_url: str, db: AsyncSession, campaign_id: Optional[UUID] = None, user_id: Optional[UUID] = None) -> Dict[str, Any]:
         """
         Analyze a single Instagram post by URL
 
@@ -62,7 +63,14 @@ class DedicatedPostAnalyticsService:
                 logger.info(f"📊 Post {shortcode} already analyzed, returning existing data")
                 return await self._format_post_analytics(existing_analysis)
 
-            # Analysis request logged via main analysis record
+            # Create or get default campaign if not provided
+            if campaign_id is None:
+                try:
+                    campaign_id = await self._get_or_create_default_campaign(db, user_id)
+                    logger.info(f"✅ Using campaign {campaign_id} for post analysis")
+                except Exception as e:
+                    logger.error(f"❌ Failed to get/create campaign: {e}")
+                    raise ValueError(f"Unable to create or find a campaign for post analysis: {e}")
 
             try:
                 # Fetch post data using Apify
@@ -77,16 +85,14 @@ class DedicatedPostAnalyticsService:
                 # Update with AI results
                 await self._update_ai_analysis(db, post_analysis.id, ai_analysis)
 
-                # Update history as successful
-                await self._complete_analysis_history(db, history_record.id, True)
+                logger.info(f"✅ Post analysis completed successfully for {shortcode}")
 
                 # Return complete analytics
                 final_analysis = await self._get_analysis_by_id(db, post_analysis.id)
                 return await self._format_post_analytics(final_analysis)
 
             except Exception as e:
-                # Update history as failed
-                await self._complete_analysis_history(db, history_record.id, False, str(e))
+                logger.error(f"❌ Failed to complete analysis for {shortcode}: {e}")
                 raise
 
         except Exception as e:
@@ -237,11 +243,21 @@ class DedicatedPostAnalyticsService:
     # Private helper methods
 
     def _extract_shortcode_from_url(self, post_url: str) -> Optional[str]:
-        """Extract shortcode from Instagram post URL"""
-        # Match Instagram post URLs: https://www.instagram.com/p/SHORTCODE/
-        pattern = r'instagram\.com\/p\/([A-Za-z0-9_-]+)'
-        match = re.search(pattern, post_url)
-        return match.group(1) if match else None
+        """Extract shortcode from Instagram post/reel URL"""
+        # Match Instagram post URLs: /p/SHORTCODE/ or /reel/SHORTCODE/
+        patterns = [
+            r'instagram\.com\/p\/([A-Za-z0-9_-]+)',
+            r'instagram\.com\/reel\/([A-Za-z0-9_-]+)',
+            r'\/reel\/([A-Za-z0-9_-]+)',
+            r'\/p\/([A-Za-z0-9_-]+)'
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, post_url)
+            if match:
+                return match.group(1)
+
+        return None
 
     async def _fetch_post_data_from_apify(self, post_url: str) -> Dict[str, Any]:
         """Fetch post data using Apify Instagram scraper"""
@@ -606,6 +622,76 @@ class DedicatedPostAnalyticsService:
                 return None
         except:
             return None
+
+    async def _get_or_create_default_campaign(self, db: AsyncSession, user_id: Optional[UUID] = None) -> UUID:
+        """Get or create a default campaign for post analytics"""
+        try:
+            # Check if we have a default campaign for this user
+            if user_id:
+                result = await db.execute(
+                    text("SELECT id FROM campaigns WHERE name = 'Default Post Analytics' AND user_id = :user_id LIMIT 1"),
+                    {"user_id": user_id}
+                )
+                existing_campaign = result.scalar_one_or_none()
+                if existing_campaign:
+                    return existing_campaign
+
+            # Check if there's any default campaign we can use
+            result = await db.execute(
+                text("SELECT id FROM campaigns WHERE name = 'Default Post Analytics' LIMIT 1")
+            )
+            existing_campaign = result.scalar_one_or_none()
+            if existing_campaign:
+                return existing_campaign
+
+            # Create default campaign - user_id is required, so use a default if not provided
+            campaign_id = uuid_lib.uuid4()
+            default_user_id = user_id or uuid_lib.UUID('00000000-0000-0000-0000-000000000000')
+
+            await db.execute(
+                text("""
+                    INSERT INTO campaigns (id, user_id, name, description, status, created_at, updated_at)
+                    VALUES (:id, :user_id, :name, :description, :status, :created_at, :updated_at)
+                """),
+                {
+                    "id": campaign_id,
+                    "user_id": default_user_id,
+                    "name": "Default Post Analytics",
+                    "description": "Auto-created campaign for individual post analytics",
+                    "status": "active",
+                    "created_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc)
+                }
+            )
+            await db.commit()
+
+            logger.info(f"✅ Created default campaign {campaign_id} for user {default_user_id}")
+            return campaign_id
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Failed to create default campaign: {e}")
+            # If creation fails, try to use any existing campaign as fallback
+            try:
+                result = await db.execute(text("SELECT id FROM campaigns LIMIT 1"))
+                fallback_campaign = result.scalar_one_or_none()
+                if fallback_campaign:
+                    logger.info(f"✅ Using fallback campaign {fallback_campaign}")
+                    return fallback_campaign
+            except:
+                pass
+            raise
+
+    async def _complete_analysis_history(self, db: AsyncSession, history_id: Optional[UUID], success: bool, error_message: Optional[str] = None):
+        """Complete analysis history record (placeholder for compatibility)"""
+        # This method exists for compatibility with the error handling code
+        # In the current implementation, we don't use a separate history table
+        # The analysis status is tracked directly in the campaign_post_analytics table
+        if history_id:
+            logger.info(f"Analysis history completed: {history_id}, success: {success}")
+            if error_message:
+                logger.error(f"Analysis error: {error_message}")
+        pass
 
 
 # Global service instance

@@ -461,7 +461,13 @@ class Post(Base):
     
     # Raw data backup
     raw_data = Column(JSONB, nullable=False)
-    
+
+    # CDN URLs (Cloudflare R2)
+    cdn_thumbnail_url = Column(Text, nullable=True)  # Optimized thumbnail URL from Cloudflare
+
+    # Analysis source tracking
+    analysis_source = Column(String(50), nullable=False, default='creator_analytics', index=True)  # 'creator_analytics', 'post_analytics', 'campaign'
+
     # Relationships
     profile = relationship("Profile", back_populates="posts")
     comment_sentiment = relationship("CommentSentiment", back_populates="post", cascade="all, delete-orphan")
