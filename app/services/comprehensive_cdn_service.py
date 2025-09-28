@@ -8,6 +8,7 @@ import aiohttp
 import io
 import base64
 import uuid
+import socket
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
 from PIL import Image
@@ -202,7 +203,12 @@ class ComprehensiveCDNService:
             # 1. Download image from Instagram
             logger.debug(f"[CDN-PROCESS] Downloading {image_type}: {image_url[:100]}...")
 
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+            # Force IPv4 to avoid IPv6 connectivity issues with Instagram CDN
+            connector = aiohttp.TCPConnector(family=socket.AF_INET)  # IPv4 only
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                connector=connector
+            ) as session:
                 async with session.get(image_url) as response:
                     if response.status != 200:
                         raise Exception(f"Download failed: HTTP {response.status}")
