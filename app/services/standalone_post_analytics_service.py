@@ -15,7 +15,7 @@ import uuid as uuid_lib
 import json
 
 from app.scrapers.apify_instagram_client import ApifyInstagramClient, ApifyProfileNotFoundError, ApifyAPIError
-from app.database.unified_models import Post, Profile, AudienceDemographics, AudienceDemographic
+from app.database.unified_models import Post, Profile, AudienceDemographics
 from app.database.post_analytics_models import CampaignPostAnalytics
 from app.core.config import settings
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
@@ -713,7 +713,7 @@ class StandalonePostAnalyticsService:
                 logger.info(f"   - posts_count: {profile.posts_count}")
                 # Check for demographics without triggering lazy load
                 demographics_check = await db.execute(
-                    select(AudienceDemographic).where(AudienceDemographic.profile_id == profile.id).limit(1)
+                    select(AudienceDemographics).where(AudienceDemographics.profile_id == profile.id).limit(1)
                 )
                 has_demographics = demographics_check.scalar_one_or_none() is not None
                 logger.info(f"   - audience_demographics: {'✅' if has_demographics else '⏳ Processing'}")
