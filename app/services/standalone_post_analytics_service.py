@@ -224,7 +224,8 @@ class StandalonePostAnalyticsService:
                     logger.info(f"   - Has posts count: {existing_profile.posts_count > 0}")
                     logger.info(f"   - Has demographics: {has_demographics}")
                     # Trigger background refresh (don't await - non-blocking)
-                    asyncio.create_task(self._trigger_full_creator_analytics(username, user_id, db))
+                    # IMPORTANT: Don't pass db session - background task creates its own
+                    asyncio.create_task(self._trigger_full_creator_analytics(username, user_id))
                     return existing_profile
 
             # 🆕 NEW USERNAME DETECTED - Create stub and trigger FULL Creator Analytics
