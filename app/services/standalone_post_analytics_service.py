@@ -643,7 +643,7 @@ class StandalonePostAnalyticsService:
             # STEP 1: Fetch complete profile from Apify (same as Creator Module)
             logger.info(f"[STEP 1/4] 📡 Fetching complete profile from Apify...")
             apify_client = ApifyInstagramClient(self.apify_token)
-            profile_data = await apify_client.scrape_profile(username)
+            profile_data = await apify_client.get_instagram_profile_comprehensive(username)
 
             if not profile_data:
                 raise ValueError(f"Failed to fetch profile data for {username}")
