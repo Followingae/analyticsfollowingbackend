@@ -258,7 +258,8 @@ class StandalonePostAnalyticsService:
             logger.info(f"✅ Stub profile created for {username} (ID: {profile.id})")
 
             # 🔥 TRIGGER FULL CREATOR ANALYTICS (non-blocking background task)
-            asyncio.create_task(self._trigger_full_creator_analytics(username, user_id, db))
+            # IMPORTANT: Don't pass db session - background task creates its own
+            asyncio.create_task(self._trigger_full_creator_analytics(username, user_id))
 
             return profile
 
@@ -628,7 +629,7 @@ class StandalonePostAnalyticsService:
             logger.error(f"❌ Error processing thumbnail: {e}")
             # Don't raise - thumbnail processing is optional
 
-    async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID], db: AsyncSession):
+    async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID]):
         """
         Trigger FULL Creator Analytics Pipeline
         Identical to what happens in Creator Module when user searches for a creator
@@ -640,99 +641,105 @@ class StandalonePostAnalyticsService:
         4. AI Analysis (all 10 models on profile + posts)
 
         This runs in background and does NOT block post analytics
+
+        IMPORTANT: Creates its own database session to avoid connection sharing issues
         """
-        try:
-            from app.database.comprehensive_service import comprehensive_service
-            from app.services.cdn_sync_service import cdn_sync_service
+        from app.database.connection import SessionLocal
 
-            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"🔥 FULL CREATOR ANALYTICS PIPELINE STARTED")
-            logger.info(f"👤 Username: {username}")
-            logger.info(f"👥 Triggered by: Post Analytics auto-detection")
-            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-            # STEP 1: Fetch complete profile from Apify (same as Creator Module)
-            logger.info(f"[STEP 1/4] 📡 Fetching complete profile from Apify...")
-            async with ApifyInstagramClient(self.apify_token) as apify_client:
-                profile_data = await apify_client.get_instagram_profile_comprehensive(username)
-
-            if not profile_data:
-                raise ValueError(f"Failed to fetch profile data for {username}")
-
-            logger.info(f"✅ Apify returned complete profile data")
-            logger.info(f"   - Followers: {profile_data.get('followersCount', 0):,}")
-            logger.info(f"   - Following: {profile_data.get('followsCount', 0):,}")
-            logger.info(f"   - Posts: {profile_data.get('postsCount', 0):,}")
-            logger.info(f"   - Biography: {len(profile_data.get('biography', ''))} chars")
-            logger.info(f"   - Latest posts: {len(profile_data.get('latestPosts', []))} posts")
-
-            # STEP 2: Store complete profile in database (same as Creator Module)
-            logger.info(f"[STEP 2/4] 💾 Storing complete profile in database...")
-            profile, created = await comprehensive_service.store_complete_profile(
-                db, username, profile_data
-            )
-
-            logger.info(f"✅ Profile stored in database")
-            logger.info(f"   - Profile ID: {profile.id}")
-            logger.info(f"   - Created new: {created}")
-            logger.info(f"   - Followers: {profile.followers_count:,}")
-            logger.info(f"   - Posts stored: {profile.posts_count}")
-
-            # STEP 3: CDN Processing (profile picture + thumbnails)
-            logger.info(f"[STEP 3/4] 🖼️  Processing CDN (profile + thumbnails)...")
-
-            # Trigger CDN sync for profile picture
+        # Create dedicated database session for this background task
+        async with SessionLocal() as db:
             try:
-                await cdn_sync_service.ensure_profile_cdn_synced(
-                    db, str(profile.id), username
+                from app.database.comprehensive_service import comprehensive_service
+                from app.services.cdn_sync_service import cdn_sync_service
+
+                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                logger.info(f"🔥 FULL CREATOR ANALYTICS PIPELINE STARTED")
+                logger.info(f"👤 Username: {username}")
+                logger.info(f"👥 Triggered by: Post Analytics auto-detection")
+                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                # STEP 1: Fetch complete profile from Apify (same as Creator Module)
+                logger.info(f"[STEP 1/4] 📡 Fetching complete profile from Apify...")
+                async with ApifyInstagramClient(self.apify_token) as apify_client:
+                    profile_data = await apify_client.get_instagram_profile_comprehensive(username)
+
+                if not profile_data:
+                    raise ValueError(f"Failed to fetch profile data for {username}")
+
+                logger.info(f"✅ Apify returned complete profile data")
+                logger.info(f"   - Followers: {profile_data.get('followersCount', 0):,}")
+                logger.info(f"   - Following: {profile_data.get('followsCount', 0):,}")
+                logger.info(f"   - Posts: {profile_data.get('postsCount', 0):,}")
+                logger.info(f"   - Biography: {len(profile_data.get('biography', ''))} chars")
+                logger.info(f"   - Latest posts: {len(profile_data.get('latestPosts', []))} posts")
+
+                # STEP 2: Store complete profile in database (same as Creator Module)
+                logger.info(f"[STEP 2/4] 💾 Storing complete profile in database...")
+                profile, created = await comprehensive_service.store_complete_profile(
+                    db, username, profile_data
                 )
-                logger.info(f"✅ Profile picture CDN sync queued")
-            except Exception as e:
-                logger.error(f"⚠️ Profile CDN sync failed: {e}")
 
-            # Trigger CDN sync for post thumbnails
-            try:
-                posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
-                posts_result = await db.execute(posts_query)
-                posts = posts_result.scalars().all()
+                logger.info(f"✅ Profile stored in database")
+                logger.info(f"   - Profile ID: {profile.id}")
+                logger.info(f"   - Created new: {created}")
+                logger.info(f"   - Followers: {profile.followers_count:,}")
+                logger.info(f"   - Posts stored: {profile.posts_count}")
 
-                post_ids = [post.instagram_post_id for post in posts if post.instagram_post_id]
-                if post_ids:
-                    await cdn_sync_service.ensure_posts_cdn_synced(
-                        db, str(profile.id), username, post_ids
+                # STEP 3: CDN Processing (profile picture + thumbnails)
+                logger.info(f"[STEP 3/4] 🖼️  Processing CDN (profile + thumbnails)...")
+
+                # Trigger CDN sync for profile picture
+                try:
+                    await cdn_sync_service.ensure_profile_cdn_synced(
+                        db, str(profile.id), username
                     )
-                    logger.info(f"✅ Post thumbnails CDN sync queued ({len(post_ids)} posts)")
+                    logger.info(f"✅ Profile picture CDN sync queued")
+                except Exception as e:
+                    logger.error(f"⚠️ Profile CDN sync failed: {e}")
+
+                # Trigger CDN sync for post thumbnails
+                try:
+                    posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
+                    posts_result = await db.execute(posts_query)
+                    posts = posts_result.scalars().all()
+
+                    post_ids = [post.instagram_post_id for post in posts if post.instagram_post_id]
+                    if post_ids:
+                        await cdn_sync_service.ensure_posts_cdn_synced(
+                            db, str(profile.id), username, post_ids
+                        )
+                        logger.info(f"✅ Post thumbnails CDN sync queued ({len(post_ids)} posts)")
+                except Exception as e:
+                    logger.error(f"⚠️ Posts CDN sync failed: {e}")
+
+                # STEP 4: AI Analysis (all 10 models - runs automatically)
+                logger.info(f"[STEP 4/4] 🤖 AI Analysis (10 models)...")
+                logger.info(f"   - Profile-level AI: Sentiment, Language, Category, Quality")
+                logger.info(f"   - Post-level AI: All 10 models on {len(posts)} posts")
+                logger.info(f"   - Audience AI: Demographics analysis, Fraud detection")
+                logger.info(f"   - AI processing runs automatically via background processor")
+
+                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                logger.info(f"✅ FULL CREATOR ANALYTICS COMPLETED")
+                logger.info(f"👤 Username: {username}")
+                logger.info(f"📊 Complete data now available for Campaign Module")
+                logger.info(f"   - followers_count: {profile.followers_count:,}")
+                logger.info(f"   - posts_count: {profile.posts_count}")
+                logger.info(f"   - audience_demographics: {'✅' if hasattr(profile, 'audience_demographics') else '⏳ Processing'}")
+                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+            except ApifyProfileNotFoundError:
+                logger.error(f"❌ Profile not found on Instagram: {username}")
+                logger.error(f"   Post analytics will continue with stub profile")
+            except ApifyAPIError as e:
+                logger.error(f"❌ Apify API error for {username}: {e}")
+                logger.error(f"   Post analytics will continue with stub profile")
             except Exception as e:
-                logger.error(f"⚠️ Posts CDN sync failed: {e}")
-
-            # STEP 4: AI Analysis (all 10 models - runs automatically)
-            logger.info(f"[STEP 4/4] 🤖 AI Analysis (10 models)...")
-            logger.info(f"   - Profile-level AI: Sentiment, Language, Category, Quality")
-            logger.info(f"   - Post-level AI: All 10 models on {len(posts)} posts")
-            logger.info(f"   - Audience AI: Demographics analysis, Fraud detection")
-            logger.info(f"   - AI processing runs automatically via background processor")
-
-            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"✅ FULL CREATOR ANALYTICS COMPLETED")
-            logger.info(f"👤 Username: {username}")
-            logger.info(f"📊 Complete data now available for Campaign Module")
-            logger.info(f"   - followers_count: {profile.followers_count:,}")
-            logger.info(f"   - posts_count: {profile.posts_count}")
-            logger.info(f"   - audience_demographics: {'✅' if hasattr(profile, 'audience_demographics') else '⏳ Processing'}")
-            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-        except ApifyProfileNotFoundError:
-            logger.error(f"❌ Profile not found on Instagram: {username}")
-            logger.error(f"   Post analytics will continue with stub profile")
-        except ApifyAPIError as e:
-            logger.error(f"❌ Apify API error for {username}: {e}")
-            logger.error(f"   Post analytics will continue with stub profile")
-        except Exception as e:
-            logger.error(f"❌ Failed to run full creator analytics for {username}: {e}")
-            logger.error(f"   This will NOT fail the post analytics")
-            logger.error(f"   Campaign module can retry fetching creator data later")
-            import traceback
-            logger.error(f"   Traceback: {traceback.format_exc()}")
+                logger.error(f"❌ Failed to run full creator analytics for {username}: {e}")
+                logger.error(f"   This will NOT fail the post analytics")
+                logger.error(f"   Campaign module can retry fetching creator data later")
+                import traceback
+                logger.error(f"   Traceback: {traceback.format_exc()}")
 
 
 # Global service instance
