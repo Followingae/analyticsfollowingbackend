@@ -173,7 +173,7 @@ async def init_database():
                     },
                     "statement_cache_size": 0,
                     "prepared_statement_cache_size": 0,
-                    "prepared_statement_name_func": lambda: None
+                    "prepared_statement_name_func": lambda: ""  # Empty string = unnamed statements (pgbouncer compatible)
                 }
             )
             SessionLocal = sessionmaker(
@@ -217,10 +217,10 @@ async def init_database():
                 "server_settings": {
                     "application_name": "analytics_following_no_prepare"
                 },
-                # NUCLEAR OPTION: Disable all statement preparation
+                # PGBOUNCER FIX: Disable all statement preparation for transaction pooling mode
                 "statement_cache_size": 0,
                 "prepared_statement_cache_size": 0,
-                "prepared_statement_name_func": lambda: None  # Always return None for names
+                "prepared_statement_name_func": lambda: ""  # Empty string = unnamed statements (pgbouncer compatible)
             }
         )
         
@@ -281,7 +281,7 @@ async def init_database():
                         },
                         "statement_cache_size": 0,
                         "prepared_statement_cache_size": 0,
-                        "prepared_statement_name_func": lambda: None
+                        "prepared_statement_name_func": lambda: ""  # Empty string = unnamed statements (pgbouncer compatible)
                     }
                 )
                 SessionLocal = sessionmaker(
