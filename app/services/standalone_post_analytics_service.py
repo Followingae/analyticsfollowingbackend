@@ -645,105 +645,59 @@ class StandalonePostAnalyticsService:
 
     async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID]):
         """
-        Trigger FULL Creator Analytics Pipeline
-        Identical to what happens in Creator Module when user searches for a creator
+        Trigger EXACT SAME Creator Analytics Pipeline as Creators Module
 
-        Pipeline:
+        Uses bulletproof_creator_search.search_creator_bulletproof() which includes:
         1. Apify Profile Scraping (complete profile + 12 posts)
         2. Store in Database (profiles, posts, audience_demographics, creator_metadata)
-        3. CDN Processing (profile picture + post thumbnails)
-        4. AI Analysis (all 10 models on profile + posts)
+        3. CDN Processing (profile picture + post thumbnails) - REAL CDN sync
+        4. AI Analysis (all 10 models on profile + posts) - REAL AI processing
 
         This runs in background and does NOT block post analytics
-
-        IMPORTANT: Creates its own database session to avoid connection sharing issues
         """
-        from app.database.connection import SessionLocal
+        try:
+            from app.services.bulletproof_creator_search import bulletproof_creator_search
+            from uuid import UUID as UUID_TYPE
 
-        # Create dedicated database session for this background task
-        async with SessionLocal() as db:
-            try:
-                from app.database.comprehensive_service import comprehensive_service
-                from app.services.cdn_sync_service import cdn_sync_service
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"🔥 TRIGGERING EXACT CREATOR SEARCH MODULE")
+            logger.info(f"👤 Username: {username}")
+            logger.info(f"👥 Triggered by: Post Analytics auto-detection")
+            logger.info(f"🎯 Using: bulletproof_creator_search.search_creator_bulletproof()")
+            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+            # Use a default team_id if user_id not provided (system-level search)
+            system_user_id = user_id if user_id else UUID_TYPE('00000000-0000-0000-0000-000000000000')
+            system_team_id = UUID_TYPE('00000000-0000-0000-0000-000000000000')
+
+            # Call THE EXACT SAME creator search that Creators Module uses
+            # This includes EVERYTHING: Apify + Database + CDN + AI + Demographics
+            result = await bulletproof_creator_search.search_creator_bulletproof(
+                username=username,
+                user_id=system_user_id,
+                team_id=system_team_id,
+                force_refresh=True  # Force fresh data since this is a new discovery
+            )
+
+            if result.success:
                 logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                logger.info(f"🔥 FULL CREATOR ANALYTICS PIPELINE STARTED")
+                logger.info(f"✅ CREATOR SEARCH COMPLETED SUCCESSFULLY")
                 logger.info(f"👤 Username: {username}")
-                logger.info(f"👥 Triggered by: Post Analytics auto-detection")
+                logger.info(f"📊 Processing time: {result.processing_time:.2f}s")
+                logger.info(f"💾 Profile data: {result.profile_data is not None}")
+                logger.info(f"🎯 System health: {result.system_health}")
                 logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            else:
+                logger.error(f"❌ Creator search failed for {username}: {result.error}")
+                logger.error(f"   Fallbacks used: {result.fallbacks_used}")
+                logger.error(f"   Post analytics will continue with partial data")
 
-                # STEP 1: Fetch complete profile from Apify (same as Creator Module)
-                logger.info(f"[STEP 1/4] 📡 Fetching complete profile from Apify...")
-                async with ApifyInstagramClient(self.apify_token) as apify_client:
-                    profile_data = await apify_client.get_instagram_profile_comprehensive(username)
-
-                if not profile_data:
-                    raise ValueError(f"Failed to fetch profile data for {username}")
-
-                logger.info(f"✅ Apify returned complete profile data")
-                logger.info(f"   - Followers: {profile_data.get('followersCount', 0):,}")
-                logger.info(f"   - Following: {profile_data.get('followsCount', 0):,}")
-                logger.info(f"   - Posts: {profile_data.get('postsCount', 0):,}")
-                logger.info(f"   - Biography: {len(profile_data.get('biography', ''))} chars")
-                logger.info(f"   - Latest posts: {len(profile_data.get('latestPosts', []))} posts")
-
-                # STEP 2: Store complete profile in database (same as Creator Module)
-                logger.info(f"[STEP 2/4] 💾 Storing complete profile in database...")
-                profile, created = await comprehensive_service.store_complete_profile(
-                    db, username, profile_data
-                )
-
-                logger.info(f"✅ Profile stored in database")
-                logger.info(f"   - Profile ID: {profile.id}")
-                logger.info(f"   - Created new: {created}")
-                logger.info(f"   - Followers: {profile.followers_count:,}")
-                logger.info(f"   - Posts stored: {profile.posts_count}")
-
-                # STEP 3: CDN Processing (profile picture + thumbnails)
-                logger.info(f"[STEP 3/4] 🖼️  Processing CDN (profile + thumbnails)...")
-
-                # Get posts for later use
-                posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
-                posts_result = await db.execute(posts_query)
-                posts = posts_result.scalars().all()
-
-                # NOTE: CDN sync is handled automatically by comprehensive_service during profile storage
-                # Profile picture and post thumbnails are processed in real-time
-                logger.info(f"✅ CDN processing handled by comprehensive service (profile + {len(posts)} posts)")
-
-                # STEP 4: AI Analysis (all 10 models - runs automatically)
-                logger.info(f"[STEP 4/4] 🤖 AI Analysis (10 models)...")
-                logger.info(f"   - Profile-level AI: Sentiment, Language, Category, Quality")
-                logger.info(f"   - Post-level AI: All 10 models on {len(posts)} posts")
-                logger.info(f"   - Audience AI: Demographics analysis, Fraud detection")
-                logger.info(f"   - AI processing runs automatically via background processor")
-
-                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                logger.info(f"✅ FULL CREATOR ANALYTICS COMPLETED")
-                logger.info(f"👤 Username: {username}")
-                logger.info(f"📊 Complete data now available for Campaign Module")
-                logger.info(f"   - followers_count: {profile.followers_count:,}")
-                logger.info(f"   - posts_count: {profile.posts_count}")
-                # Check for demographics without triggering lazy load
-                demographics_check = await db.execute(
-                    select(AudienceDemographics).where(AudienceDemographics.profile_id == profile.id).limit(1)
-                )
-                has_demographics = demographics_check.scalar_one_or_none() is not None
-                logger.info(f"   - audience_demographics: {'✅' if has_demographics else '⏳ Processing'}")
-                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-            except ApifyProfileNotFoundError:
-                logger.error(f"❌ Profile not found on Instagram: {username}")
-                logger.error(f"   Post analytics will continue with stub profile")
-            except ApifyAPIError as e:
-                logger.error(f"❌ Apify API error for {username}: {e}")
-                logger.error(f"   Post analytics will continue with stub profile")
-            except Exception as e:
-                logger.error(f"❌ Failed to run full creator analytics for {username}: {e}")
-                logger.error(f"   This will NOT fail the post analytics")
-                logger.error(f"   Campaign module can retry fetching creator data later")
-                import traceback
-                logger.error(f"   Traceback: {traceback.format_exc()}")
+        except Exception as e:
+            logger.error(f"❌ Failed to trigger creator search for {username}: {e}")
+            logger.error(f"   This will NOT fail the post analytics")
+            logger.error(f"   Campaign module can retry later")
+            import traceback
+            logger.error(f"   Traceback: {traceback.format_exc()}")
 
 
 # Global service instance
