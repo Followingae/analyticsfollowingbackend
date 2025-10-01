@@ -22,9 +22,10 @@ class BrandLogoService:
     def __init__(self):
         # Initialize R2 client
         account_id = os.getenv("CF_ACCOUNT_ID")
-        access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
-        secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
-        bucket_name = os.getenv("CF_R2_BUCKET_NAME", "thumbnails-prod")
+        # Support both CF_R2_* and R2_* prefixes for backwards compatibility
+        access_key = os.getenv("CF_R2_ACCESS_KEY_ID") or os.getenv("R2_ACCESS_KEY_ID")
+        secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY") or os.getenv("R2_SECRET_ACCESS_KEY")
+        bucket_name = os.getenv("CF_R2_BUCKET_NAME") or os.getenv("R2_BUCKET_NAME", "thumbnails-prod")
 
         if not all([account_id, access_key, secret_key]):
             logger.error("❌ Missing R2 credentials in environment")
