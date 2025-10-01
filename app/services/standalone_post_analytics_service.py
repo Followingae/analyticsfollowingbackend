@@ -645,60 +645,69 @@ class StandalonePostAnalyticsService:
 
     async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID]):
         """
-        Trigger EXACT SAME Creator Analytics Pipeline as Creators Module
+        Trigger FULL Creator Analytics - Apify + Database + AI + CDN
 
-        Uses bulletproof_creator_search.search_creator_bulletproof() which includes:
-        1. Apify Profile Scraping (complete profile + 12 posts)
-        2. Store in Database (profiles, posts, audience_demographics, creator_metadata)
-        3. CDN Processing (profile picture + post thumbnails) - REAL CDN sync
-        4. AI Analysis (all 10 models on profile + posts) - REAL AI processing
-
-        This runs in background and does NOT block post analytics
+        Uses comprehensive_service + bulletproof_content_intelligence
+        Same pipeline as manual creator search
         """
-        try:
-            from app.services.bulletproof_creator_search import bulletproof_creator_search
-            from uuid import UUID as UUID_TYPE
+        from app.database.connection import SessionLocal
+        from app.database.comprehensive_service import comprehensive_service
+        from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
 
-            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"🔥 TRIGGERING EXACT CREATOR SEARCH MODULE")
-            logger.info(f"👤 Username: {username}")
-            logger.info(f"👥 Triggered by: Post Analytics auto-detection")
-            logger.info(f"🎯 Using: bulletproof_creator_search.search_creator_bulletproof()")
-            logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-
-            # Use a default team_id if user_id not provided (system-level search)
-            system_user_id = user_id if user_id else UUID_TYPE('00000000-0000-0000-0000-000000000000')
-            system_team_id = UUID_TYPE('00000000-0000-0000-0000-000000000000')
-
-            # Call THE EXACT SAME creator search that Creators Module uses
-            # This includes EVERYTHING: Apify + Database + CDN + AI + Demographics
-            # Uses default force_refresh=False to respect existing cache/database logic
-            result = await bulletproof_creator_search.search_creator_bulletproof(
-                username=username,
-                user_id=system_user_id,
-                team_id=system_team_id
-                # force_refresh defaults to False - let bulletproof search decide if refresh needed
-            )
-
-            if result.success:
+        async with SessionLocal() as db:
+            try:
                 logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                logger.info(f"✅ CREATOR SEARCH COMPLETED SUCCESSFULLY")
-                logger.info(f"👤 Username: {username}")
-                logger.info(f"📊 Processing time: {result.processing_time:.2f}s")
-                logger.info(f"💾 Profile data: {result.profile_data is not None}")
-                logger.info(f"🎯 System health: {result.system_health}")
+                logger.info(f"🔥 FULL CREATOR ANALYTICS STARTED: {username}")
                 logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            else:
-                logger.error(f"❌ Creator search failed for {username}: {result.error}")
-                logger.error(f"   Fallbacks used: {result.fallbacks_used}")
-                logger.error(f"   Post analytics will continue with partial data")
 
-        except Exception as e:
-            logger.error(f"❌ Failed to trigger creator search for {username}: {e}")
-            logger.error(f"   This will NOT fail the post analytics")
-            logger.error(f"   Campaign module can retry later")
-            import traceback
-            logger.error(f"   Traceback: {traceback.format_exc()}")
+                # STEP 1: Fetch from Apify
+                logger.info(f"[1/3] 📡 Fetching from Apify...")
+                async with ApifyInstagramClient(self.apify_token) as apify_client:
+                    profile_data = await apify_client.get_instagram_profile_comprehensive(username)
+
+                if not profile_data:
+                    raise ValueError(f"No Apify data for {username}")
+
+                # STEP 2: Store via comprehensive_service
+                logger.info(f"[2/3] 💾 Storing profile + posts...")
+                profile, created = await comprehensive_service.store_complete_profile(
+                    db, username, profile_data
+                )
+                logger.info(f"✅ Stored: {profile.followers_count:,} followers")
+
+                # STEP 3: Run AI on posts
+                logger.info(f"[3/3] 🤖 Running AI analysis...")
+                posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
+                posts_result = await db.execute(posts_query)
+                posts = posts_result.scalars().all()
+
+                for post in posts:
+                    if not post.ai_content_category:
+                        try:
+                            ai_result = await bulletproof_content_intelligence.analyze_single_post_comprehensive(
+                                post_data={
+                                    "caption": post.caption or "",
+                                    "shortcode": post.shortcode,
+                                    "likes_count": post.likes_count or 0,
+                                    "comments_count": post.comments_count or 0
+                                },
+                                username=username
+                            )
+                            if ai_result and ai_result.get("success"):
+                                post.ai_content_category = ai_result.get("content_category")
+                                post.ai_sentiment = ai_result.get("sentiment")
+                                post.ai_sentiment_score = ai_result.get("sentiment_score")
+                                post.ai_language_code = ai_result.get("language_code")
+                                await db.commit()
+                        except Exception as ai_error:
+                            logger.warning(f"AI failed for {post.shortcode}: {ai_error}")
+
+                logger.info(f"✅ CREATOR ANALYTICS COMPLETE: {len(posts)} posts analyzed")
+
+            except Exception as e:
+                logger.error(f"❌ Creator analytics failed: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
 
 
 # Global service instance
