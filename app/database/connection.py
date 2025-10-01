@@ -156,6 +156,12 @@ async def init_database():
             # Industry standard configuration for network unavailable mode
             async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
+            # Add prepared_statements=false for pgbouncer compatibility
+            if "?" in async_url:
+                async_url += "&prepared_statements=false"
+            else:
+                async_url += "?prepared_statements=false"
+
             async_engine = create_async_engine(
                 async_url,
                 poolclass=NullPool,  # FORCE: No connection pooling
@@ -196,6 +202,15 @@ async def init_database():
             async_url = async_url.replace("postgres://", "postgresql+asyncpg://")
         else:
             async_url = async_url.replace("postgresql://", "postgresql+asyncpg://")
+
+        # CRITICAL FIX: Add prepared_statements=false for Supabase pgbouncer compatibility
+        # This prevents "prepared statement already exists" errors
+        if "?" in async_url:
+            async_url += "&prepared_statements=false"
+        else:
+            async_url += "?prepared_statements=false"
+
+        logger.info("✅ Database URL configured with prepared_statements=false for pgbouncer compatibility")
 
         # SESSION POOLER COMPATIBLE: Configuration for pgbouncer transaction mode
         # FORCE: Use the most basic connection with zero prepared statements
@@ -263,6 +278,12 @@ async def init_database():
             # Industry standard emergency configuration
             try:
                 async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
+
+                # Add prepared_statements=false for pgbouncer compatibility
+                if "?" in async_url:
+                    async_url += "&prepared_statements=false"
+                else:
+                    async_url += "?prepared_statements=false"
 
                 async_engine = create_async_engine(
                     async_url,
