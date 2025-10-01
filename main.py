@@ -220,11 +220,7 @@ app.include_router(lists_router, prefix="/api/v1")
 from app.api.discovery_routes import router as discovery_router
 app.include_router(discovery_router, prefix="/api/v1")
 
-# Include Campaigns routes - WORKING VERSION (No auth until dependency issue resolved)
-from app.api.campaigns_routes import router as campaigns_router
-app.include_router(campaigns_router, prefix="/api/v1")
-
-# Include Post Analytics routes - Campaign post analysis system
+# Include Post Analytics routes
 from app.api.post_analytics_routes import router as post_analytics_router
 app.include_router(post_analytics_router, prefix="/api/v1")
 

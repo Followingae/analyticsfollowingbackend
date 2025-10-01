@@ -13,15 +13,16 @@ from app.database.unified_models import Base
 
 class CampaignPostAnalytics(Base):
     """
-    Campaign Post Analytics - Instagram Post Analysis for Campaigns
+    Post Analytics - Instagram Post Analysis System
 
-    Using the existing campaign_post_analytics table structure
+    Standalone post analysis for individual Instagram posts
     """
     __tablename__ = "campaign_post_analytics"
 
     # Primary identification
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
-    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False)
+    # campaign_id removed - this is now standalone post analytics
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=True)
 
     # Post identification
     instagram_post_url = Column(Text, nullable=False)

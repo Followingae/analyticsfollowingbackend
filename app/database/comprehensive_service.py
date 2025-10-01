@@ -20,8 +20,7 @@ from app.resilience.database_resilience import database_resilience
 from .unified_models import (
     User, Profile, Post, UserProfileAccess, UserSearch, UserFavorite,
     AudienceDemographics, CreatorMetadata, CommentSentiment,
-    RelatedProfile, Mention, Campaign, CampaignPost, CampaignProfile,
-    UserList, UserListItem
+    RelatedProfile, Mention, UserList, UserListItem
 )
 from app.services.engagement_rate_service import EngagementRateService
 from app.services.location_detection_service import LocationDetectionService

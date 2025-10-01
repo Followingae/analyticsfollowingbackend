@@ -163,7 +163,6 @@ class User(Base):
     })
     
     # Relationships
-    campaigns = relationship("Campaign", back_populates="user", cascade="all, delete-orphan")
     user_profile_access = relationship("UserProfileAccess", back_populates="user", cascade="all, delete-orphan")
     user_searches = relationship("UserSearch", back_populates="user", cascade="all, delete-orphan")
     favorites = relationship("UserFavorite", back_populates="user", cascade="all, delete-orphan")
@@ -357,7 +356,6 @@ class Profile(Base):
     creator_metadata = relationship("CreatorMetadata", back_populates="profile", uselist=False, cascade="all, delete-orphan")
     related_profiles = relationship("RelatedProfile", back_populates="profile", cascade="all, delete-orphan")
     mentions = relationship("Mention", back_populates="profile", cascade="all, delete-orphan")
-    campaign_profiles = relationship("CampaignProfile", back_populates="profile")
     search_history = relationship("SearchHistory", back_populates="profile", cascade="all, delete-orphan")
     ai_analysis_jobs = relationship("AIAnalysisJob", back_populates="profile", cascade="all, delete-orphan")
     
@@ -471,8 +469,7 @@ class Post(Base):
     # Relationships
     profile = relationship("Profile", back_populates="posts")
     comment_sentiment = relationship("CommentSentiment", back_populates="post", cascade="all, delete-orphan")
-    campaign_posts = relationship("CampaignPost", back_populates="post")
-    
+
     __table_args__ = (
         Index('idx_posts_profile_timestamp', 'profile_id', 'taken_at_timestamp'),
         Index('idx_posts_engagement', 'likes_count', 'comments_count'),
@@ -622,96 +619,6 @@ class Mention(Base):
     __table_args__ = (
         Index('idx_mentions_username', 'mentioned_username'),
         Index('idx_mentions_type', 'mention_type'),
-    )
-
-
-# =============================================================================
-# CAMPAIGN MANAGEMENT TABLES (Real Platform Feature)
-# =============================================================================
-
-class Campaign(Base):
-    """User campaigns for influencer tracking"""
-    __tablename__ = "campaigns"
-    
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
-    
-    # Campaign details
-    name = Column(String(255), nullable=False)
-    description = Column(Text)
-    logo_url = Column(Text)
-    
-    # Campaign timing
-    start_date = Column(Date)
-    end_date = Column(Date)
-    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
-    
-    # Campaign status
-    status = Column(String(50), nullable=False, default='active')  # active, paused, completed, archived
-    
-    # Campaign settings
-    budget = Column(Float)
-    target_audience = Column(JSONB)  # Target demographics
-    campaign_goals = Column(JSONB)  # Goals and KPIs
-    
-    # Relationships
-    user = relationship("User", back_populates="campaigns")
-    campaign_posts = relationship("CampaignPost", back_populates="campaign", cascade="all, delete-orphan")
-    campaign_profiles = relationship("CampaignProfile", back_populates="campaign", cascade="all, delete-orphan")
-    
-    __table_args__ = (
-        Index('idx_campaigns_user_status', 'user_id', 'status'),
-        Index('idx_campaigns_dates', 'start_date', 'end_date'),
-    )
-
-
-class CampaignPost(Base):
-    """Posts associated with campaigns"""
-    __tablename__ = "campaign_posts"
-    
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
-    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
-    post_id = Column(UUID(as_uuid=True), ForeignKey('posts.id', ondelete='CASCADE'), nullable=False, index=True)
-    
-    # Association metadata
-    added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    role = Column(String(50))  # 'sponsored', 'organic', 'collaboration', 'mention'
-    performance_tier = Column(String(20))  # 'high', 'medium', 'low'
-    notes = Column(Text)
-    
-    # Relationships
-    campaign = relationship("Campaign", back_populates="campaign_posts")
-    post = relationship("Post", back_populates="campaign_posts")
-    
-    __table_args__ = (
-        Index('ix_campaign_posts_unique', 'campaign_id', 'post_id', unique=True),
-        Index('idx_campaign_posts_added', 'added_at'),
-    )
-
-
-class CampaignProfile(Base):
-    """Profiles tracked in campaigns (competitors, influencers, etc.)"""
-    __tablename__ = "campaign_profiles"
-    
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
-    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
-    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
-    
-    # Association metadata
-    added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    role = Column(String(50))  # 'competitor', 'inspiration', 'target_influencer', 'collaboration'
-    priority = Column(Integer, default=1)  # 1=high, 2=medium, 3=low
-    notes = Column(Text)
-    
-    # Relationships
-    campaign = relationship("Campaign", back_populates="campaign_profiles")
-    profile = relationship("Profile", back_populates="campaign_profiles")
-    
-    __table_args__ = (
-        Index('ix_campaign_profiles_unique', 'campaign_id', 'profile_id', unique=True),
-        Index('idx_campaign_profiles_role', 'role'),
-        Index('idx_campaign_profiles_priority', 'priority'),
     )
 
 
