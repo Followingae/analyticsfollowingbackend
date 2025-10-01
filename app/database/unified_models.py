@@ -169,7 +169,8 @@ class User(Base):
     user_lists = relationship("UserList", back_populates="user", cascade="all, delete-orphan")
     user_list_items = relationship("UserListItem", back_populates="user", cascade="all, delete-orphan")
     ai_analysis_jobs = relationship("AIAnalysisJob", back_populates="user", cascade="all, delete-orphan")
-    
+    campaigns = relationship("Campaign", back_populates="user", cascade="all, delete-orphan")
+
     # Admin-Brand Proposals relationships
     admin_proposals_created = relationship("AdminBrandProposal", foreign_keys="AdminBrandProposal.created_by_admin_id", back_populates="created_by_admin", cascade="all, delete-orphan")
     brand_proposals_received = relationship("AdminBrandProposal", foreign_keys="AdminBrandProposal.brand_user_id", back_populates="brand_user", cascade="all, delete-orphan")
@@ -358,6 +359,7 @@ class Profile(Base):
     mentions = relationship("Mention", back_populates="profile", cascade="all, delete-orphan")
     search_history = relationship("SearchHistory", back_populates="profile", cascade="all, delete-orphan")
     ai_analysis_jobs = relationship("AIAnalysisJob", back_populates="profile", cascade="all, delete-orphan")
+    campaign_creators = relationship("CampaignCreator", back_populates="profile", cascade="all, delete-orphan")
     
     __table_args__ = (
         Index('idx_profiles_username_lower', func.lower(username)),
@@ -469,6 +471,7 @@ class Post(Base):
     # Relationships
     profile = relationship("Profile", back_populates="posts")
     comment_sentiment = relationship("CommentSentiment", back_populates="post", cascade="all, delete-orphan")
+    campaign_posts = relationship("CampaignPost", back_populates="post", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index('idx_posts_profile_timestamp', 'profile_id', 'taken_at_timestamp'),
@@ -619,6 +622,89 @@ class Mention(Base):
     __table_args__ = (
         Index('idx_mentions_username', 'mentioned_username'),
         Index('idx_mentions_type', 'mention_type'),
+    )
+
+
+# =============================================================================
+# CAMPAIGN MODULE - Brand Campaign Management
+# =============================================================================
+
+class Campaign(Base):
+    """Brand campaigns for managing Instagram influencer collaborations"""
+    __tablename__ = "campaigns"
+
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Campaign details
+    name = Column(String(255), nullable=False)
+    brand_name = Column(String(255), nullable=False)
+    brand_logo_url = Column(Text)  # CDN URL for brand logo
+    status = Column(String(20), nullable=False, default='draft')  # draft, active, completed
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    user = relationship("User", back_populates="campaigns")
+    campaign_posts = relationship("CampaignPost", back_populates="campaign", cascade="all, delete-orphan")
+    campaign_creators = relationship("CampaignCreator", back_populates="campaign", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'active', 'completed')", name='campaigns_status_check'),
+        Index('idx_campaigns_user_id', 'user_id'),
+        Index('idx_campaigns_status', 'status'),
+        Index('idx_campaigns_created_at', 'created_at'),
+    )
+
+
+class CampaignPost(Base):
+    """Instagram posts associated with campaigns"""
+    __tablename__ = "campaign_posts"
+
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    post_id = Column(UUID(as_uuid=True), ForeignKey('posts.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Post metadata
+    instagram_post_url = Column(Text, nullable=False)
+    added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Relationships
+    campaign = relationship("Campaign", back_populates="campaign_posts")
+    post = relationship("Post", back_populates="campaign_posts")
+
+    __table_args__ = (
+        UniqueConstraint('campaign_id', 'post_id', name='unique_campaign_post'),
+        Index('idx_campaign_posts_campaign_id', 'campaign_id'),
+        Index('idx_campaign_posts_post_id', 'post_id'),
+        Index('idx_campaign_posts_added_at', 'added_at'),
+    )
+
+
+class CampaignCreator(Base):
+    """Unique creators/influencers in campaigns (auto-populated from posts)"""
+    __tablename__ = "campaign_creators"
+
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Creator metadata
+    added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Relationships
+    campaign = relationship("Campaign", back_populates="campaign_creators")
+    profile = relationship("Profile", back_populates="campaign_creators")
+
+    __table_args__ = (
+        UniqueConstraint('campaign_id', 'profile_id', name='unique_campaign_creator'),
+        Index('idx_campaign_creators_campaign_id', 'campaign_id'),
+        Index('idx_campaign_creators_profile_id', 'profile_id'),
     )
 
 
