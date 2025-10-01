@@ -173,18 +173,31 @@ async def list_campaigns(
             user_id=current_user.id
         )
 
-        campaigns_data = [
-            {
+        # Build campaigns data with per-campaign stats
+        campaigns_data = []
+        for c in campaigns:
+            # Get quick stats for this campaign
+            stats = await campaign_service.get_campaign_stats(
+                db=db,
+                campaign_id=c.id,
+                user_id=current_user.id
+            )
+
+            campaigns_data.append({
                 "id": str(c.id),
                 "name": c.name,
                 "brand_name": c.brand_name,
                 "brand_logo_url": c.brand_logo_url,
                 "status": c.status,
                 "created_at": c.created_at.isoformat(),
-                "updated_at": c.updated_at.isoformat()
-            }
-            for c in campaigns
-        ]
+                "updated_at": c.updated_at.isoformat(),
+
+                # Per-campaign statistics
+                "creators_count": stats["creators_count"],
+                "posts_count": stats["posts_count"],
+                "total_reach": stats["total_reach"],
+                "engagement_rate": stats["engagement_rate"]
+            })
 
         return {
             "success": True,
@@ -437,11 +450,20 @@ async def get_campaign_posts(
             user_id=current_user.id
         )
 
+        # Calculate total views across all posts
+        total_views = sum(post.get("views", 0) for post in posts)
+        total_likes = sum(post.get("likes", 0) for post in posts)
+        total_comments = sum(post.get("comments", 0) for post in posts)
+
         return {
             "success": True,
             "data": {
                 "posts": posts,
-                "total_posts": len(posts)
+                "total_posts": len(posts),
+                "total_views": total_views,
+                "total_likes": total_likes,
+                "total_comments": total_comments,
+                "total_engagement": total_likes + total_comments
             },
             "message": f"Retrieved {len(posts)} posts"
         }

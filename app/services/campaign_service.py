@@ -438,17 +438,13 @@ class CampaignService:
                     else:
                         post_type = "static"
 
-                # Get CDN thumbnail URL (512px version)
-                thumbnail_url = None
-                cdn_base = "https://cdn.following.ae"
-                if post.shortcode:
-                    # CDN path: thumbnails/{profile_username}/posts/{shortcode}/512.webp
-                    thumbnail_url = f"{cdn_base}/thumbnails/{profile.username}/posts/{post.shortcode}/512.webp"
+                # Get CDN thumbnail URL - use stored cdn_thumbnail_url or fallback to display_url
+                thumbnail_url = post.cdn_thumbnail_url or post.display_url
 
                 posts_data.append({
                     # Frontend required fields
                     "id": str(post.id),
-                    "thumbnail": thumbnail_url,  # CDN URL
+                    "thumbnail": thumbnail_url,  # CDN URL from cdn_thumbnail_url column
                     "url": cp.instagram_post_url,
                     "type": post_type,  # "static" | "reel" | "story"
                     "views": post.video_view_count if post.is_video else 0,
@@ -511,13 +507,10 @@ class CampaignService:
             if not campaign:
                 return []
 
-            # Get creators with relationships
+            # Get creators with relationships (removed audience_demographics selectinload - using ai_audience_insights instead)
             result = await db.execute(
                 select(CampaignCreator)
                 .where(CampaignCreator.campaign_id == campaign_id)
-                .options(
-                    selectinload(CampaignCreator.profile).selectinload(Profile.audience_demographics)
-                )
                 .order_by(desc(CampaignCreator.added_at))
             )
             campaign_creators = result.scalars().all()
@@ -526,7 +519,6 @@ class CampaignService:
             creators_data = []
             for cc in campaign_creators:
                 profile = cc.profile
-                demographics = profile.audience_demographics
 
                 # Get post count for this creator in campaign
                 post_count_result = await db.execute(
@@ -579,16 +571,28 @@ class CampaignService:
                     "ai_top_3_categories": profile.ai_top_3_categories,
                     "ai_content_quality_score": float(profile.ai_content_quality_score) if profile.ai_content_quality_score else 0.0,
 
-                    # Audience Demographics (if available)
+                    # Audience Demographics (extracted from ai_audience_insights)
                     "audience_demographics": None
                 }
 
-                if demographics:
+                # Extract demographics from AI insights (stored in profile.ai_audience_insights JSONB)
+                if profile.ai_audience_insights:
+                    ai_insights = profile.ai_audience_insights
+                    demographic_insights = ai_insights.get('demographic_insights', {})
+                    geographic_analysis = ai_insights.get('geographic_analysis', {})
+
+                    # Extract demographics from AI insights
+                    gender_split = demographic_insights.get('estimated_gender_split', {})
+                    age_groups = demographic_insights.get('estimated_age_groups', {})
+                    country_dist = geographic_analysis.get('country_distribution', {})
+                    location_dist = geographic_analysis.get('location_distribution', {})
+
+                    # Keep in 0-1 format for aggregation (aggregation function will convert to 0-100)
                     creator_data["audience_demographics"] = {
-                        "gender_distribution": demographics.gender_distribution,
-                        "age_distribution": demographics.age_distribution,
-                        "country_distribution": demographics.country_distribution,
-                        "city_distribution": demographics.city_distribution
+                        "gender_distribution": {k.upper(): v for k, v in gender_split.items()},
+                        "age_distribution": {k: v for k, v in age_groups.items()},
+                        "country_distribution": {k: v for k, v in country_dist.items()},
+                        "city_distribution": {k: v for k, v in location_dist.items()}
                     }
 
                 creators_data.append(creator_data)
@@ -633,16 +637,28 @@ class CampaignService:
             aggregated_country = {}
             aggregated_city = {}
 
-            for creator in creators:
-                followers = creator.get("followers_count", 0)
-                total_reach += followers
+            # Count creators with demographics
+            creators_with_demographics = [c for c in creators if c.get("audience_demographics")]
 
+            # Calculate total reach (only from creators with demographics)
+            for creator in creators_with_demographics:
+                total_reach += creator.get("followers_count", 0)
+
+            # If total reach is 0 (all creators have 0 followers), use equal weighting
+            use_equal_weight = (total_reach == 0)
+
+            for creator in creators_with_demographics:
                 demographics = creator.get("audience_demographics")
                 if not demographics:
                     continue
 
                 # Weighted aggregation based on follower count
-                weight = followers / max(total_reach, 1)  # Avoid division by zero
+                # Fallback to equal weight if all creators have 0 followers
+                if use_equal_weight:
+                    weight = 1.0 / len(creators_with_demographics)
+                else:
+                    followers = creator.get("followers_count", 0)
+                    weight = followers / total_reach
 
                 # Aggregate gender
                 gender_dist = demographics.get("gender_distribution", {})
@@ -679,15 +695,22 @@ class CampaignService:
                     return {k: round((v / total) * 100, 2) for k, v in d.items()}
                 return d
 
-            # Find top city
-            top_city = None
-            if aggregated_city:
-                normalized_cities = normalize_dict(aggregated_city)
-                top_city_name = max(normalized_cities, key=normalized_cities.get)
-                top_city = {
-                    "name": top_city_name,
-                    "percentage": normalized_cities[top_city_name]
+            # Helper to find top item from distribution
+            def find_top(distribution: dict):
+                if not distribution:
+                    return None
+                normalized = normalize_dict(distribution)
+                top_key = max(normalized, key=normalized.get)
+                return {
+                    "name": top_key,
+                    "percentage": normalized[top_key]
                 }
+
+            # Find top items for frontend
+            top_gender = find_top(aggregated_gender)
+            top_age_group = find_top(aggregated_age)
+            top_country = find_top(aggregated_country)
+            top_city = find_top(aggregated_city)
 
             result = {
                 "total_reach": total_reach,
@@ -696,7 +719,12 @@ class CampaignService:
                 "age_distribution": normalize_dict(aggregated_age),
                 "country_distribution": normalize_dict(aggregated_country),
                 "city_distribution": normalize_dict(aggregated_city),
-                "topCity": top_city  # Frontend required field
+
+                # Top items for frontend display
+                "topGender": top_gender,
+                "topAgeGroup": top_age_group,
+                "topCountry": top_country,
+                "topCity": top_city
             }
 
             logger.info(f"✅ Aggregated audience for campaign {campaign_id}")
@@ -705,6 +733,83 @@ class CampaignService:
         except Exception as e:
             logger.error(f"❌ Failed to aggregate campaign audience: {e}")
             raise
+
+    async def get_campaign_stats(
+        self,
+        db: AsyncSession,
+        campaign_id: UUID,
+        user_id: UUID
+    ) -> Dict[str, Any]:
+        """
+        Get quick statistics for a single campaign (for campaigns list page)
+
+        Args:
+            db: Database session
+            campaign_id: Campaign ID
+            user_id: User ID (for ownership check)
+
+        Returns:
+            Quick stats including creators_count, posts_count, total_reach, engagement_rate
+        """
+        try:
+            # Get campaign
+            campaign = await self.get_campaign(db, campaign_id, user_id)
+            if not campaign:
+                return {
+                    "creators_count": 0,
+                    "posts_count": 0,
+                    "total_reach": 0,
+                    "engagement_rate": 0.0
+                }
+
+            # Get counts using efficient queries
+            from app.database.unified_models import CampaignPost, CampaignProfile
+
+            # Count posts
+            posts_result = await db.execute(
+                select(func.count(CampaignPost.id))
+                .where(CampaignPost.campaign_id == campaign_id)
+            )
+            posts_count = posts_result.scalar() or 0
+
+            # Count creators and calculate total reach
+            creators_result = await db.execute(
+                select(CampaignProfile)
+                .where(CampaignProfile.campaign_id == campaign_id)
+                .options(selectinload(CampaignProfile.profile))
+            )
+            campaign_profiles = creators_result.scalars().all()
+
+            creators_count = len(campaign_profiles)
+            total_reach = sum(cp.profile.followers_count or 0 for cp in campaign_profiles)
+
+            # Calculate average engagement rate from campaign posts
+            posts_with_engagement = await db.execute(
+                select(Post.engagement_rate)
+                .join(CampaignPost, CampaignPost.post_id == Post.id)
+                .where(
+                    CampaignPost.campaign_id == campaign_id,
+                    Post.engagement_rate.isnot(None)
+                )
+            )
+            engagement_rates = [rate for (rate,) in posts_with_engagement.fetchall() if rate]
+            avg_engagement = sum(engagement_rates) / len(engagement_rates) if engagement_rates else 0.0
+
+            return {
+                "creators_count": creators_count,
+                "posts_count": posts_count,
+                "total_reach": total_reach,
+                "engagement_rate": round(avg_engagement, 4)
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get campaign stats: {e}")
+            return {
+                "creators_count": 0,
+                "posts_count": 0,
+                "total_reach": 0,
+                "engagement_rate": 0.0
+            }
 
 
 # Global service instance

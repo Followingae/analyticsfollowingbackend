@@ -519,21 +519,33 @@ class ComprehensiveDataService:
                     continue
                 
                 print(f" DATABASE: Processing post {i}/{len(posts_edges)} (shortcode: {shortcode})")
-                
-                # Check if post already exists
+
+                # Check if post already exists (by shortcode globally, not just profile_id)
                 result = await db.execute(
-                    select(Post).where(
-                        and_(
-                            Post.profile_id == profile_id,
-                            Post.shortcode == shortcode
-                        )
-                    )
+                    select(Post).where(Post.shortcode == shortcode)
                 )
                 existing_post = result.scalar_one_or_none()
-                
+
                 if existing_post:
-                    print(f" DATABASE: Post {shortcode} already exists, skipping")
-                    posts_skipped += 1
+                    # Post exists - update if profile_id matches, otherwise skip
+                    if existing_post.profile_id == profile_id:
+                        print(f" DATABASE: Post {shortcode} exists for this profile, updating...")
+                        # Update existing post with new data
+                        post_data = self._map_post_data_comprehensive(post_node, profile_id)
+                        post_data = EngagementRateService.enhance_post_data_with_engagement(
+                            post_data, followers_count
+                        )
+
+                        # Update only fields that exist in Post model
+                        for key, value in post_data.items():
+                            if hasattr(Post, key):
+                                setattr(existing_post, key, value)
+
+                        posts_skipped += 1  # Count as skipped for simplicity
+                        print(f" DATABASE: Post {shortcode} updated")
+                    else:
+                        print(f" DATABASE: Post {shortcode} exists for different profile (ID: {existing_post.profile_id}), skipping")
+                        posts_skipped += 1
                     continue
                 
                 print(f" DATABASE: Creating new post {shortcode}...")

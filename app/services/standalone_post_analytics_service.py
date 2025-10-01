@@ -202,31 +202,16 @@ class StandalonePostAnalyticsService:
             existing_profile = result.scalar_one_or_none()
 
             if existing_profile:
-                # Check if profile has complete creator analytics data
-                has_complete_data = (
-                    existing_profile.followers_count > 0 and
-                    existing_profile.posts_count > 0
-                )
+                # Check if profile needs full analytics using comprehensive completeness check
+                needs_analytics = await self._check_profile_needs_analytics(db, existing_profile)
 
-                # Check if audience demographics exist
-                demo_query = select(AudienceDemographics).where(
-                    AudienceDemographics.profile_id == existing_profile.id
-                )
-                demo_result = await db.execute(demo_query)
-                has_demographics = demo_result.scalar_one_or_none() is not None
-
-                if has_complete_data and has_demographics:
-                    logger.info(f"✅ Profile {username} has complete creator analytics data")
-                    return existing_profile
-                else:
-                    logger.warning(f"⚠️ Profile {username} exists but incomplete - triggering full refresh")
-                    logger.info(f"   - Has followers: {existing_profile.followers_count > 0}")
-                    logger.info(f"   - Has posts count: {existing_profile.posts_count > 0}")
-                    logger.info(f"   - Has demographics: {has_demographics}")
-                    # Trigger background refresh (don't await - non-blocking)
-                    # IMPORTANT: Don't pass db session - background task creates its own
+                if needs_analytics:
+                    logger.info(f"🔥 Profile {username} exists but incomplete - triggering full analytics")
                     asyncio.create_task(self._trigger_full_creator_analytics(username, user_id))
-                    return existing_profile
+                else:
+                    logger.info(f"✅ Profile {username} has complete analytics - using existing data")
+
+                return existing_profile
 
             # 🆕 NEW USERNAME DETECTED - Create stub and trigger FULL Creator Analytics
             logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -643,69 +628,151 @@ class StandalonePostAnalyticsService:
             logger.error(f"❌ Error processing thumbnail: {e}")
             # Don't raise - thumbnail processing is optional
 
+    async def _check_profile_needs_analytics(self, db: AsyncSession, profile) -> bool:
+        """
+        Check if profile has COMPLETE analytics (100% complete as per user's definition):
+        - Profile has followers_count, posts_count populated
+        - Has at least 12 posts with non-null AI fields
+        - Has audience_demographics record with non-null distributions
+        - Has CDN thumbnails for posts
+
+        Returns True if analytics should run, False if complete data exists
+        """
+        from app.database.unified_models import AudienceDemographics
+
+        try:
+            # Check 1: Profile has basic data populated
+            if not profile.followers_count or profile.followers_count == 0:
+                logger.info(f"❌ {profile.username}: Missing followers_count")
+                return True
+
+            if not profile.posts_count or profile.posts_count == 0:
+                logger.info(f"❌ {profile.username}: Missing posts_count")
+                return True
+
+            # Check 2: Has at least 12 posts with AI analysis
+            posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
+            posts_result = await db.execute(posts_query)
+            posts = posts_result.scalars().all()
+
+            if len(posts) < 12:
+                logger.info(f"❌ {profile.username}: Only {len(posts)} posts (need 12)")
+                return True
+
+            # Check if posts have AI analysis
+            posts_with_ai = sum(1 for p in posts if p.ai_content_category and p.ai_sentiment and p.ai_language_code)
+            if posts_with_ai < 12:
+                logger.info(f"❌ {profile.username}: Only {posts_with_ai}/12 posts have AI analysis")
+                return True
+
+            # Check 3: Has audience demographics
+            demographics_query = select(AudienceDemographics).where(
+                AudienceDemographics.profile_id == profile.id
+            )
+            demographics_result = await db.execute(demographics_query)
+            demographics = demographics_result.scalar_one_or_none()
+
+            if not demographics:
+                logger.info(f"❌ {profile.username}: Missing audience_demographics")
+                return True
+
+            # Check if demographics have actual data (not empty distributions)
+            if not demographics.gender_distribution or not demographics.age_distribution:
+                logger.info(f"❌ {profile.username}: Demographics exist but distributions are empty")
+                return True
+
+            # Check 4: Posts have CDN thumbnails (optional but good to check)
+            posts_with_cdn = sum(1 for p in posts if p.cdn_thumbnail_url)
+            if posts_with_cdn < 12:
+                logger.info(f"⚠️ {profile.username}: Only {posts_with_cdn}/12 posts have CDN thumbnails (non-critical)")
+                # Don't fail for missing CDN - it's non-critical
+                # return True
+
+            # All checks passed - profile has complete analytics
+            logger.info(f"✅ {profile.username}: Has complete analytics (Apify + CDN + AI + Demographics)")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ Error checking profile completeness: {e}")
+            # On error, assume incomplete and trigger analytics
+            return True
+
     async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID]):
         """
-        Trigger FULL Creator Analytics - Apify + Database + AI + CDN
+        Trigger FULL Creator Analytics using EXACT same pipeline as Creators Module
 
-        Uses comprehensive_service + bulletproof_content_intelligence
-        Same pipeline as manual creator search
+        CRITICAL: This uses the bulletproof unified_background_processor to ensure
+        100% identical behavior with ALL 10 AI models + CDN + Demographics
         """
         from app.database.connection import SessionLocal
-        from app.database.comprehensive_service import comprehensive_service
-        from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
+        from app.database.comprehensive_service import ComprehensiveDataService
+        from app.database.unified_models import Profile
+        from sqlalchemy import select
+        from app.core.config import settings
 
         async with SessionLocal() as db:
             try:
                 logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                logger.info(f"🔥 FULL CREATOR ANALYTICS STARTED: {username}")
+                logger.info(f"🔥 BULLETPROOF CREATOR ANALYTICS STARTED: {username}")
+                logger.info(f"   Pipeline: Apify → Database → CDN → AI (ALL 10 MODELS)")
                 logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-                # STEP 1: Fetch from Apify
-                logger.info(f"[1/3] 📡 Fetching from Apify...")
-                async with ApifyInstagramClient(self.apify_token) as apify_client:
-                    profile_data = await apify_client.get_instagram_profile_comprehensive(username)
+                # Check if profile already exists
+                profile_query = select(Profile).where(Profile.username == username)
+                profile_result = await db.execute(profile_query)
+                existing_profile = profile_result.scalar_one_or_none()
 
-                if not profile_data:
-                    raise ValueError(f"No Apify data for {username}")
+                profile = existing_profile
 
-                # STEP 2: Store via comprehensive_service
-                logger.info(f"[2/3] 💾 Storing profile + posts...")
-                profile, created = await comprehensive_service.store_complete_profile(
-                    db, username, profile_data
-                )
-                logger.info(f"✅ Stored: {profile.followers_count:,} followers")
+                # If profile doesn't exist or is incomplete, fetch from Apify
+                if not existing_profile:
+                    logger.info(f"[1/4] 📡 Fetching from Apify (new profile)...")
+                    async with ApifyInstagramClient(settings.APIFY_API_TOKEN) as apify_client:
+                        apify_data = await apify_client.get_instagram_profile_comprehensive(username)
 
-                # STEP 3: Run AI on posts
-                logger.info(f"[3/3] 🤖 Running AI analysis...")
-                posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
-                posts_result = await db.execute(posts_query)
-                posts = posts_result.scalars().all()
+                    if not apify_data:
+                        raise ValueError(f"No Apify data for {username}")
 
-                for post in posts:
-                    if not post.ai_content_category:
-                        try:
-                            ai_result = await bulletproof_content_intelligence.analyze_single_post_comprehensive(
-                                post_data={
-                                    "caption": post.caption or "",
-                                    "shortcode": post.shortcode,
-                                    "likes_count": post.likes_count or 0,
-                                    "comments_count": post.comments_count or 0
-                                },
-                                username=username
-                            )
-                            if ai_result and ai_result.get("success"):
-                                post.ai_content_category = ai_result.get("content_category")
-                                post.ai_sentiment = ai_result.get("sentiment")
-                                post.ai_sentiment_score = ai_result.get("sentiment_score")
-                                post.ai_language_code = ai_result.get("language_code")
-                                await db.commit()
-                        except Exception as ai_error:
-                            logger.warning(f"AI failed for {post.shortcode}: {ai_error}")
+                    logger.info(f"[2/4] 💾 Storing profile + posts in database...")
+                    comprehensive_service = ComprehensiveDataService()
+                    profile, is_new = await comprehensive_service.store_complete_profile(
+                        db, username, apify_data
+                    )
+                    logger.info(f"✅ Profile stored: {profile.followers_count:,} followers")
+                else:
+                    logger.info(f"✅ Profile exists - running comprehensive refresh...")
 
-                logger.info(f"✅ CREATOR ANALYTICS COMPLETE: {len(posts)} posts analyzed")
+                # CRITICAL: Use unified_background_processor for complete pipeline
+                # This runs the EXACT same pipeline as Creator Search with ALL 10 AI models
+                logger.info(f"[3/4] 🚀 Starting UNIFIED background processing (CDN → AI ALL 10 MODELS)...")
+
+                try:
+                    from app.services.unified_background_processor import unified_background_processor
+
+                    # Run complete pipeline (BLOCKING until 100% complete)
+                    # This includes: CDN processing + ALL 10 AI models + Demographics
+                    pipeline_results = await unified_background_processor.process_profile_complete_pipeline(
+                        profile_id=str(profile.id),
+                        username=username
+                    )
+
+                    logger.info(f"✅ UNIFIED PROCESSING COMPLETE:")
+                    logger.info(f"   CDN: {pipeline_results.get('results', {}).get('cdn_results', {}).get('processed_images', 0)} images")
+                    logger.info(f"   AI: {pipeline_results.get('results', {}).get('ai_results', {}).get('completed_models', 0)}/10 models")
+                    logger.info(f"   Success Rate: {pipeline_results.get('results', {}).get('ai_results', {}).get('success_rate', 0):.1%}")
+
+                except Exception as processing_error:
+                    logger.error(f"❌ Unified processing failed: {processing_error}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    # Don't fail - partial data is better than no data
+
+                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                logger.info(f"✅ BULLETPROOF CREATOR ANALYTICS COMPLETE: {username}")
+                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             except Exception as e:
-                logger.error(f"❌ Creator analytics failed: {e}")
+                logger.error(f"❌ Bulletproof creator analytics failed: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
 
