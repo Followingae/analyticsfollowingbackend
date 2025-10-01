@@ -254,14 +254,18 @@ class ProductionSupabaseAuthService:
             async with asyncio.timeout(60.0):  # 60 second timeout (industry standard)
                 async with async_engine.connect() as conn:  # ENTERPRISE: Use connect() for read operations (faster)
                     # OPTIMIZED: Enterprise-grade login query with performance hints
-                    result = await conn.execute(text("""
-                        SELECT id, email, full_name, role, status, created_at, last_login,
-                               profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name,
-                               company, job_title, phone_number, bio, timezone, language, updated_at
-                        FROM users
-                        WHERE supabase_user_id = :user_id
-                        LIMIT 1
-                    """), {"user_id": supabase_user.id})
+                    # PGBOUNCER FIX: Use execution_options(synchronize_session=False) for transaction pooling mode
+                    result = await conn.execute(
+                        text("""
+                            SELECT id, email, full_name, role, status, created_at, last_login,
+                                   profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name,
+                                   company, job_title, phone_number, bio, timezone, language, updated_at
+                            FROM users
+                            WHERE supabase_user_id = :user_id
+                            LIMIT 1
+                        """).execution_options(synchronize_session=False),
+                        {"user_id": supabase_user.id}
+                    )
                 
                 user_row = result.fetchone()
                 
@@ -447,7 +451,8 @@ class ProductionSupabaseAuthService:
                     async with SessionLocal() as db:
                         # ENTERPRISE: Optimize for fast login performance
                         from sqlalchemy import text
-                        await db.execute(text("SET statement_timeout = '45s'"))  # Increased timeout for stability
+                        # PGBOUNCER FIX: Use execution_options(synchronize_session=False) for transaction pooling mode
+                        await db.execute(text("SET statement_timeout = '45s'").execution_options(synchronize_session=False))  # Increased timeout for stability
                         
                         # ENFORCE: Check if user exists by Supabase ID ONLY (never create duplicates)
                         logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id} (attempt {attempt + 1})")
@@ -907,69 +912,73 @@ class ProductionSupabaseAuthService:
             async with asyncio.timeout(5.0):  # Industry standard: aggressive timeout for UX
 
                 # ENTERPRISE OPTIMIZATION: Single CTE query for ALL dashboard data
-                result = await db.execute(text("""
-                    WITH user_data AS (
-                        SELECT id, created_at
-                        FROM users
-                        WHERE supabase_user_id = :user_id
-                        LIMIT 1
-                    ),
-                    search_stats AS (
+                # PGBOUNCER FIX: Use execution_options(synchronize_session=False) for transaction pooling mode
+                result = await db.execute(
+                    text("""
+                        WITH user_data AS (
+                            SELECT id, created_at
+                            FROM users
+                            WHERE supabase_user_id = :user_id
+                            LIMIT 1
+                        ),
+                        search_stats AS (
+                            SELECT
+                                COALESCE(COUNT(*), 0) as total_searches,
+                                COALESCE(COUNT(*) FILTER (WHERE search_timestamp >= date_trunc('month', CURRENT_DATE)), 0) as searches_this_month
+                            FROM user_searches us
+                            INNER JOIN user_data ud ON us.user_id = ud.id
+                        ),
+                        recent_searches AS (
+                            SELECT
+                                us.id::text as search_id,
+                                us.user_id::text as search_user_id,
+                                us.instagram_username,
+                                us.search_timestamp,
+                                us.analysis_type,
+                                COALESCE(us.search_metadata, '{}'::jsonb) as search_metadata
+                            FROM user_searches us
+                            INNER JOIN user_data ud ON us.user_id = ud.id
+                            ORDER BY us.search_timestamp DESC
+                            LIMIT 10
+                        ),
+                        favorite_profiles AS (
+                            SELECT p.username
+                            FROM user_profile_access upa
+                            INNER JOIN profiles p ON p.id = upa.profile_id
+                            INNER JOIN user_data ud ON upa.user_id = ud.id
+                            ORDER BY upa.granted_at DESC
+                            LIMIT 10
+                        )
                         SELECT
-                            COALESCE(COUNT(*), 0) as total_searches,
-                            COALESCE(COUNT(*) FILTER (WHERE search_timestamp >= date_trunc('month', CURRENT_DATE)), 0) as searches_this_month
-                        FROM user_searches us
-                        INNER JOIN user_data ud ON us.user_id = ud.id
-                    ),
-                    recent_searches AS (
-                        SELECT
-                            us.id::text as search_id,
-                            us.user_id::text as search_user_id,
-                            us.instagram_username,
-                            us.search_timestamp,
-                            us.analysis_type,
-                            COALESCE(us.search_metadata, '{}'::jsonb) as search_metadata
-                        FROM user_searches us
-                        INNER JOIN user_data ud ON us.user_id = ud.id
-                        ORDER BY us.search_timestamp DESC
-                        LIMIT 10
-                    ),
-                    favorite_profiles AS (
-                        SELECT p.username
-                        FROM user_profile_access upa
-                        INNER JOIN profiles p ON p.id = upa.profile_id
-                        INNER JOIN user_data ud ON upa.user_id = ud.id
-                        ORDER BY upa.granted_at DESC
-                        LIMIT 10
-                    )
-                    SELECT
-                        ud.id as user_id,
-                        ud.created_at,
-                        COALESCE(ss.total_searches, 0) as total_searches,
-                        COALESCE(ss.searches_this_month, 0) as searches_this_month,
-                        COALESCE(
-                            json_agg(
-                                json_build_object(
-                                    'id', rs.search_id,
-                                    'user_id', rs.search_user_id,
-                                    'instagram_username', rs.instagram_username,
-                                    'search_timestamp', rs.search_timestamp,
-                                    'analysis_type', rs.analysis_type,
-                                    'search_metadata', rs.search_metadata
-                                ) ORDER BY rs.search_timestamp DESC
-                            ) FILTER (WHERE rs.search_id IS NOT NULL),
-                            '[]'::json
-                        ) as recent_searches_json,
-                        COALESCE(
-                            array_agg(fp.username ORDER BY fp.username) FILTER (WHERE fp.username IS NOT NULL),
-                            ARRAY[]::text[]
-                        ) as favorite_profiles_array
-                    FROM user_data ud
-                    LEFT JOIN search_stats ss ON true
-                    LEFT JOIN recent_searches rs ON true
-                    LEFT JOIN favorite_profiles fp ON true
-                    GROUP BY ud.id, ud.created_at, ss.total_searches, ss.searches_this_month
-                """), {"user_id": str(user_id)})
+                            ud.id as user_id,
+                            ud.created_at,
+                            COALESCE(ss.total_searches, 0) as total_searches,
+                            COALESCE(ss.searches_this_month, 0) as searches_this_month,
+                            COALESCE(
+                                json_agg(
+                                    json_build_object(
+                                        'id', rs.search_id,
+                                        'user_id', rs.search_user_id,
+                                        'instagram_username', rs.instagram_username,
+                                        'search_timestamp', rs.search_timestamp,
+                                        'analysis_type', rs.analysis_type,
+                                        'search_metadata', rs.search_metadata
+                                    ) ORDER BY rs.search_timestamp DESC
+                                ) FILTER (WHERE rs.search_id IS NOT NULL),
+                                '[]'::json
+                            ) as recent_searches_json,
+                            COALESCE(
+                                array_agg(fp.username ORDER BY fp.username) FILTER (WHERE fp.username IS NOT NULL),
+                                ARRAY[]::text[]
+                            ) as favorite_profiles_array
+                        FROM user_data ud
+                        LEFT JOIN search_stats ss ON true
+                        LEFT JOIN recent_searches rs ON true
+                        LEFT JOIN favorite_profiles fp ON true
+                        GROUP BY ud.id, ud.created_at, ss.total_searches, ss.searches_this_month
+                    """).execution_options(synchronize_session=False),
+                    {"user_id": str(user_id)}
+                )
 
                 row = result.fetchone()
 

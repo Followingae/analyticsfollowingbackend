@@ -433,14 +433,18 @@ async def get_user_dashboard(
         # Enterprise-grade dashboard with balanced timeout for stability
         async with asyncio.timeout(30.0):  # ✅ PRODUCTION: Standard timeout
             # Get user profile data with optimized query
-            user_result = await db_session.execute(text("""
-                SELECT id, email, full_name, role, status, created_at, last_login,
-                       avatar_config, company, job_title, phone_number, bio,
-                       timezone, language, updated_at
-                FROM users
-                WHERE supabase_user_id = :user_id
-                LIMIT 1
-            """), {"user_id": current_user.id})
+            # PGBOUNCER FIX: Use execution_options(prepare=False) for transaction pooling mode
+            user_result = await db_session.execute(
+                text("""
+                    SELECT id, email, full_name, role, status, created_at, last_login,
+                           avatar_config, company, job_title, phone_number, bio,
+                           timezone, language, updated_at
+                    FROM users
+                    WHERE supabase_user_id = :user_id
+                    LIMIT 1
+                """).execution_options(synchronize_session=False),
+                {"user_id": current_user.id}
+            )
 
             user_row = user_result.fetchone()
             if not user_row:
@@ -476,16 +480,20 @@ async def get_user_dashboard(
             )
 
             # Get team data if user is part of a team - optimized query
-            team_result = await db_session.execute(text("""
-                SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
-                       t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
-                       t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
-                FROM teams t
-                JOIN team_members tm ON t.id = tm.team_id
-                JOIN users u ON tm.user_id = u.id
-                WHERE u.supabase_user_id = :user_id
-                LIMIT 1
-            """), {"user_id": current_user.id})
+            # PGBOUNCER FIX: Use execution_options(prepare=False) for transaction pooling mode
+            team_result = await db_session.execute(
+                text("""
+                    SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
+                           t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
+                           t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
+                    FROM teams t
+                    JOIN team_members tm ON t.id = tm.team_id
+                    JOIN users u ON tm.user_id = u.id
+                    WHERE u.supabase_user_id = :user_id
+                    LIMIT 1
+                """).execution_options(synchronize_session=False),
+                {"user_id": current_user.id}
+            )
 
             team_row = team_result.fetchone()
             team_info = None
