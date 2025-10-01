@@ -167,6 +167,12 @@ async def list_campaigns(
             offset=offset
         )
 
+        # Get summary statistics (Frontend required)
+        summary = await campaign_service.get_campaigns_summary(
+            db=db,
+            user_id=current_user.id
+        )
+
         campaigns_data = [
             {
                 "id": str(c.id),
@@ -184,6 +190,7 @@ async def list_campaigns(
             "success": True,
             "data": {
                 "campaigns": campaigns_data,
+                "summary": summary,  # Frontend required: totalCampaigns, totalCreators, totalReach, avgEngagementRate
                 "pagination": {
                     "limit": limit,
                     "offset": offset,

@@ -146,6 +146,64 @@ class CampaignService:
             logger.error(f"❌ Failed to list campaigns: {e}")
             raise
 
+    async def get_campaigns_summary(
+        self,
+        db: AsyncSession,
+        user_id: UUID
+    ) -> Dict[str, Any]:
+        """
+        Get summary statistics across all user's campaigns
+
+        Args:
+            db: Database session
+            user_id: User ID
+
+        Returns:
+            Summary statistics (totalCampaigns, totalCreators, totalReach, avgEngagementRate)
+        """
+        try:
+            # Get all campaigns
+            all_campaigns = await self.list_campaigns(db, user_id, limit=1000)
+
+            total_campaigns = len(all_campaigns)
+            total_creators = 0
+            total_reach = 0
+            total_engagement = 0.0
+            engagement_count = 0
+
+            # Aggregate across all campaigns
+            for campaign in all_campaigns:
+                # Get creators for this campaign
+                creators = await self.get_campaign_creators(db, campaign.id, user_id)
+
+                # Count unique creators and accumulate reach
+                for creator in creators:
+                    total_creators += 1
+                    total_reach += creator.get("followers_count", 0)
+
+                    # Accumulate engagement rate
+                    avg_engagement = creator.get("avg_engagement_rate", 0)
+                    if avg_engagement > 0:
+                        total_engagement += avg_engagement
+                        engagement_count += 1
+
+            # Calculate average engagement rate
+            avg_engagement_rate = (total_engagement / engagement_count) if engagement_count > 0 else 0.0
+
+            summary = {
+                "totalCampaigns": total_campaigns,
+                "totalCreators": total_creators,
+                "totalReach": total_reach,
+                "avgEngagementRate": round(avg_engagement_rate, 2)
+            }
+
+            logger.info(f"✅ Campaign summary: {summary}")
+            return summary
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get campaigns summary: {e}")
+            raise
+
     async def update_campaign(
         self,
         db: AsyncSession,
@@ -369,22 +427,44 @@ class CampaignService:
                 post = cp.post
                 profile = post.profile
 
+                # Determine post type from media_type
+                post_type = "static"  # Default
+                if post.media_type:
+                    media_type_lower = post.media_type.lower()
+                    if "video" in media_type_lower or post.is_video:
+                        post_type = "reel"
+                    elif "sidecar" in media_type_lower or "carousel" in media_type_lower:
+                        post_type = "static"  # Carousel is considered static
+                    else:
+                        post_type = "static"
+
+                # Get CDN thumbnail URL (512px version)
+                thumbnail_url = None
+                cdn_base = "https://cdn.following.ae"
+                if post.shortcode:
+                    # CDN path: thumbnails/{profile_username}/posts/{shortcode}/512.webp
+                    thumbnail_url = f"{cdn_base}/thumbnails/{profile.username}/posts/{post.shortcode}/512.webp"
+
                 posts_data.append({
+                    # Frontend required fields
+                    "id": str(post.id),
+                    "thumbnail": thumbnail_url,  # CDN URL
+                    "url": cp.instagram_post_url,
+                    "type": post_type,  # "static" | "reel" | "story"
+                    "views": post.video_view_count if post.is_video else 0,
+                    "likes": post.likes_count or 0,
+                    "comments": post.comments_count or 0,
+                    "engagementRate": float(post.engagement_rate) if post.engagement_rate else 0.0,
+
+                    # Additional fields
                     "campaign_post_id": str(cp.id),
                     "post_id": str(post.id),
                     "instagram_post_url": cp.instagram_post_url,
                     "added_at": cp.added_at.isoformat(),
-
-                    # Post data
                     "shortcode": post.shortcode,
                     "caption": post.caption,
                     "media_type": post.media_type,
                     "display_url": post.display_url,
-
-                    # Engagement
-                    "likes_count": post.likes_count,
-                    "comments_count": post.comments_count,
-                    "engagement_rate": float(post.engagement_rate) if post.engagement_rate else 0.0,
 
                     # AI Analysis
                     "ai_content_category": post.ai_content_category,
@@ -551,6 +631,7 @@ class CampaignService:
             aggregated_gender = {}
             aggregated_age = {}
             aggregated_country = {}
+            aggregated_city = {}
 
             for creator in creators:
                 followers = creator.get("followers_count", 0)
@@ -584,6 +665,13 @@ class CampaignService:
                         aggregated_country[country] = 0
                     aggregated_country[country] += percentage * weight
 
+                # Aggregate city
+                city_dist = demographics.get("city_distribution", {})
+                for city, percentage in city_dist.items():
+                    if city not in aggregated_city:
+                        aggregated_city[city] = 0
+                    aggregated_city[city] += percentage * weight
+
             # Normalize percentages (should sum to ~100)
             def normalize_dict(d: dict) -> dict:
                 total = sum(d.values())
@@ -591,12 +679,24 @@ class CampaignService:
                     return {k: round((v / total) * 100, 2) for k, v in d.items()}
                 return d
 
+            # Find top city
+            top_city = None
+            if aggregated_city:
+                normalized_cities = normalize_dict(aggregated_city)
+                top_city_name = max(normalized_cities, key=normalized_cities.get)
+                top_city = {
+                    "name": top_city_name,
+                    "percentage": normalized_cities[top_city_name]
+                }
+
             result = {
                 "total_reach": total_reach,
                 "total_creators": len(creators),
                 "gender_distribution": normalize_dict(aggregated_gender),
                 "age_distribution": normalize_dict(aggregated_age),
-                "country_distribution": normalize_dict(aggregated_country)
+                "country_distribution": normalize_dict(aggregated_country),
+                "city_distribution": normalize_dict(aggregated_city),
+                "topCity": top_city  # Frontend required field
             }
 
             logger.info(f"✅ Aggregated audience for campaign {campaign_id}")
