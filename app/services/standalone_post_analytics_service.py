@@ -15,7 +15,7 @@ import uuid as uuid_lib
 import json
 
 from app.scrapers.apify_instagram_client import ApifyInstagramClient, ApifyProfileNotFoundError, ApifyAPIError
-from app.database.unified_models import Post, Profile, AudienceDemographics
+from app.database.unified_models import Post, Profile, AudienceDemographics, AudienceDemographic
 from app.database.post_analytics_models import CampaignPostAnalytics
 from app.core.config import settings
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
@@ -689,29 +689,14 @@ class StandalonePostAnalyticsService:
                 # STEP 3: CDN Processing (profile picture + thumbnails)
                 logger.info(f"[STEP 3/4] 🖼️  Processing CDN (profile + thumbnails)...")
 
-                # Trigger CDN sync for profile picture
-                try:
-                    await cdn_sync_service.ensure_profile_cdn_synced(
-                        db, str(profile.id), username
-                    )
-                    logger.info(f"✅ Profile picture CDN sync queued")
-                except Exception as e:
-                    logger.error(f"⚠️ Profile CDN sync failed: {e}")
+                # Get posts for later use
+                posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
+                posts_result = await db.execute(posts_query)
+                posts = posts_result.scalars().all()
 
-                # Trigger CDN sync for post thumbnails
-                try:
-                    posts_query = select(Post).where(Post.profile_id == profile.id).limit(12)
-                    posts_result = await db.execute(posts_query)
-                    posts = posts_result.scalars().all()
-
-                    post_ids = [post.instagram_post_id for post in posts if post.instagram_post_id]
-                    if post_ids:
-                        await cdn_sync_service.ensure_posts_cdn_synced(
-                            db, str(profile.id), username, post_ids
-                        )
-                        logger.info(f"✅ Post thumbnails CDN sync queued ({len(post_ids)} posts)")
-                except Exception as e:
-                    logger.error(f"⚠️ Posts CDN sync failed: {e}")
+                # NOTE: CDN sync is handled automatically by comprehensive_service during profile storage
+                # Profile picture and post thumbnails are processed in real-time
+                logger.info(f"✅ CDN processing handled by comprehensive service (profile + {len(posts)} posts)")
 
                 # STEP 4: AI Analysis (all 10 models - runs automatically)
                 logger.info(f"[STEP 4/4] 🤖 AI Analysis (10 models)...")
@@ -726,7 +711,12 @@ class StandalonePostAnalyticsService:
                 logger.info(f"📊 Complete data now available for Campaign Module")
                 logger.info(f"   - followers_count: {profile.followers_count:,}")
                 logger.info(f"   - posts_count: {profile.posts_count}")
-                logger.info(f"   - audience_demographics: {'✅' if hasattr(profile, 'audience_demographics') else '⏳ Processing'}")
+                # Check for demographics without triggering lazy load
+                demographics_check = await db.execute(
+                    select(AudienceDemographic).where(AudienceDemographic.profile_id == profile.id).limit(1)
+                )
+                has_demographics = demographics_check.scalar_one_or_none() is not None
+                logger.info(f"   - audience_demographics: {'✅' if has_demographics else '⏳ Processing'}")
                 logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             except ApifyProfileNotFoundError:
