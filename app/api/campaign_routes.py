@@ -3,7 +3,8 @@ Campaign API Routes - Brand Campaign Management
 Complete CRUD operations for campaigns, posts, and creators
 """
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, UploadFile, File, Query
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 from uuid import UUID
@@ -15,6 +16,8 @@ from app.middleware.auth_middleware import get_current_active_user
 from app.database.connection import get_db
 from app.services.campaign_service import campaign_service
 from app.services.standalone_post_analytics_service import standalone_post_analytics_service
+from app.services.brand_logo_service import brand_logo_service
+from app.services.campaign_export_service import campaign_export_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
@@ -530,6 +533,273 @@ async def get_campaign_audience(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve campaign audience"
+        )
+
+# =============================================================================
+# BRAND LOGO UPLOAD
+# =============================================================================
+
+@router.post("/{campaign_id}/logo")
+async def upload_brand_logo(
+    campaign_id: UUID,
+    logo: UploadFile = File(...),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Upload brand logo for campaign
+
+    Accepts image file (PNG, JPEG, WEBP) up to 5MB.
+    Logo will be resized to 512x512 and converted to WEBP for optimal CDN delivery.
+
+    Request:
+    - Multipart form data with 'logo' field containing the image file
+
+    Returns:
+    - CDN URL of the uploaded logo
+    """
+    try:
+        # Verify campaign ownership
+        campaign = await campaign_service.get_campaign(
+            db=db,
+            campaign_id=campaign_id,
+            user_id=current_user.id
+        )
+
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found"
+            )
+
+        # Read file content
+        content = await logo.read()
+
+        # Upload to R2
+        success, cdn_url, error_message = await brand_logo_service.upload_brand_logo(
+            image_content=content,
+            campaign_id=campaign_id,
+            user_id=current_user.id
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_message or "Failed to upload logo"
+            )
+
+        # Update campaign with new logo URL
+        await campaign_service.update_campaign(
+            db=db,
+            campaign_id=campaign_id,
+            user_id=current_user.id,
+            brand_logo_url=cdn_url
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "cdn_url": cdn_url,
+                "campaign_id": str(campaign_id)
+            },
+            "message": "Brand logo uploaded successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error uploading brand logo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to upload brand logo"
+        )
+
+@router.delete("/{campaign_id}/logo")
+async def delete_brand_logo(
+    campaign_id: UUID,
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Delete brand logo from campaign
+
+    Removes the logo from R2 storage and updates campaign.
+    """
+    try:
+        # Verify campaign ownership
+        campaign = await campaign_service.get_campaign(
+            db=db,
+            campaign_id=campaign_id,
+            user_id=current_user.id
+        )
+
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found"
+            )
+
+        if not campaign.brand_logo_url:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign has no logo"
+            )
+
+        # Delete from R2
+        await brand_logo_service.delete_brand_logo(campaign.brand_logo_url)
+
+        # Update campaign
+        await campaign_service.update_campaign(
+            db=db,
+            campaign_id=campaign_id,
+            user_id=current_user.id,
+            brand_logo_url=None
+        )
+
+        return {
+            "success": True,
+            "message": "Brand logo deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error deleting brand logo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete brand logo"
+        )
+
+# =============================================================================
+# CAMPAIGN EXPORT
+# =============================================================================
+
+@router.get("/{campaign_id}/export")
+async def export_campaign(
+    campaign_id: UUID,
+    format: str = Query("csv", regex="^(csv|json)$"),
+    include_posts: bool = Query(True),
+    include_creators: bool = Query(True),
+    include_audience: bool = Query(True),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Export campaign data to CSV or JSON
+
+    Query Parameters:
+    - format: Export format ('csv' or 'json', default: 'csv')
+    - include_posts: Include posts data (default: true)
+    - include_creators: Include creators data (default: true)
+    - include_audience: Include audience aggregation (default: true)
+
+    Returns:
+    - File download with campaign data
+    """
+    try:
+        # Get campaign to verify ownership and get name
+        campaign = await campaign_service.get_campaign(
+            db=db,
+            campaign_id=campaign_id,
+            user_id=current_user.id
+        )
+
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found"
+            )
+
+        # Export based on format
+        if format == "csv":
+            content = await campaign_export_service.export_campaign_to_csv(
+                db=db,
+                campaign_id=campaign_id,
+                user_id=current_user.id,
+                include_posts=include_posts,
+                include_creators=include_creators,
+                include_audience=include_audience
+            )
+            media_type = "text/csv"
+            filename = f"{campaign.name.replace(' ', '_')}_campaign_export.csv"
+
+        else:  # json
+            content = await campaign_export_service.export_campaign_to_json(
+                db=db,
+                campaign_id=campaign_id,
+                user_id=current_user.id,
+                include_posts=include_posts,
+                include_creators=include_creators,
+                include_audience=include_audience
+            )
+            media_type = "application/json"
+            filename = f"{campaign.name.replace(' ', '_')}_campaign_export.json"
+
+        # Return as downloadable file
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error exporting campaign: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to export campaign"
+        )
+
+@router.get("/export/all")
+async def export_all_campaigns(
+    format: str = Query("csv", regex="^(csv|json)$"),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Export summary of all user's campaigns
+
+    Query Parameters:
+    - format: Export format ('csv' or 'json', default: 'csv')
+
+    Returns:
+    - File download with campaigns summary
+    """
+    try:
+        content = await campaign_export_service.export_all_campaigns_summary(
+            db=db,
+            user_id=current_user.id,
+            format=format
+        )
+
+        if format == "csv":
+            media_type = "text/csv"
+            filename = "all_campaigns_summary.csv"
+        else:
+            media_type = "application/json"
+            filename = "all_campaigns_summary.json"
+
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"'
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"❌ Error exporting campaigns summary: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to export campaigns summary"
         )
 
 # =============================================================================
