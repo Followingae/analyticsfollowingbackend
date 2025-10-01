@@ -300,6 +300,17 @@ class StandalonePostAnalyticsService:
                                  shortcode: str, post_url: str, profile_id: UUID) -> Post:
         """Store post analysis in posts table"""
         try:
+            # Check if post already exists (from Creator Analytics or previous Post Analytics)
+            instagram_post_id = str(post_data.get("id", ""))
+            if instagram_post_id:
+                result = await db.execute(
+                    select(Post).where(Post.instagram_post_id == instagram_post_id)
+                )
+                existing_post = result.scalar_one_or_none()
+                if existing_post:
+                    logger.info(f"✅ Post {shortcode} already exists (ID: {existing_post.id}), reusing existing record")
+                    return existing_post
+
             # Extract hashtags and mentions from caption
             caption = post_data.get("caption", "")
             hashtags, mentions = self._extract_hashtags_and_mentions(caption)
