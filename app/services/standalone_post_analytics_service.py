@@ -672,11 +672,12 @@ class StandalonePostAnalyticsService:
 
             # Call THE EXACT SAME creator search that Creators Module uses
             # This includes EVERYTHING: Apify + Database + CDN + AI + Demographics
+            # Uses default force_refresh=False to respect existing cache/database logic
             result = await bulletproof_creator_search.search_creator_bulletproof(
                 username=username,
                 user_id=system_user_id,
-                team_id=system_team_id,
-                force_refresh=True  # Force fresh data since this is a new discovery
+                team_id=system_team_id
+                # force_refresh defaults to False - let bulletproof search decide if refresh needed
             )
 
             if result.success:
