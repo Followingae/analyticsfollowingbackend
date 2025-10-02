@@ -378,7 +378,45 @@ class CampaignService:
             if not campaign_post:
                 return False
 
+            # Get the post's profile_id before deleting
+            post_query = select(Post).where(Post.id == post_id)
+            post_result = await db.execute(post_query)
+            post = post_result.scalar_one_or_none()
+
             await db.delete(campaign_post)
+
+            # Check if this was the last post from this creator
+            # If yes, remove the creator from campaign_creators
+            if post:
+                # Count remaining posts from this creator in this campaign
+                remaining_posts_query = select(func.count(CampaignPost.id)).select_from(
+                    CampaignPost
+                ).join(
+                    Post, CampaignPost.post_id == Post.id
+                ).where(
+                    and_(
+                        CampaignPost.campaign_id == campaign_id,
+                        Post.profile_id == post.profile_id
+                    )
+                )
+                remaining_count_result = await db.execute(remaining_posts_query)
+                remaining_count = remaining_count_result.scalar() or 0
+
+                # If no more posts from this creator, remove from campaign_creators
+                if remaining_count == 0:
+                    creator_query = select(CampaignCreator).where(
+                        and_(
+                            CampaignCreator.campaign_id == campaign_id,
+                            CampaignCreator.profile_id == post.profile_id
+                        )
+                    )
+                    creator_result = await db.execute(creator_query)
+                    campaign_creator = creator_result.scalar_one_or_none()
+
+                    if campaign_creator:
+                        await db.delete(campaign_creator)
+                        logger.info(f"✅ Removed creator {post.profile_id} from campaign {campaign_id} (no more posts)")
+
             await db.commit()
 
             logger.info(f"✅ Removed post {post_id} from campaign {campaign_id}")
@@ -530,6 +568,10 @@ class CampaignService:
                     ))
                 )
                 post_count = post_count_result.scalar()
+
+                # CRITICAL: Skip creators with 0 posts (orphaned entries)
+                if post_count == 0:
+                    continue
 
                 # Get aggregated engagement for this creator's posts in campaign
                 engagement_result = await db.execute(
@@ -763,7 +805,7 @@ class CampaignService:
                 }
 
             # Get counts using efficient queries
-            from app.database.unified_models import CampaignPost, CampaignProfile
+            from app.database.unified_models import CampaignPost, CampaignCreator
 
             # Count posts
             posts_result = await db.execute(
@@ -773,11 +815,21 @@ class CampaignService:
             posts_count = posts_result.scalar() or 0
 
             # Count creators and calculate total reach
-            creators_result = await db.execute(
-                select(CampaignProfile)
-                .where(CampaignProfile.campaign_id == campaign_id)
-                .options(selectinload(CampaignProfile.profile))
-            )
+            # ONLY include creators that have posts in this campaign (exclude orphaned entries)
+            creators_with_posts_query = select(CampaignCreator).select_from(
+                CampaignCreator
+            ).join(
+                Post, CampaignCreator.profile_id == Post.profile_id
+            ).join(
+                CampaignPost, and_(
+                    CampaignPost.post_id == Post.id,
+                    CampaignPost.campaign_id == campaign_id
+                )
+            ).where(
+                CampaignCreator.campaign_id == campaign_id
+            ).distinct().options(selectinload(CampaignCreator.profile))
+
+            creators_result = await db.execute(creators_with_posts_query)
             campaign_profiles = creators_result.scalars().all()
 
             creators_count = len(campaign_profiles)
@@ -810,6 +862,61 @@ class CampaignService:
                 "total_reach": 0,
                 "engagement_rate": 0.0
             }
+
+    async def cleanup_orphaned_creators(
+        self,
+        db: AsyncSession,
+        campaign_id: UUID
+    ) -> int:
+        """
+        Remove creators from campaign_creators that have 0 posts in the campaign
+
+        Args:
+            db: Database session
+            campaign_id: Campaign ID
+
+        Returns:
+            Number of orphaned creators removed
+        """
+        try:
+            # Find all creators in this campaign
+            all_creators_query = select(CampaignCreator).where(
+                CampaignCreator.campaign_id == campaign_id
+            )
+            all_creators_result = await db.execute(all_creators_query)
+            all_creators = all_creators_result.scalars().all()
+
+            removed_count = 0
+
+            for creator in all_creators:
+                # Count posts from this creator in this campaign
+                posts_count_query = select(func.count(CampaignPost.id)).select_from(
+                    CampaignPost
+                ).join(
+                    Post, CampaignPost.post_id == Post.id
+                ).where(
+                    and_(
+                        CampaignPost.campaign_id == campaign_id,
+                        Post.profile_id == creator.profile_id
+                    )
+                )
+                posts_count_result = await db.execute(posts_count_query)
+                posts_count = posts_count_result.scalar() or 0
+
+                # If no posts, remove the creator entry
+                if posts_count == 0:
+                    await db.delete(creator)
+                    removed_count += 1
+                    logger.info(f"✅ Removed orphaned creator {creator.profile_id} from campaign {campaign_id}")
+
+            await db.commit()
+            logger.info(f"✅ Cleaned up {removed_count} orphaned creators from campaign {campaign_id}")
+            return removed_count
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Failed to cleanup orphaned creators: {e}")
+            raise
 
 
 # Global service instance

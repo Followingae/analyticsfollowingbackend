@@ -117,6 +117,9 @@ async def get_campaign(
                 detail="Campaign not found"
             )
 
+        # Get campaign stats
+        stats = await campaign_service.get_campaign_stats(db, campaign_id, current_user.id)
+
         return {
             "success": True,
             "data": {
@@ -127,8 +130,10 @@ async def get_campaign(
                 "status": campaign.status,
                 "created_at": campaign.created_at.isoformat(),
                 "updated_at": campaign.updated_at.isoformat(),
-                "posts_count": len(campaign.campaign_posts),
-                "creators_count": len(campaign.campaign_creators)
+                "posts_count": stats.get('posts_count', 0),
+                "creators_count": stats.get('creators_count', 0),
+                "total_reach": stats.get('total_reach', 0),
+                "engagement_rate": stats.get('engagement_rate', 0.0)
             },
             "message": "Campaign retrieved successfully"
         }
@@ -562,6 +567,41 @@ async def get_campaign_audience(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve campaign audience"
+        )
+
+# =============================================================================
+# CAMPAIGN CLEANUP & MAINTENANCE
+# =============================================================================
+
+@router.post("/{campaign_id}/cleanup")
+async def cleanup_campaign_orphaned_creators(
+    campaign_id: UUID,
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Clean up orphaned creators from campaign
+
+    Removes creators from campaign_creators table that have 0 posts in the campaign.
+    This can happen when all posts from a creator are removed.
+    """
+    try:
+        removed_count = await campaign_service.cleanup_orphaned_creators(
+            db=db,
+            campaign_id=campaign_id
+        )
+
+        return {
+            "success": True,
+            "removed_count": removed_count,
+            "message": f"Removed {removed_count} orphaned creator(s) from campaign"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error cleaning up campaign: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cleanup campaign"
         )
 
 # =============================================================================

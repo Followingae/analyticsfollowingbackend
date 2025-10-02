@@ -699,80 +699,39 @@ class StandalonePostAnalyticsService:
 
     async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID]):
         """
-        Trigger FULL Creator Analytics using EXACT same pipeline as Creators Module
+        Trigger FULL Creator Analytics using the dedicated Creator Analytics Module
 
-        CRITICAL: This uses the bulletproof unified_background_processor to ensure
-        100% identical behavior with ALL 10 AI models + CDN + Demographics
+        CRITICAL: This uses creator_analytics_trigger_service which implements
+        ALL the rules from Creator Analytics module:
+        - Check if FULL analytics exists in database
+        - Only serve from DB if followers > 0, posts > 0, AI complete
+        - If incomplete, fetch from Apify + CDN + ALL 10 AI models
+        - Store results same as individual creator search
         """
         from app.database.connection import SessionLocal
-        from app.database.comprehensive_service import ComprehensiveDataService
-        from app.database.unified_models import Profile
-        from sqlalchemy import select
-        from app.core.config import settings
+        from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
 
         async with SessionLocal() as db:
             try:
-                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                logger.info(f"🔥 BULLETPROOF CREATOR ANALYTICS STARTED: {username}")
-                logger.info(f"   Pipeline: Apify → Database → CDN → AI (ALL 10 MODELS)")
-                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                # Use the dedicated Creator Analytics Trigger Service
+                # This implements EXACT same logic as individual creator search
+                profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
+                    username=username,
+                    db=db,
+                    force_refresh=False  # Respect cache rules
+                )
 
-                # Check if profile already exists
-                profile_query = select(Profile).where(Profile.username == username)
-                profile_result = await db.execute(profile_query)
-                existing_profile = profile_result.scalar_one_or_none()
-
-                profile = existing_profile
-
-                # If profile doesn't exist or is incomplete, fetch from Apify
-                if not existing_profile:
-                    logger.info(f"[1/4] 📡 Fetching from Apify (new profile)...")
-                    async with ApifyInstagramClient(settings.APIFY_API_TOKEN) as apify_client:
-                        apify_data = await apify_client.get_instagram_profile_comprehensive(username)
-
-                    if not apify_data:
-                        raise ValueError(f"No Apify data for {username}")
-
-                    logger.info(f"[2/4] 💾 Storing profile + posts in database...")
-                    comprehensive_service = ComprehensiveDataService()
-                    profile, is_new = await comprehensive_service.store_complete_profile(
-                        db, username, apify_data
-                    )
-                    logger.info(f"✅ Profile stored: {profile.followers_count:,} followers")
+                if profile:
+                    logger.info(f"✅ Creator Analytics Complete:")
+                    logger.info(f"   Source: {metadata.get('source')}")
+                    logger.info(f"   Followers: {profile.followers_count:,}")
+                    logger.info(f"   Posts: {profile.posts_count}")
+                    logger.info(f"   AI Analyzed: {profile.ai_profile_analyzed_at is not None}")
                 else:
-                    logger.info(f"✅ Profile exists - running comprehensive refresh...")
-
-                # CRITICAL: Use unified_background_processor for complete pipeline
-                # This runs the EXACT same pipeline as Creator Search with ALL 10 AI models
-                logger.info(f"[3/4] 🚀 Starting UNIFIED background processing (CDN → AI ALL 10 MODELS)...")
-
-                try:
-                    from app.services.unified_background_processor import unified_background_processor
-
-                    # Run complete pipeline (BLOCKING until 100% complete)
-                    # This includes: CDN processing + ALL 10 AI models + Demographics
-                    pipeline_results = await unified_background_processor.process_profile_complete_pipeline(
-                        profile_id=str(profile.id),
-                        username=username
-                    )
-
-                    logger.info(f"✅ UNIFIED PROCESSING COMPLETE:")
-                    logger.info(f"   CDN: {pipeline_results.get('results', {}).get('cdn_results', {}).get('processed_images', 0)} images")
-                    logger.info(f"   AI: {pipeline_results.get('results', {}).get('ai_results', {}).get('completed_models', 0)}/10 models")
-                    logger.info(f"   Success Rate: {pipeline_results.get('results', {}).get('ai_results', {}).get('success_rate', 0):.1%}")
-
-                except Exception as processing_error:
-                    logger.error(f"❌ Unified processing failed: {processing_error}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-                    # Don't fail - partial data is better than no data
-
-                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                logger.info(f"✅ BULLETPROOF CREATOR ANALYTICS COMPLETE: {username}")
-                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    logger.error(f"❌ Creator Analytics failed: {metadata.get('error')}")
 
             except Exception as e:
-                logger.error(f"❌ Bulletproof creator analytics failed: {e}")
+                logger.error(f"❌ Creator analytics trigger failed: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
 
