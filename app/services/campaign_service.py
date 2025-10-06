@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from datetime import datetime
 
 from app.database.unified_models import Campaign, CampaignPost, CampaignCreator, Post, Profile, AudienceDemographics
+from app.services.cdn_sync_service import CDNSyncService
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +460,9 @@ class CampaignService:
             )
             campaign_posts = result.scalars().all()
 
+            # Initialize CDN sync service
+            cdn_sync = CDNSyncService()
+
             # Format response
             posts_data = []
             for cp in campaign_posts:
@@ -479,6 +483,23 @@ class CampaignService:
                 # Get CDN thumbnail URL - use stored cdn_thumbnail_url or fallback to display_url
                 thumbnail_url = post.cdn_thumbnail_url or post.display_url
 
+                # Calculate engagement rate if missing
+                if post.engagement_rate is None and profile.followers_count and profile.followers_count > 0:
+                    # Calculate on-the-fly: (likes + comments) / followers * 100
+                    calculated_engagement = round(
+                        ((post.likes_count or 0) + (post.comments_count or 0)) / profile.followers_count * 100,
+                        4
+                    )
+                else:
+                    calculated_engagement = float(post.engagement_rate) if post.engagement_rate else 0.0
+
+                # Get CDN URL for profile picture (never use Instagram URLs due to CORS)
+                creator_cdn_profile_url = await cdn_sync.get_profile_cdn_url(
+                    db=db,
+                    profile_id=str(profile.id),
+                    username=profile.username
+                )
+
                 posts_data.append({
                     # Frontend required fields
                     "id": str(post.id),
@@ -488,7 +509,7 @@ class CampaignService:
                     "views": post.video_view_count if post.is_video else 0,
                     "likes": post.likes_count or 0,
                     "comments": post.comments_count or 0,
-                    "engagementRate": float(post.engagement_rate) if post.engagement_rate else 0.0,
+                    "engagementRate": calculated_engagement,
 
                     # Additional fields
                     "campaign_post_id": str(cp.id),
@@ -508,7 +529,9 @@ class CampaignService:
                     # Creator
                     "creator_username": profile.username,
                     "creator_full_name": profile.full_name,
-                    "creator_followers_count": profile.followers_count
+                    "creator_followers_count": profile.followers_count,
+                    "creator_profile_pic_url": creator_cdn_profile_url,  # Always use CDN URL to avoid CORS
+                    "creator_profile_pic_url_hd": None  # Don't send Instagram URLs, they cause CORS errors
                 })
 
             logger.info(f"✅ Retrieved {len(posts_data)} posts for campaign {campaign_id}")
@@ -553,6 +576,9 @@ class CampaignService:
             )
             campaign_creators = result.scalars().all()
 
+            # Initialize CDN sync service
+            cdn_sync = CDNSyncService()
+
             # Format response with aggregated analytics
             creators_data = []
             for cc in campaign_creators:
@@ -588,12 +614,19 @@ class CampaignService:
                 )
                 engagement = engagement_result.one()
 
+                # Get CDN URL for profile picture (never use Instagram URLs due to CORS)
+                creator_cdn_profile_url = await cdn_sync.get_profile_cdn_url(
+                    db=db,
+                    profile_id=str(profile.id),
+                    username=profile.username
+                )
+
                 creator_data = {
                     "campaign_creator_id": str(cc.id),
                     "profile_id": str(profile.id),
                     "username": profile.username,
                     "full_name": profile.full_name,
-                    "profile_pic_url": profile.profile_pic_url,
+                    "profile_pic_url": creator_cdn_profile_url,  # Always use CDN URL to avoid CORS
                     "added_at": cc.added_at.isoformat(),
 
                     # Profile metrics
@@ -836,15 +869,24 @@ class CampaignService:
             total_reach = sum(cp.profile.followers_count or 0 for cp in campaign_profiles)
 
             # Calculate average engagement rate from campaign posts
-            posts_with_engagement = await db.execute(
-                select(Post.engagement_rate)
+            # Get all posts with their engagement data
+            posts_query = await db.execute(
+                select(Post, Profile.followers_count)
                 .join(CampaignPost, CampaignPost.post_id == Post.id)
-                .where(
-                    CampaignPost.campaign_id == campaign_id,
-                    Post.engagement_rate.isnot(None)
-                )
+                .join(Profile, Profile.id == Post.profile_id)
+                .where(CampaignPost.campaign_id == campaign_id)
             )
-            engagement_rates = [rate for (rate,) in posts_with_engagement.fetchall() if rate]
+            posts_data = posts_query.all()
+
+            engagement_rates = []
+            for post, followers_count in posts_data:
+                if post.engagement_rate is not None:
+                    engagement_rates.append(float(post.engagement_rate))
+                elif followers_count and followers_count > 0:
+                    # Calculate on-the-fly if missing
+                    calculated_rate = ((post.likes_count or 0) + (post.comments_count or 0)) / followers_count * 100
+                    engagement_rates.append(calculated_rate)
+
             avg_engagement = sum(engagement_rates) / len(engagement_rates) if engagement_rates else 0.0
 
             return {
