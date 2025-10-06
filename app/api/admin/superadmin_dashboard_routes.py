@@ -12,7 +12,7 @@ from datetime import datetime, date, timedelta, timezone
 import psutil
 import asyncio
 import logging
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +76,25 @@ class AnalyticsResponse(BaseModel):
 class UserCreateRequest(BaseModel):
     """User creation request model"""
     email: str
+    password: str = Field(..., min_length=8, description="Password for authentication (min 8 characters)")
     full_name: str
+    company: Optional[str] = None
+    phone_number: Optional[str] = None
     role: str = "user"
     status: str = "active"
+
+    # Subscription & Credits
+    subscription_tier: str = "free"  # free, standard, premium
     initial_credits: int = 0
+    credit_package_id: Optional[int] = None
+
+    # Team Settings (for brand accounts)
+    create_team: bool = False
+    team_name: Optional[str] = None
+    max_team_members: int = 1
+    monthly_profile_limit: int = 5
+    monthly_email_limit: int = 0
+    monthly_posts_limit: int = 0
 
 class CreditOperationRequest(BaseModel):
     """Credit operation request model"""
@@ -1065,92 +1080,232 @@ async def create_user(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Create new user with comprehensive setup
-    Includes credit wallet creation and role assignment
+    🎯 PRODUCTION-READY Brand Account Creation
+    Creates complete user setup with:
+    - Supabase Auth account with password
+    - Database user record with subscription
+    - Credit wallet and package
+    - Optional team creation for brand accounts
     """
     try:
         from uuid import uuid4
-        
-        # Check if user already exists
+        from app.services.supabase_auth_service import supabase_auth_service
+
+        logger.info(f"ADMIN CREATE: Starting user creation for {user_data.email}")
+
+        # ===== STEP 1: Validate Inputs =====
         existing_user = await db.execute(select(User).where(User.email == user_data.email))
         if existing_user.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="User with this email already exists"
             )
-        
-        # Validate role
-        valid_roles = ["user", "admin", "super_admin", "team_member"]
+
+        valid_roles = ["free", "premium", "brand_premium", "admin", "super_admin"]
         if user_data.role not in valid_roles:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}"
             )
-        
-        # Create user
+
+        valid_tiers = ["free", "standard", "premium"]
+        if user_data.subscription_tier not in valid_tiers:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid subscription tier. Must be one of: {', '.join(valid_tiers)}"
+            )
+
+        # ===== STEP 2: Create Supabase Auth Account =====
+        logger.info(f"ADMIN CREATE: Creating Supabase auth account for {user_data.email}")
+        try:
+            await supabase_auth_service.ensure_initialized()
+
+            # Create user in Supabase Auth
+            auth_response = supabase_auth_service.supabase.auth.admin.create_user({
+                "email": user_data.email,
+                "password": user_data.password,
+                "email_confirm": True,  # Auto-confirm email for admin-created accounts
+                "user_metadata": {
+                    "full_name": user_data.full_name,
+                    "role": user_data.role,
+                    "company": user_data.company,
+                    "created_by_admin": current_user.email
+                }
+            })
+
+            if not auth_response.user:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to create Supabase auth account"
+                )
+
+            supabase_user_id = auth_response.user.id
+            logger.info(f"ADMIN CREATE: Supabase auth created successfully - ID: {supabase_user_id}")
+
+        except Exception as auth_error:
+            logger.error(f"ADMIN CREATE: Supabase auth creation failed: {auth_error}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create authentication account: {str(auth_error)}"
+            )
+
+        # ===== STEP 3: Create Database User =====
+        logger.info(f"ADMIN CREATE: Creating database user record")
         new_user = User(
             id=uuid4(),
+            supabase_user_id=supabase_user_id,  # Link to Supabase
             email=user_data.email,
             full_name=user_data.full_name,
+            company=user_data.company,
+            phone_number=user_data.phone_number,
             role=user_data.role,
             status=user_data.status,
+            subscription_tier=user_data.subscription_tier,
             credits=user_data.initial_credits,
             credits_used_this_month=0,
-            subscription_tier="free",
+            email_verified=True,  # Admin-created accounts are pre-verified
             preferences={"notifications": True, "theme": "light"}
         )
-        
+
         db.add(new_user)
         await db.commit()
         await db.refresh(new_user)
-        
-        # Create credit wallet if initial credits > 0
-        if user_data.initial_credits > 0:
+        logger.info(f"ADMIN CREATE: Database user created - ID: {new_user.id}")
+
+        # ===== STEP 4: Create Credit Wallet & Package =====
+        wallet_created = False
+        if user_data.initial_credits > 0 or user_data.credit_package_id:
             try:
-                # Create wallet entry
+                logger.info(f"ADMIN CREATE: Setting up credit wallet")
                 new_wallet = CreditWallet(
                     user_id=str(new_user.id),
                     current_balance=user_data.initial_credits,
                     total_earned=user_data.initial_credits,
-                    total_spent=0
+                    total_spent=0,
+                    lifetime_spent=0,
+                    package_id=user_data.credit_package_id
                 )
                 db.add(new_wallet)
                 await db.commit()
-                
+                await db.refresh(new_wallet)
+
                 # Create initial transaction record
-                initial_transaction = CreditTransaction(
-                    wallet_id=new_wallet.id,
-                    user_id=str(new_user.id),
-                    amount=user_data.initial_credits,
-                    transaction_type="admin_grant",
-                    description="Initial credit allocation by admin",
-                    metadata={"admin_user": current_user.email, "reason": "user_creation"}
-                )
-                db.add(initial_transaction)
-                await db.commit()
-                
+                if user_data.initial_credits > 0:
+                    initial_transaction = CreditTransaction(
+                        wallet_id=new_wallet.id,
+                        user_id=str(new_user.id),
+                        amount=user_data.initial_credits,
+                        transaction_type="admin_grant",
+                        description=f"Initial {user_data.subscription_tier} subscription credits by admin",
+                        metadata={
+                            "admin_user": current_user.email,
+                            "reason": "user_creation",
+                            "subscription_tier": user_data.subscription_tier
+                        }
+                    )
+                    db.add(initial_transaction)
+                    await db.commit()
+
+                wallet_created = True
+                logger.info(f"ADMIN CREATE: Credit wallet created with {user_data.initial_credits} credits")
+
             except Exception as e:
-                logger.error(f"Failed to create wallet for new user: {e}")
-        
+                logger.error(f"ADMIN CREATE: Failed to create wallet: {e}")
+                # Don't fail entire operation if wallet creation fails
+
+        # ===== STEP 5: Create Team (for brand accounts) =====
+        team_created = None
+        if user_data.create_team and user_data.team_name:
+            try:
+                logger.info(f"ADMIN CREATE: Creating team '{user_data.team_name}'")
+                from app.database.unified_models import Team, TeamMember
+
+                new_team = Team(
+                    id=uuid4(),
+                    name=user_data.team_name,
+                    owner_id=new_user.id,
+                    subscription_tier=user_data.subscription_tier,
+                    subscription_status="active",
+                    max_team_members=user_data.max_team_members,
+                    monthly_profile_limit=user_data.monthly_profile_limit,
+                    monthly_email_limit=user_data.monthly_email_limit,
+                    monthly_posts_limit=user_data.monthly_posts_limit,
+                    profiles_used_this_month=0,
+                    emails_used_this_month=0,
+                    posts_used_this_month=0
+                )
+                db.add(new_team)
+                await db.commit()
+                await db.refresh(new_team)
+
+                # Add user as team owner
+                team_member = TeamMember(
+                    id=uuid4(),
+                    team_id=new_team.id,
+                    user_id=new_user.id,
+                    role="owner",
+                    status="active"
+                )
+                db.add(team_member)
+                await db.commit()
+
+                team_created = {
+                    "id": str(new_team.id),
+                    "name": new_team.name,
+                    "subscription_tier": new_team.subscription_tier,
+                    "max_members": new_team.max_team_members,
+                    "limits": {
+                        "profiles": new_team.monthly_profile_limit,
+                        "emails": new_team.monthly_email_limit,
+                        "posts": new_team.monthly_posts_limit
+                    }
+                }
+                logger.info(f"ADMIN CREATE: Team created successfully - ID: {new_team.id}")
+
+            except Exception as team_error:
+                logger.error(f"ADMIN CREATE: Failed to create team: {team_error}")
+                # Don't fail entire operation if team creation fails
+
+        # ===== SUCCESS RESPONSE =====
+        logger.info(f"ADMIN CREATE: User creation completed successfully for {user_data.email}")
+
         return {
             "success": True,
-            "message": "User created successfully",
+            "message": f"Brand account created successfully for {user_data.email}",
             "user": {
                 "id": str(new_user.id),
+                "supabase_user_id": supabase_user_id,
                 "email": new_user.email,
                 "full_name": new_user.full_name,
+                "company": new_user.company,
+                "phone_number": new_user.phone_number,
                 "role": new_user.role,
                 "status": new_user.status,
+                "subscription_tier": new_user.subscription_tier,
                 "credits": new_user.credits,
                 "created_at": new_user.created_at,
                 "created_by": current_user.email
+            },
+            "wallet": {
+                "created": wallet_created,
+                "initial_balance": user_data.initial_credits,
+                "package_id": user_data.credit_package_id
+            },
+            "team": team_created,
+            "login_credentials": {
+                "email": user_data.email,
+                "password": "*** (as provided)",
+                "note": "User can login immediately with these credentials"
             }
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         await db.rollback()
+        logger.error(f"ADMIN CREATE: Failed to create user: {e}")
+        import traceback
+        logger.error(f"ADMIN CREATE: Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create user: {str(e)}"

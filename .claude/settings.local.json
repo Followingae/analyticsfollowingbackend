@@ -11,7 +11,8 @@
       "Bash(taskkill:*)",
       "Bash(cmd /c:*)",
       "Bash(start cmd /c:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": [],
