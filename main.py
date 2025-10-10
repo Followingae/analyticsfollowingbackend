@@ -228,6 +228,14 @@ app.include_router(post_analytics_router, prefix="/api/v1")
 from app.api.campaign_routes import router as campaign_router
 app.include_router(campaign_router, prefix="/api/v1")
 
+# Include Transaction Monitoring routes
+from app.api.transaction_monitoring_routes import router as transaction_monitoring_router
+app.include_router(transaction_monitoring_router)
+
+# Include Quick Fix routes for urgent database operations
+from quick_fix_endpoint import router as quick_fix_router
+app.include_router(quick_fix_router, prefix="/api/v1")
+
 # Include Campaign AI Insights routes
 from app.api.campaign_routes_ai_insights import router as campaign_ai_router
 app.include_router(campaign_ai_router, prefix="/api/v1")
@@ -561,6 +569,37 @@ async def bulletproof_creator_search(
         existing_profile = profile_result.scalar_one_or_none()
         
         if existing_profile:
+            # COMPLETENESS CHECK: Verify profile has complete analytics before serving
+            logger.info(f"[COMPLETENESS] Checking if profile '{username}' has complete analytics...")
+
+            # Check completeness according to CLAUDE.md requirements
+            posts_query = select(Post).where(Post.profile_id == existing_profile.id).limit(15)
+            posts_result = await db.execute(posts_query)
+            stored_posts = posts_result.scalars().all()
+
+            # Check completeness criteria
+            has_basic_data = (existing_profile.followers_count and existing_profile.followers_count > 0)
+            has_sufficient_posts = len(stored_posts) >= 12
+            posts_with_ai = sum(1 for p in stored_posts if p.ai_content_category and p.ai_sentiment and p.ai_language_code)
+            has_ai_analysis = posts_with_ai >= 12
+            has_profile_ai = existing_profile.ai_profile_analyzed_at is not None
+
+            is_complete = has_basic_data and has_sufficient_posts and has_ai_analysis and has_profile_ai
+
+            if not is_complete:
+                logger.info(f"[COMPLETENESS] ❌ Profile '{username}' is INCOMPLETE:")
+                logger.info(f"  - Basic data: {'✅' if has_basic_data else '❌'} (followers: {existing_profile.followers_count})")
+                logger.info(f"  - Posts stored: {'✅' if has_sufficient_posts else '❌'} ({len(stored_posts)}/12 required)")
+                logger.info(f"  - AI analysis: {'✅' if has_ai_analysis else '❌'} ({posts_with_ai}/12 posts analyzed)")
+                logger.info(f"  - Profile AI: {'✅' if has_profile_ai else '❌'}")
+                logger.info(f"[TRIGGER] 🔄 Triggering FULL APIFY + CDN + AI pipeline for complete analytics")
+
+                # Skip to new profile processing to trigger full pipeline
+                existing_profile = None
+            else:
+                logger.info(f"[COMPLETENESS] ✅ Profile '{username}' has complete analytics - serving from database")
+
+        if existing_profile:
             # FAST PATH OPTIMIZATION: Check if this is an already unlocked profile for instant return
             logger.info(f"[FAST-PATH] Checking if profile '{username}' is already unlocked for instant return...")
             from app.middleware.atomic_credit_gate import _atomic_check_permissions
@@ -627,6 +666,14 @@ async def bulletproof_creator_search(
                         "ai_analysis_raw": post.ai_analysis_raw if post.ai_analysis_raw else None
                     })
 
+                # Calculate avg_likes and avg_comments from posts data for fast path
+                total_likes_fast = sum(post.get('likes_count', 0) for post in posts_data)
+                total_comments_fast = sum(post.get('comments_count', 0) for post in posts_data)
+                posts_count_fast = len(posts_data)
+
+                avg_likes_fast = round(total_likes_fast / posts_count_fast, 1) if posts_count_fast > 0 else 0
+                avg_comments_fast = round(total_comments_fast / posts_count_fast, 1) if posts_count_fast > 0 else 0
+
                 fast_time = (datetime.now(timezone.utc) - start_time).total_seconds()
                 logger.info(f"[FAST-PATH] ⚡ INSTANT RETURN completed in {fast_time:.3f}s")
 
@@ -649,8 +696,8 @@ async def bulletproof_creator_search(
                         "business_email": getattr(existing_profile, 'business_email', None),
                         "business_phone_number": getattr(existing_profile, 'business_phone_number', None),
                         "engagement_rate": existing_profile.engagement_rate,
-                        "avg_likes": getattr(existing_profile, 'avg_likes', None),
-                        "avg_comments": getattr(existing_profile, 'avg_comments', None),
+                        "avg_likes": avg_likes_fast,
+                        "avg_comments": avg_comments_fast,
                         "influence_score": getattr(existing_profile, 'influence_score', None),
                         "content_quality_score": getattr(existing_profile, 'content_quality_score', None),
                         "follower_growth_rate": getattr(existing_profile, 'follower_growth_rate', None),
@@ -754,6 +801,14 @@ async def bulletproof_creator_search(
             
             logger.info(f"[SUCCESS] STEP 1.1 RESULT: Retrieved {len(posts_data)} posts with complete AI analysis")
 
+            # Calculate avg_likes and avg_comments from posts data
+            total_likes = sum(post.get('likes_count', 0) for post in posts_data)
+            total_comments = sum(post.get('comments_count', 0) for post in posts_data)
+            posts_count = len(posts_data)
+
+            avg_likes = round(total_likes / posts_count, 1) if posts_count > 0 else 0
+            avg_comments = round(total_comments / posts_count, 1) if posts_count > 0 else 0
+
             # Return COMPLETE profile data (everything we have stored)
             result = {
                 "success": True,
@@ -777,8 +832,8 @@ async def bulletproof_creator_search(
                     
                     # Analytics data
                     "engagement_rate": existing_profile.engagement_rate,
-                    "avg_likes": getattr(existing_profile, 'avg_likes', None),
-                    "avg_comments": getattr(existing_profile, 'avg_comments', None),
+                    "avg_likes": avg_likes,
+                    "avg_comments": avg_comments,
                     "influence_score": getattr(existing_profile, 'influence_score', None),
                     "content_quality_score": getattr(existing_profile, 'content_quality_score', None),
                     "follower_growth_rate": getattr(existing_profile, 'follower_growth_rate', None),
@@ -810,6 +865,19 @@ async def bulletproof_creator_search(
                         "models_success_rate": getattr(existing_profile, 'ai_models_success_rate', 0.0),
                         "models_status": getattr(existing_profile, 'ai_models_status', {}),
                         
+                        # Audience Demographics (extracted from ai_audience_insights JSONB)
+                        "audience_demographics": {
+                            "gender_distribution": {
+                                k: round(v * 100, 1) for k, v in
+                                (getattr(existing_profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_gender_split', {})).items()
+                            } if getattr(existing_profile, 'ai_audience_insights', None) else {},
+                            "age_distribution": {
+                                k: round(v * 100, 1) for k, v in
+                                (getattr(existing_profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_age_groups', {})).items()
+                            } if getattr(existing_profile, 'ai_audience_insights', None) else {},
+                            "location_distribution": getattr(existing_profile, 'ai_audience_insights', {}).get('geographic_analysis', {}).get('country_distribution', {}) if getattr(existing_profile, 'ai_audience_insights', None) else {}
+                        },
+
                         # Overall AI insights summary
                         "comprehensive_insights": {
                             "overall_authenticity_score": getattr(existing_profile, 'ai_audience_quality', {}).get('authenticity_score') if getattr(existing_profile, 'ai_audience_quality', None) else None,
@@ -1167,7 +1235,20 @@ async def bulletproof_creator_search(
                         "content_quality_score": profile.ai_content_quality_score,
                         "top_3_categories": profile.ai_top_3_categories,
                         "top_10_categories": profile.ai_top_10_categories,
-                        "profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None
+                        "profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+
+                        # Audience Demographics (extracted from ai_audience_insights JSONB)
+                        "audience_demographics": {
+                            "gender_distribution": {
+                                k: round(v * 100, 1) for k, v in
+                                (getattr(profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_gender_split', {})).items()
+                            } if getattr(profile, 'ai_audience_insights', None) else {},
+                            "age_distribution": {
+                                k: round(v * 100, 1) for k, v in
+                                (getattr(profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_age_groups', {})).items()
+                            } if getattr(profile, 'ai_audience_insights', None) else {},
+                            "location_distribution": getattr(profile, 'ai_audience_insights', {}).get('geographic_analysis', {}).get('country_distribution', {}) if getattr(profile, 'ai_audience_insights', None) else {}
+                        }
                     }
                 },
 
@@ -1812,8 +1893,8 @@ async def instagram_profile_endpoint(
             
             # Analytics
             "engagement_rate": profile.engagement_rate,
-            "avg_likes": getattr(profile, 'avg_likes', None),
-            "avg_comments": getattr(profile, 'avg_comments', None),
+            "avg_likes": None,  # Not calculated in simplified endpoint - use posts endpoint for full analytics
+            "avg_comments": None,  # Not calculated in simplified endpoint - use posts endpoint for full analytics
             
             # AI Analysis (if available)
             "ai_analysis": {
@@ -2079,10 +2160,62 @@ async def startup_event():
     
     logger.info("🎯 STARTUP: Application startup complete with background workers")
 
+# URGENT FIX ENDPOINT - TEMPORARY PUBLIC ACCESS
+@app.post("/api/fix/access-records")
+async def fix_access_records_endpoint(
+    db=Depends(get_db)
+):
+    """URGENT: Fix free allowance and create access record for barakatme"""
+    results = []
+    try:
+        # Fix #1: Remove free allowance
+        result = await db.execute(text("""
+            UPDATE credit_pricing_rules
+            SET free_allowance_per_month = 0
+            WHERE action_type = 'profile_analysis'
+        """))
+        await db.commit()
+        results.append(f"✅ FREE ALLOWANCE REMOVED: Updated {result.rowcount} pricing rule(s)")
+
+        # Fix #2: Create access record for barakatme
+        user_result = await db.execute(text("""
+            SELECT id FROM users WHERE email = 'client@analyticsfollowing.com'
+        """))
+        user_row = user_result.fetchone()
+
+        profile_result = await db.execute(text("""
+            SELECT id FROM profiles WHERE username = 'barakatme'
+        """))
+        profile_row = profile_result.fetchone()
+
+        if user_row and profile_row:
+            user_id = user_row[0]
+            profile_id = profile_row[0]
+
+            await db.execute(text("""
+                INSERT INTO user_profile_access (user_id, profile_id, granted_at, expires_at, created_at)
+                VALUES (:user_id, :profile_id, NOW(), NOW() + INTERVAL '30 days', NOW())
+                ON CONFLICT (user_id, profile_id) DO UPDATE SET
+                    granted_at = NOW(),
+                    expires_at = NOW() + INTERVAL '30 days'
+            """), {
+                'user_id': user_id,
+                'profile_id': profile_id
+            })
+            await db.commit()
+            results.append(f"✅ ACCESS RECORD CREATED: {user_id} -> {profile_id}")
+        else:
+            results.append(f"❌ USER OR PROFILE NOT FOUND")
+
+        return {"success": True, "message": "Fixes applied successfully", "results": results}
+    except Exception as e:
+        await db.rollback()
+        return {"success": False, "error": str(e), "results": results}
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
         reload=settings.DEBUG
-    )
+    )# trigger reload

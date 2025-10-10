@@ -653,3 +653,215 @@ async def toggle_maintenance_mode(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to toggle maintenance mode: {str(e)}"
         )
+
+@router.post("/fix/location-detection")
+@requires_permission("can_manage_system")
+@audit_action("fix_location_detection")
+async def fix_location_detection_for_existing_profiles(
+    username: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(get_current_user_with_permissions),
+    db: AsyncSession = Depends(get_db)
+):
+    """Fix location detection for existing profiles with Unicode text"""
+    try:
+        from app.services.location_detection_service import LocationDetectionService
+        from app.database.unified_models import Profile
+        from sqlalchemy import select, update
+
+        location_service = LocationDetectionService()
+        results = []
+
+        if username:
+            # Fix specific profile
+            query = select(Profile).where(Profile.username == username)
+            result = await db.execute(query)
+            profiles = [result.scalar_one_or_none()]
+            if not profiles[0]:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Profile '{username}' not found"
+                )
+        else:
+            # Fix all profiles without detected_country that have biography data
+            query = select(Profile).where(
+                Profile.detected_country.is_(None),
+                Profile.biography.isnot(None),
+                Profile.biography != ''
+            )
+            result = await db.execute(query)
+            profiles = result.scalars().all()
+
+        updated_count = 0
+        for profile in profiles:
+            if not profile:
+                continue
+
+            try:
+                # Test if location can be detected from biography
+                profile_data = {'biography': profile.biography}
+                location_result = location_service.detect_country(profile_data)
+
+                if location_result.get('country_code'):
+                    results.append(f"✅ {profile.username}: {location_result['country_code']} (confidence: {location_result['confidence']})")
+
+                    # Update the profile
+                    update_query = (
+                        update(Profile)
+                        .where(Profile.id == profile.id)
+                        .values(detected_country=location_result['country_code'])
+                    )
+
+                    await db.execute(update_query)
+                    updated_count += 1
+                else:
+                    results.append(f"⚪ {profile.username}: No location detected")
+
+            except Exception as e:
+                results.append(f"❌ {profile.username}: Error - {str(e)}")
+                continue
+
+        await db.commit()
+
+        # Log admin action
+        await auth_service.log_admin_action(
+            admin_user_id=UUID(current_user["id"]),
+            action_type="fix_location_detection",
+            new_values={
+                "profiles_processed": len(profiles),
+                "profiles_updated": updated_count,
+                "target_username": username
+            },
+            reason=f"Applied Unicode normalization fix to {'specific profile: ' + username if username else 'all profiles without detected_country'}",
+            severity="warning",
+            db=db
+        )
+
+        return {
+            "success": True,
+            "message": f"Location detection fix completed",
+            "profiles_processed": len(profiles),
+            "profiles_updated": updated_count,
+            "target": username or "all_profiles_without_country",
+            "results": results,
+            "fixed_by": current_user["email"]
+        }
+
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fix location detection: {str(e)}"
+        )
+
+@router.post("/fix/missing-access-record")
+@requires_permission("can_manage_system")
+@audit_action("fix_missing_access_record")
+async def fix_missing_access_record(
+    username: str,
+    user_email: str,
+    current_user: Dict[str, Any] = Depends(get_current_user_with_permissions),
+    db: AsyncSession = Depends(get_db)
+):
+    """Emergency fix for missing user_profile_access records when user was charged but didn't get access"""
+    try:
+        from app.database.unified_models import Profile
+        from sqlalchemy import select, text
+        from datetime import timedelta
+        import uuid
+
+        # Step 1: Find the profile
+        profile_query = select(Profile).where(Profile.username == username)
+        profile_result = await db.execute(profile_query)
+        profile = profile_result.scalar_one_or_none()
+
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Profile '{username}' not found"
+            )
+
+        # Step 2: Find the user by email
+        user_query = text("SELECT id FROM auth.users WHERE email = :email")
+        user_result = await db.execute(user_query, {"email": user_email})
+        user_row = user_result.fetchone()
+
+        if not user_row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"User '{user_email}' not found"
+            )
+
+        user_id = user_row[0]
+
+        # Step 3: Check if access record already exists
+        existing_query = text("""
+            SELECT id FROM user_profile_access
+            WHERE user_id = :user_id AND profile_id = :profile_id
+        """)
+        existing_result = await db.execute(existing_query, {
+            "user_id": user_id,
+            "profile_id": profile.id
+        })
+
+        if existing_result.fetchone():
+            return {
+                "success": True,
+                "message": f"Access record already exists for {user_email} -> {username}",
+                "action": "no_action_needed"
+            }
+
+        # Step 4: Create the missing access record
+        now = datetime.utcnow()
+        access_id = str(uuid.uuid4())
+
+        access_insert = text("""
+            INSERT INTO user_profile_access (
+                id, user_id, profile_id, granted_at, expires_at, created_at
+            ) VALUES (
+                :access_id, :user_id, :profile_id, :granted_at, :expires_at, :created_at
+            )
+        """)
+
+        await db.execute(access_insert, {
+            "access_id": access_id,
+            "user_id": user_id,
+            "profile_id": profile.id,
+            "granted_at": now,
+            "expires_at": now + timedelta(days=30),
+            "created_at": now
+        })
+
+        await db.commit()
+
+        # Log admin action
+        await auth_service.log_admin_action(
+            admin_user_id=UUID(current_user["id"]),
+            action_type="fix_missing_access_record",
+            new_values={
+                "username": username,
+                "user_email": user_email,
+                "profile_id": str(profile.id),
+                "user_id": str(user_id),
+                "access_record_id": access_id
+            },
+            reason=f"Emergency fix: Granted missing access to {username} for {user_email}",
+            severity="critical",
+            db=db
+        )
+
+        return {
+            "success": True,
+            "message": f"✅ Access granted to {username} for {user_email}",
+            "access_record_id": access_id,
+            "profile_id": str(profile.id),
+            "user_id": str(user_id),
+            "expires_at": (now + timedelta(days=30)).isoformat(),
+            "fixed_by": current_user["email"]
+        }
+
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fix missing access record: {str(e)}"
+        )

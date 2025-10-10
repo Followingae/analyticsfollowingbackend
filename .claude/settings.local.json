@@ -12,7 +12,14 @@
       "Bash(cmd /c:*)",
       "Bash(start cmd /c:*)",
       "Bash(curl:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(dir app)",
+      "Bash(python3:*)",
+      "Bash(/c/Users/user/AppData/Local/Programs/Python/Python*/python.exe)",
+      "Bash(fix_access_records.py)",
+      "Bash(powershell.exe:*)",
+      "Bash(\"/c/Users/user/AppData/Local/Programs/Python/Python*/python.exe\" --version)",
+      "Bash(tasklist)"
     ],
     "deny": [],
     "ask": [],

@@ -1347,24 +1347,51 @@ class ComprehensiveDataService:
             except (ValueError, TypeError) as e:
                 logger.error(f"Invalid user_id format: {user_id}, error: {e}")
                 raise ValueError(f"Invalid user_id format: {user_id}")
-            
+
             # Calculate offset
             offset = (page - 1) * page_size
             
             # Get current time for consistent timestamp comparison
             current_time = datetime.now(timezone.utc)
             
-            # CRITICAL FIX: Get profiles from unlocked_influencers table (where actual unlocks are stored)
-            from app.database.unified_models import UnlockedInfluencer
-            
-            # Query unlocked_influencers table directly - this is where profile unlocks are actually stored
-            unlocked_query = select(UnlockedInfluencer, Profile).join(
-                Profile, UnlockedInfluencer.profile_id == Profile.id
+            # CRITICAL FIX: Get profiles from user_profile_access table (30-day access system)
+            from app.database.unified_models import UserProfileAccess
+            from datetime import datetime, timezone
+            from sqlalchemy import text
+
+            # CRITICAL: Map from auth.users.id to public.users.id for user_profile_access
+            user_mapping_query = text("""
+                SELECT id FROM users WHERE supabase_user_id = :auth_user_id
+            """)
+
+            user_mapping_result = await db_session.execute(user_mapping_query, {
+                "auth_user_id": str(user_uuid)  # Convert UUID to string
+            })
+
+            user_mapping_row = user_mapping_result.fetchone()
+            if not user_mapping_row:
+                logger.error(f"No public.users record found for auth user {user_uuid}")
+                return {
+                    'profiles': [],
+                    'total_count': 0,
+                    'page': page,
+                    'page_size': page_size,
+                    'total_pages': 0
+                }
+
+            public_user_id = user_mapping_row[0]
+            logger.info(f"Mapped auth user {user_uuid} to public user {public_user_id}")
+
+            # Query user_profile_access table - this is the correct 30-day access system
+            current_time = datetime.now(timezone.utc)
+            access_query = select(UserProfileAccess, Profile).join(
+                Profile, UserProfileAccess.profile_id == Profile.id
             ).where(
-                UnlockedInfluencer.user_id == user_uuid
-            ).order_by(UnlockedInfluencer.unlocked_at.desc()).offset(offset).limit(page_size)
-            
-            combined_query = unlocked_query
+                UserProfileAccess.user_id == public_user_id,  # Use mapped public user ID
+                UserProfileAccess.expires_at > current_time  # Only active access
+            ).order_by(UserProfileAccess.granted_at.desc()).offset(offset).limit(page_size)
+
+            combined_query = access_query
             
             # Execute queries with retry and timeout protection
             async def execute_queries():
@@ -1372,9 +1399,10 @@ class ComprehensiveDataService:
                 result = await asyncio.wait_for(db.execute(combined_query), timeout=30.0)
                 profiles_data = result.all()
                 
-                # Count total unlocked profiles for this user
-                count_query = select(func.count(UnlockedInfluencer.id)).where(
-                    UnlockedInfluencer.user_id == user_uuid
+                # Count total accessible profiles for this user (active access only)
+                count_query = select(func.count(UserProfileAccess.id)).where(
+                    UserProfileAccess.user_id == public_user_id,  # Use mapped public user ID
+                    UserProfileAccess.expires_at > current_time
                 )
                 
                 count_result = await asyncio.wait_for(db.execute(count_query), timeout=30.0)
@@ -1396,9 +1424,15 @@ class ComprehensiveDataService:
             profiles = []
             
             for row in profiles_data:
-                # The query returns (UnlockedInfluencer, Profile) tuples
-                unlocked_record, profile = row
-                
+                # The query returns (UserProfileAccess, Profile) tuples
+                access_record, profile = row
+
+                # Calculate remaining days
+                expires_at = access_record.expires_at
+                days_remaining = None
+                if expires_at:
+                    days_remaining = max(0, (expires_at - current_time).days)
+
                 profile_data = {
                     "username": profile.username,
                     "full_name": profile.full_name or "",
@@ -1413,13 +1447,13 @@ class ComprehensiveDataService:
                     "is_private": profile.is_private or False,
                     "engagement_rate": float(profile.engagement_rate or 0),
                     "influence_score": float(profile.influence_score or 0),
-                    
-                    # Access information from UnlockedInfluencer record
-                    "access_granted_at": unlocked_record.unlocked_at.isoformat() if unlocked_record.unlocked_at else None,
-                    "access_expires_at": None,  # Unlocked profiles don't expire
-                    "days_remaining": None,
+
+                    # Access information from UserProfileAccess record (30-day system)
+                    "access_granted_at": access_record.granted_at.isoformat() if access_record.granted_at else None,
+                    "access_expires_at": expires_at.isoformat() if expires_at else None,
+                    "days_remaining": days_remaining,
                     "profile_id": str(profile.id),
-                    "credits_spent": unlocked_record.credits_spent,
+                    "credits_spent": 25,  # Standard cost for 30-day access
                     
                     # Add AI analysis data if available
                     "ai_analysis": {
@@ -1889,16 +1923,13 @@ class ComprehensiveDataService:
             # Run location detection
             location_result = self.location_service.detect_country(profile_data_for_detection)
 
-            # Update profile with location data
+            # Update profile with location data (only detected_country column exists)
             if location_result["country_code"]:
                 update_query = (
                     update(Profile)
                     .where(Profile.id == profile.id)
                     .values(
-                        detected_country=location_result["country_code"],
-                        country_confidence=location_result["confidence"],
-                        country_signals=location_result["signals"],
-                        country_detected_at=datetime.now(timezone.utc)
+                        detected_country=location_result["country_code"]
                     )
                 )
 

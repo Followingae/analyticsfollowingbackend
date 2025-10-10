@@ -1120,8 +1120,8 @@ async def create_user(
         try:
             await supabase_auth_service.ensure_initialized()
 
-            # Create user in Supabase Auth
-            auth_response = supabase_auth_service.supabase.auth.admin.create_user({
+            # Create user in Supabase Auth using admin client
+            auth_response = supabase_auth_service.supabase_admin.auth.admin.create_user({
                 "email": user_data.email,
                 "password": user_data.password,
                 "email_confirm": True,  # Auto-confirm email for admin-created accounts

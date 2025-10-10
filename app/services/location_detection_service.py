@@ -10,6 +10,7 @@ Detects creator's primary country using weighted analysis of multiple signals:
 
 import re
 import spacy
+import unicodedata
 from typing import Dict, List, Tuple, Optional
 from collections import Counter
 import pycountry
@@ -141,7 +142,9 @@ class LocationDetectionService:
         if not biography:
             return {"score": 0.0, "countries": {}}
 
-        bio_lower = biography.lower()
+        # Normalize Unicode characters to handle stylized text (𝐃𝐮𝐛𝐚𝐢 -> Dubai)
+        normalized_bio = unicodedata.normalize('NFKD', biography)
+        bio_lower = normalized_bio.lower()
         countries_found = {}
 
         # Look for country names and aliases

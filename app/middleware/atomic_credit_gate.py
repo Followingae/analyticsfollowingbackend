@@ -179,19 +179,37 @@ def atomic_requires_credits(
                         logger.error(f"[FAST-PATH] Function execution failed for {reference_id}: {e}")
                         raise
 
-                # Step 2: Spend credits BEFORE function execution (only if required)
-                transaction = None
+                # Step 2: Execute BULLETPROOF credit transaction
+                transaction_result = None
                 if credits_required > 0:
+                    from app.services.bulletproof_transaction_service import bulletproof_transaction_service
+
+                    # Collect metadata for audit trail
+                    transaction_metadata = {
+                        "action_type": action_type,
+                        "reference_id": reference_id,
+                        "user_agent": getattr(request, "headers", {}).get("user-agent", "unknown"),
+                        "ip_address": getattr(request, "client", {}).host if hasattr(request, "client") else "unknown",
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    }
+
                     try:
-                        transaction = await credit_wallet_service.spend_credits_atomic(
-                            db=db,  # Use same transaction
+                        transaction_result = await bulletproof_transaction_service.execute_credit_transaction(
+                            db=db,
                             user_id=user_id,
                             action_type=action_type,
-                            credits_amount=credits_required,
                             reference_id=reference_id,
-                            reference_type="profile" if action_type == "profile_analysis" else "action"
+                            credits_amount=credits_required,
+                            metadata=transaction_metadata
                         )
-                        logger.info(f"[PAYMENT] Credits spent: {credits_required} for user {user_id}")
+
+                        if not transaction_result.success:
+                            raise AtomicTransactionError(
+                                transaction_result.error_message or "Credit transaction failed",
+                                "bulletproof_transaction"
+                            )
+
+                        logger.info(f"💳 BULLETPROOF PAYMENT: {credits_required} credits for user {user_id} | Intent: {transaction_result.intent_id}")
                     except Exception as e:
                         raise AtomicTransactionError(str(e), "spend_credits")
                 
@@ -202,38 +220,31 @@ def atomic_requires_credits(
                 except Exception as e:
                     raise AtomicTransactionError(str(e), "execute_function")
                 
-                # Step 4: Create access records AFTER function execution (for profile unlocks)
+                # Step 4: Access records handled by bulletproof transaction service
                 access_records_created = False
-                if action_type == "profile_analysis" and not permission_check["already_unlocked"]:
-                    # Skip access records for admin users (they don't need tracking)
-                    if credits_required == 0:
-                        logger.info(f"📋 Skipping access records for admin user {user_id} -> {reference_id}")
-                        access_records_created = True  # Mark as created for response
-                    else:
-                        try:
-                            await _atomic_create_access_records(
-                                db, user_id, reference_id, credits_required
-                            )
-                            access_records_created = True
-                            logger.info(f"[SUCCESS] Access records created for {user_id} -> {reference_id}")
-                        except Exception as e:
-                            # Don't fail the entire transaction if access records fail
-                            logger.warning(f"[WARNING] Access records creation failed: {str(e)}")
-                            # Still mark as successful since the main function completed
-                
-                # Step 5: Commit the entire transaction
+                if credits_required > 0 and transaction_result:
+                    # Access records already created by bulletproof service
+                    access_records_created = transaction_result.access_record_id is not None
+                    logger.info(f"✅ BULLETPROOF ACCESS RECORDS: Created={access_records_created} | ID={transaction_result.access_record_id}")
+                elif credits_required == 0:
+                    # Admin user - no access tracking needed
+                    access_records_created = True
+                    logger.info(f"📋 Skipping access records for admin user {user_id} -> {reference_id}")
+
+                # Step 5: Commit only the main function transaction (credits already committed)
                 await db.commit()
-                logger.info(f"[SUCCESS] ATOMIC TRANSACTION COMPLETED for {user_id} -> {reference_id}")
+                logger.info(f"✅ FUNCTION TRANSACTION COMPLETED for {user_id} -> {reference_id}")
                 
-                # Add credit information to response if requested
+                # Add bulletproof credit information to response if requested
                 if return_detailed_response and isinstance(result, dict):
-                    wallet_info = await credit_wallet_service.get_wallet_summary(user_id)
                     result["credit_info"] = {
                         "credits_spent": credits_required,
                         "used_free_allowance": used_free_allowance,
-                        "remaining_balance": wallet_info.current_balance if hasattr(wallet_info, 'current_balance') else 0,
-                        "transaction_id": str(transaction) if transaction else None,
-                        "access_granted": access_records_created or permission_check["already_unlocked"]
+                        "remaining_balance": transaction_result.final_balance if transaction_result else 0,
+                        "transaction_id": str(transaction_result.transaction_id) if transaction_result and transaction_result.transaction_id else None,
+                        "transaction_intent_id": transaction_result.intent_id if transaction_result else None,
+                        "access_granted": access_records_created or permission_check["already_unlocked"],
+                        "bulletproof_verified": True if transaction_result and transaction_result.success else False
                     }
                 
                 return result
@@ -340,46 +351,5 @@ async def _atomic_check_permissions(db, user_id: UUID, action_type: str, referen
             "already_unlocked": False
         }
 
-async def _atomic_create_access_records(db, user_id: UUID, username: str, credits_spent: int):
-    """Create access records in the same transaction"""
-    try:
-        # Get profile information
-        profile_query = select(Profile).where(Profile.username == username)
-        profile_result = await db.execute(profile_query)
-        profile = profile_result.scalar_one_or_none()
-        
-        if not profile:
-            raise Exception(f"Profile not found: {username}")
-        
-        # Get database user ID for user_profile_access table
-        user_query = select(User.id).where(User.supabase_user_id == str(user_id))
-        user_result = await db.execute(user_query)
-        database_user_id = user_result.scalar_one_or_none()
-        
-        if not database_user_id:
-            raise Exception(f"Database user not found for Supabase ID: {user_id}")
-        
-        # Create unlocked_influencers record (uses Supabase user ID)
-        unlocked_influencer = UnlockedInfluencer(
-            user_id=user_id,  # Supabase UUID
-            profile_id=profile.id,
-            username=username,
-            unlocked_at=datetime.now(timezone.utc),
-            credits_spent=credits_spent
-        )
-        db.add(unlocked_influencer)
-        
-        # Create user_profile_access record (uses database user ID)
-        profile_access = UserProfileAccess(
-            user_id=database_user_id,  # Database UUID
-            profile_id=profile.id,
-            granted_at=datetime.now(timezone.utc)
-        )
-        db.add(profile_access)
-        
-        # Don't commit here - let the main transaction handle it
-        logger.info(f"Access records prepared for {user_id} -> {username}")
-        
-    except Exception as e:
-        logger.error(f"Failed to create access records for {user_id}/{username}: {e}")
-        raise e
+# OLD FLAWED TRANSACTION LOGIC REMOVED
+# Now handled by bulletproof_transaction_service for enterprise-grade consistency

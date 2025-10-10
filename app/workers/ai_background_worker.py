@@ -223,9 +223,9 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
                     post_analysis = {
                         'ai_content_category': analysis_results.get('category', {}).get('primary_category', 'general'),
                         'ai_category_confidence': analysis_results.get('category', {}).get('content_diversity_score', 0.5),
-                        'ai_sentiment': analysis_results.get('sentiment', {}).get('overall_sentiment', 'neutral'),
-                        'ai_sentiment_score': analysis_results.get('sentiment', {}).get('confidence_avg', 0.0),
-                        'ai_sentiment_confidence': analysis_results.get('sentiment', {}).get('confidence_avg', 0.0),
+                        'ai_sentiment': analysis_results.get('sentiment', {}).get('label', 'neutral'),
+                        'ai_sentiment_score': analysis_results.get('sentiment', {}).get('score', 0.0),
+                        'ai_sentiment_confidence': analysis_results.get('sentiment', {}).get('confidence', 0.0),
                         'ai_language_code': analysis_results.get('language', {}).get('primary_language', 'en'),
                         'ai_language_confidence': analysis_results.get('language', {}).get('multilingual_score', 0.5),
                         'ai_analyzed_at': datetime.now(timezone.utc)
@@ -256,7 +256,8 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
 
                     primary_content_type = category_analysis.get('primary_category', 'general')
                     content_distribution = category_analysis.get('category_distribution', {})
-                    avg_sentiment_score = sentiment_analysis.get('confidence_avg', 0.0)
+                    # Sentiment score should be calculated from individual posts, not from analysis_results
+                    # This value will be calculated properly later in aggregation (lines 384-386)
                     language_distribution = language_analysis.get('language_distribution', {})
 
                     # Advanced AI insights from the 7 new models
@@ -269,7 +270,7 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
                         .values(
                             ai_primary_content_type=primary_content_type,
                             ai_content_distribution=content_distribution,
-                            ai_avg_sentiment_score=float(avg_sentiment_score),
+                            # ai_avg_sentiment_score will be calculated later in _update_profile_ai_insights
                             ai_language_distribution=language_distribution,
                             ai_content_quality_score=float(content_quality_score),
                             ai_profile_analyzed_at=datetime.now(timezone.utc)

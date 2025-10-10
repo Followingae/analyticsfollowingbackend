@@ -40,8 +40,10 @@ class ProductionSupabaseAuthService:
     
     def __init__(self):
         self.supabase = None
+        self.supabase_admin = None  # Admin client for user creation
         self.supabase_url = None
         self.supabase_key = None
+        self.supabase_service_key = None
         self.initialized = False
         self.initialization_error = None
     
@@ -66,6 +68,11 @@ class ProductionSupabaseAuthService:
                 self.initialization_error = "SUPABASE_KEY environment variable not set"
                 logger.error(f"ERROR: {self.initialization_error}")
                 return False
+
+            if not settings.SUPABASE_SERVICE_KEY:
+                self.initialization_error = "SUPABASE_SERVICE_KEY environment variable not set"
+                logger.error(f"ERROR: {self.initialization_error}")
+                return False
             
             # Import and create client
             try:
@@ -76,15 +83,24 @@ class ProductionSupabaseAuthService:
                 logger.error(f"ERROR: {self.initialization_error}")
                 return False
             
-            # Create Supabase client
+            # Create Supabase clients
             try:
                 self.supabase_url = settings.SUPABASE_URL
                 self.supabase_key = settings.SUPABASE_KEY
+                self.supabase_service_key = settings.SUPABASE_SERVICE_KEY
+
+                # Regular client for auth operations
                 self.supabase: Client = create_client(
                     self.supabase_url,
                     self.supabase_key
                 )
-                logger.info("SUCCESS: Supabase client created successfully")
+
+                # Admin client with service role for user creation
+                self.supabase_admin: Client = create_client(
+                    self.supabase_url,
+                    self.supabase_service_key
+                )
+                logger.info("SUCCESS: Supabase clients created successfully (regular + admin)")
             except Exception as e:
                 self.initialization_error = f"Failed to create Supabase client: {e}"
                 logger.error(f"ERROR: {self.initialization_error}")
