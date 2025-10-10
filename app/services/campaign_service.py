@@ -6,7 +6,7 @@ Handles CRUD operations for campaigns, posts, and creators
 import logging
 from typing import Optional, List, Dict, Any
 from uuid import UUID
-from sqlalchemy import select, func, and_, desc
+from sqlalchemy import select, func, and_, desc, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from datetime import datetime
@@ -323,11 +323,21 @@ class CampaignService:
                 logger.warning(f"⚠️ Campaign {campaign_id} not found for user {user_id}")
                 return None
 
+            # Get the post to extract correct shortcode for URL generation
+            post = await db.get(Post, post_id)
+            if not post:
+                logger.warning(f"⚠️ Post {post_id} not found")
+                return None
+
+            # Generate correct Instagram URL using shortcode (not Instagram post ID)
+            correct_instagram_url = f"https://www.instagram.com/p/{post.shortcode}/" if post.shortcode else instagram_post_url
+            logger.info(f"🔗 Storing correct Instagram URL: {correct_instagram_url}")
+
             # Create campaign post
             campaign_post = CampaignPost(
                 campaign_id=campaign_id,
                 post_id=post_id,
-                instagram_post_url=instagram_post_url
+                instagram_post_url=correct_instagram_url  # Fixed: Use shortcode-based URL
             )
 
             db.add(campaign_post)
@@ -500,11 +510,53 @@ class CampaignService:
                     username=profile.username
                 )
 
+
+                # Extract collaboration data from raw_data (tagged users, mentions, coauthor_producers)
+                collaborators = []
+
+                # Check tagged users (most reliable for collaborations)
+                if post.raw_data and post.raw_data.get('tagged_users'):
+                    for tagged_user in post.raw_data.get('tagged_users', []):
+                        if tagged_user.get('username'):
+                            collaborators.append({
+                                'username': tagged_user.get('username'),
+                                'full_name': tagged_user.get('full_name', ''),
+                                'is_verified': tagged_user.get('is_verified', False),
+                                'collaboration_type': 'tagged_user'
+                            })
+
+                # Also check coauthor_producers for formal Instagram collaborations
+                if post.coauthor_producers and len(post.coauthor_producers) > 0:
+                    for coauthor in post.coauthor_producers:
+                        if isinstance(coauthor, dict) and coauthor.get('username'):
+                            collaborators.append({
+                                'username': coauthor.get('username'),
+                                'full_name': coauthor.get('full_name', ''),
+                                'is_verified': coauthor.get('is_verified', False),
+                                'collaboration_type': 'coauthor_producer'
+                            })
+
+                # Check mentions for brand partnerships  
+                if post.mentions and len(post.mentions) > 0:
+                    for mention in post.mentions:
+                        # Clean mention (@barakatme -> barakatme)
+                        clean_mention = mention.replace('@', '').strip()
+                        if clean_mention and clean_mention not in [c['username'] for c in collaborators]:
+                            collaborators.append({
+                                'username': clean_mention,
+                                'full_name': '',
+                                'is_verified': False,
+                                'collaboration_type': 'mention'
+                            })
+
+                # Generate correct Instagram URL from shortcode
+                correct_instagram_url = f"https://www.instagram.com/p/{post.shortcode}/" if post.shortcode else cp.instagram_post_url
+
                 posts_data.append({
                     # Frontend required fields
                     "id": str(post.id),
                     "thumbnail": thumbnail_url,  # CDN URL from cdn_thumbnail_url column
-                    "url": cp.instagram_post_url,
+                    "url": correct_instagram_url,  # Fixed: Use shortcode-based URL instead of stored URL
                     "type": post_type,  # "static" | "reel" | "story"
                     "views": post.video_view_count if post.is_video else 0,
                     "likes": post.likes_count or 0,
@@ -514,7 +566,7 @@ class CampaignService:
                     # Additional fields
                     "campaign_post_id": str(cp.id),
                     "post_id": str(post.id),
-                    "instagram_post_url": cp.instagram_post_url,
+                    "instagram_post_url": correct_instagram_url,  # Fixed: Use shortcode-based URL
                     "added_at": cp.added_at.isoformat(),
                     "shortcode": post.shortcode,
                     "caption": post.caption,
@@ -531,7 +583,12 @@ class CampaignService:
                     "creator_full_name": profile.full_name,
                     "creator_followers_count": profile.followers_count,
                     "creator_profile_pic_url": creator_cdn_profile_url,  # Always use CDN URL to avoid CORS
-                    "creator_profile_pic_url_hd": None  # Don't send Instagram URLs, they cause CORS errors
+                    "creator_profile_pic_url_hd": None,  # Don't send Instagram URLs, they cause CORS errors
+
+                    # Collaboration Data - BOTH creators for collaboration posts
+                    "collaborators": collaborators,
+                    "is_collaboration": len(collaborators) > 0,
+                    "total_creators": 1 + len([c for c in collaborators if c['collaboration_type'] == 'coauthor_producer'])
                 })
 
             logger.info(f"✅ Retrieved {len(posts_data)} posts for campaign {campaign_id}")
@@ -553,6 +610,7 @@ class CampaignService:
     ) -> List[Dict[str, Any]]:
         """
         Get all creators in campaign with aggregated analytics
+        NOW INCLUDES: Manual creators + Post collaborators
 
         Args:
             db: Database session
@@ -560,7 +618,7 @@ class CampaignService:
             user_id: User ID (for ownership check)
 
         Returns:
-            List of creator data with aggregated analytics
+            List of creator data with aggregated analytics (manual + collaborators)
         """
         try:
             # Verify campaign ownership
@@ -568,13 +626,28 @@ class CampaignService:
             if not campaign:
                 return []
 
-            # Get creators with relationships (removed audience_demographics selectinload - using ai_audience_insights instead)
+            # Get manually added creators
             result = await db.execute(
                 select(CampaignCreator)
                 .where(CampaignCreator.campaign_id == campaign_id)
                 .order_by(desc(CampaignCreator.added_at))
             )
             campaign_creators = result.scalars().all()
+
+            # Get unique collaborators from posts (coauthor_producers) - Fixed SQL query
+            collaborator_query = text("""
+                SELECT DISTINCT p.id, p.username, p.full_name, p.followers_count, p.profile_pic_url
+                FROM campaign_posts cp
+                JOIN posts post ON cp.post_id = post.id
+                CROSS JOIN jsonb_array_elements(post.coauthor_producers) AS collaborator
+                JOIN profiles p ON p.username = collaborator->>'username'
+                WHERE cp.campaign_id = :campaign_id
+                  AND post.coauthor_producers IS NOT NULL
+                  AND jsonb_array_length(post.coauthor_producers) > 0
+            """)
+
+            collaborator_result = await db.execute(collaborator_query, {"campaign_id": campaign_id})
+            collaborator_profiles = collaborator_result.all()
 
             # Initialize CDN sync service
             cdn_sync = CDNSyncService()
@@ -672,7 +745,75 @@ class CampaignService:
 
                 creators_data.append(creator_data)
 
-            logger.info(f"✅ Retrieved {len(creators_data)} creators for campaign {campaign_id}")
+            # Process collaborators (coauthor_producers from posts)
+            processed_usernames = {creator["username"] for creator in creators_data}
+
+            for collaborator in collaborator_profiles:
+                # Skip if already processed as manual creator
+                if collaborator.username in processed_usernames:
+                    continue
+
+                # Count posts where this collaborator appears - Fixed SQL query
+                collab_count_query = text("""
+                    SELECT COUNT(cp.id)
+                    FROM campaign_posts cp
+                    JOIN posts p ON cp.post_id = p.id
+                    CROSS JOIN jsonb_array_elements(p.coauthor_producers) AS collaborator
+                    WHERE cp.campaign_id = :campaign_id
+                      AND collaborator->>'username' = :username
+                      AND p.coauthor_producers IS NOT NULL
+                      AND jsonb_array_length(p.coauthor_producers) > 0
+                """)
+
+                collab_post_count_result = await db.execute(
+                    collab_count_query,
+                    {"campaign_id": campaign_id, "username": collaborator.username}
+                )
+                collab_post_count = collab_post_count_result.scalar() or 0
+
+                if collab_post_count == 0:
+                    continue
+
+                # Get CDN URL for collaborator profile picture
+                collab_cdn_profile_url = await cdn_sync.get_profile_cdn_url(
+                    db=db,
+                    profile_id=str(collaborator.id),
+                    username=collaborator.username
+                )
+
+                # Add collaborator to creators list
+                collaborator_data = {
+                    "campaign_creator_id": None,  # Collaborators don't have campaign_creator_id
+                    "profile_id": str(collaborator.id),
+                    "username": collaborator.username,
+                    "full_name": collaborator.full_name,
+                    "profile_pic_url": collab_cdn_profile_url,
+                    "added_at": None,  # Collaborators aren't manually added
+                    "creator_type": "collaborator",  # Mark as collaborator
+
+                    # Profile metrics
+                    "followers_count": collaborator.followers_count or 0,
+                    "following_count": 0,  # Not available for collaborators
+                    "posts_count": 0,  # Not available for collaborators
+                    "is_verified": False,  # Not available for collaborators
+
+                    # Campaign-specific metrics
+                    "posts_in_campaign": collab_post_count,
+                    "total_likes": 0,  # Collaborators don't have direct engagement metrics
+                    "total_comments": 0,
+                    "avg_engagement_rate": 0.0,
+
+                    # AI Analysis (not available for collaborators)
+                    "ai_primary_content_type": None,
+                    "ai_top_3_categories": None,
+                    "ai_content_quality_score": 0.0,
+                    "audience_demographics": None
+                }
+
+                creators_data.append(collaborator_data)
+                processed_usernames.add(collaborator.username)
+
+            logger.info(f"✅ Retrieved {len(creators_data)} creators for campaign {campaign_id} (including collaborators)")
             return creators_data
 
         except Exception as e:

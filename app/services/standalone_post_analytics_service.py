@@ -17,6 +17,7 @@ import json
 from app.scrapers.apify_instagram_client import ApifyInstagramClient, ApifyProfileNotFoundError, ApifyAPIError
 from app.database.unified_models import Post, Profile, AudienceDemographics
 from app.database.post_analytics_models import CampaignPostAnalytics
+from app.database.connection import get_session
 from app.core.config import settings
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
 
@@ -60,6 +61,37 @@ class StandalonePostAnalyticsService:
             existing_post = await self._get_post_by_shortcode(db, shortcode)
             if existing_post:
                 logger.info(f"📊 Post {shortcode} already exists, returning existing data")
+
+                # 🚀 FETCH APIFY DATA AND CHECK FOR COLLABORATORS (even for existing posts)
+                try:
+                    logger.info(f"🔍 Checking for missing collaborators in existing post...")
+                    post_data = await self._fetch_post_data_from_apify(post_url)
+
+                    if post_data:
+                        logger.info(f"✅ Got Apify data for existing post, checking collaborators...")
+                        await self._auto_create_collaborator_profiles(post_data, user_id)
+
+                        # Also check if we need to update missing thumbnail
+                        if not existing_post.cdn_thumbnail_url and post_data.get("displayUrl"):
+                            logger.info(f"🖼️ Missing CDN thumbnail detected, will trigger processing...")
+                            # Update thumbnail_src if missing
+                            async with get_session() as update_db:
+                                if not existing_post.thumbnail_src:
+                                    await update_db.execute(
+                                        text("UPDATE posts SET thumbnail_src = :url WHERE id = :post_id"),
+                                        {"url": post_data.get("displayUrl"), "post_id": existing_post.id}
+                                    )
+                                    await update_db.commit()
+                                    logger.info(f"✅ Updated thumbnail_src for existing post")
+                    else:
+                        logger.warning(f"⚠️ No Apify data returned for existing post")
+
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to check collaborators for existing post: {e}")
+                    import traceback
+                    logger.warning(f"⚠️ Traceback: {traceback.format_exc()}")
+                    # Don't fail the main flow
+
                 return await self._format_post_analytics(existing_post)
 
             try:
@@ -70,7 +102,7 @@ class StandalonePostAnalyticsService:
                 profile = await self._get_or_create_profile(db, post_data, user_id)
 
                 # Store post analysis
-                post_record = await self._store_post_analysis(db, post_data, shortcode, post_url, profile.id)
+                post_record = await self._store_post_analysis(db, post_data, shortcode, post_url, profile.id, user_id)
 
                 # Run AI analysis
                 ai_analysis = await self._analyze_post_with_ai(post_data)
@@ -284,7 +316,7 @@ class StandalonePostAnalyticsService:
         return result.scalar_one_or_none()
 
     async def _store_post_analysis(self, db: AsyncSession, post_data: Dict[str, Any],
-                                 shortcode: str, post_url: str, profile_id: UUID) -> Post:
+                                 shortcode: str, post_url: str, profile_id: UUID, user_id: UUID) -> Post:
         """Store post analysis in posts table"""
         try:
             # Check if post already exists (from Creator Analytics or previous Post Analytics)
@@ -299,6 +331,10 @@ class StandalonePostAnalyticsService:
                 existing_post = result.scalar_one_or_none()
                 if existing_post:
                     logger.info(f"✅ Post {shortcode} already exists by instagram_post_id (ID: {existing_post.id}), reusing existing record")
+
+                    # 🚀 AUTO-CREATE COLLABORATOR PROFILES (for existing posts too)
+                    await self._auto_create_collaborator_profiles(post_data, user_id)
+
                     return existing_post
 
             # Also check by shortcode (in case instagram_post_id doesn't match)
@@ -309,6 +345,10 @@ class StandalonePostAnalyticsService:
                 existing_post = result.scalar_one_or_none()
                 if existing_post:
                     logger.info(f"✅ Post {shortcode} already exists by shortcode (ID: {existing_post.id}), reusing existing record")
+
+                    # 🚀 AUTO-CREATE COLLABORATOR PROFILES (for existing posts too)
+                    await self._auto_create_collaborator_profiles(post_data, user_id)
+
                     return existing_post
 
             # Extract hashtags and mentions from caption
@@ -323,7 +363,7 @@ class StandalonePostAnalyticsService:
 
                 # Media information
                 media_type=post_data.get("type", "photo"),
-                is_video=post_data.get("isVideo", False),
+                is_video=bool(post_data.get("type") == "Video" or post_data.get("videoUrl")),
                 display_url=post_data.get("displayUrl", ""),
                 thumbnail_src=post_data.get("thumbnailSrc", ""),
 
@@ -366,6 +406,7 @@ class StandalonePostAnalyticsService:
                 thumbnail_resources=post_data.get("thumbnailResources", []),
                 sidecar_children=post_data.get("sidecarChildren", []),
                 tagged_users=post_data.get("taggedUsers", []),
+                coauthor_producers=post_data.get("coauthorProducers", []),  # Extract collaboration data
 
                 # Content analysis
                 hashtags=hashtags,
@@ -388,6 +429,10 @@ class StandalonePostAnalyticsService:
             await db.refresh(post)
 
             logger.info(f"✅ Stored post analysis for {shortcode}")
+
+            # 🚀 AUTO-CREATE COLLABORATOR PROFILES
+            await self._auto_create_collaborator_profiles(post_data, user_id)
+
             return post
 
         except Exception as e:
@@ -396,9 +441,30 @@ class StandalonePostAnalyticsService:
             raise
 
     async def _analyze_post_with_ai(self, post_data: Dict[str, Any]) -> Dict[str, Any]:
-        """AI analysis disabled - return empty analysis"""
-        logger.info("AI analysis disabled - returning Apify data only")
-        return {"status": "disabled", "analysis": {}}
+        """Run AI analysis on post content"""
+        try:
+            logger.info("🤖 Running AI analysis on post content...")
+
+            # Extract text content for AI analysis
+            caption = post_data.get("caption", "")
+            if not caption:
+                logger.warning("No caption found for AI analysis")
+                return {"status": "no_content", "analysis": {}}
+
+            # Run AI analysis using bulletproof content intelligence
+            ai_results = await bulletproof_content_intelligence.analyze_post_content(
+                caption=caption,
+                hashtags=post_data.get("hashtags", []),
+                mentions=post_data.get("mentions", [])
+            )
+
+            logger.info(f"✅ AI analysis completed successfully")
+            return {"status": "success", "analysis": ai_results}
+
+        except Exception as e:
+            logger.error(f"❌ AI analysis failed: {e}")
+            # Return minimal structure so the post still gets saved
+            return {"status": "failed", "analysis": {}, "error": str(e)}
 
     async def _update_ai_analysis(self, db: AsyncSession, post_id: UUID, ai_analysis: Dict[str, Any]):
         """Update post with AI results"""
@@ -421,13 +487,13 @@ class StandalonePostAnalyticsService:
                 """),
                 {
                     "post_id": post_id,
-                    "category": ai_analysis.get("content_category", {}).get("category"),
-                    "category_confidence": ai_analysis.get("content_category", {}).get("confidence", 0.0),
-                    "sentiment": ai_analysis.get("sentiment", {}).get("label"),
-                    "sentiment_score": ai_analysis.get("sentiment", {}).get("score", 0.0),
-                    "sentiment_confidence": ai_analysis.get("sentiment", {}).get("confidence", 0.0),
-                    "language": ai_analysis.get("language", {}).get("language"),
-                    "language_confidence": ai_analysis.get("language", {}).get("confidence", 0.0),
+                    "category": ai_analysis.get("analysis", {}).get("content_category", {}).get("category"),
+                    "category_confidence": ai_analysis.get("analysis", {}).get("content_category", {}).get("confidence", 0.0),
+                    "sentiment": ai_analysis.get("analysis", {}).get("sentiment", {}).get("label"),
+                    "sentiment_score": ai_analysis.get("analysis", {}).get("sentiment", {}).get("score", 0.0),
+                    "sentiment_confidence": ai_analysis.get("analysis", {}).get("sentiment", {}).get("confidence", 0.0),
+                    "language": ai_analysis.get("analysis", {}).get("language", {}).get("code"),
+                    "language_confidence": ai_analysis.get("analysis", {}).get("language", {}).get("confidence", 0.0),
                     "raw_analysis": json.dumps(ai_analysis),
                     "analyzed_at": datetime.now(timezone.utc),
                     "version": "1.0.0"
@@ -734,6 +800,62 @@ class StandalonePostAnalyticsService:
                 logger.error(f"❌ Creator analytics trigger failed: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
+
+    async def _auto_create_collaborator_profiles(self, post_data: Dict[str, Any], user_id: UUID):
+        """
+        Auto-create collaborator profiles for coauthorProducers
+
+        When a post has collaborators, automatically trigger creator analytics
+        for any collaborators that don't exist in our database yet.
+        """
+        try:
+            coauthor_producers = post_data.get("coauthorProducers", [])
+            if not coauthor_producers:
+                logger.info(f"🤝 No collaborators found in post data")
+                return
+
+            logger.info(f"🤝 Found {len(coauthor_producers)} collaborators: {[c.get('username') for c in coauthor_producers]}")
+            logger.info(f"🤝 Checking for missing profiles...")
+
+            for collaborator in coauthor_producers:
+                collab_username = collaborator.get("username")
+                if not collab_username:
+                    continue
+
+                try:
+                    # Check if profile already exists
+                    from app.database.connection import get_session
+                    async with get_session() as check_db:
+                        # Query for existing profile
+                        result = await check_db.execute(
+                            select(Profile).where(Profile.username == collab_username)
+                        )
+                        existing_profile = result.scalar_one_or_none()
+
+                        if existing_profile:
+                            logger.info(f"✅ Collaborator {collab_username} already exists - skipping")
+                            continue
+
+                        # Profile doesn't exist - trigger creator analytics
+                        logger.info(f"🚀 AUTO-CREATING COLLABORATOR PROFILE: {collab_username}")
+                        logger.info(f"   This will add their followers to campaign reach calculations")
+
+                        # Trigger full creator analytics (non-blocking background task)
+                        asyncio.create_task(
+                            self._trigger_full_creator_analytics(collab_username, user_id)
+                        )
+
+                        logger.info(f"✅ Triggered creator analytics for collaborator: {collab_username}")
+
+                except Exception as e:
+                    logger.error(f"❌ Failed to check/create collaborator {collab_username}: {e}")
+                    import traceback
+                    logger.error(f"❌ Traceback: {traceback.format_exc()}")
+                    # Continue with other collaborators
+
+        except Exception as e:
+            logger.error(f"❌ Auto-create collaborator profiles failed: {e}")
+            # Don't raise - this is a background enhancement, shouldn't break main flow
 
 
 # Global service instance
