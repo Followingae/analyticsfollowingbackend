@@ -189,6 +189,32 @@ class CreditTransactionSummary(BaseModel):
     created_at: datetime
 
 
+class CreditsInOutSummary(BaseModel):
+    """Credits In vs Credits Out summary for user dashboard"""
+    # Credits In (positive transactions)
+    total_credits_in: int = Field(..., description="Total credits earned/added")
+    credits_earned: int = Field(..., description="Credits from plan allowances")
+    credits_purchased: int = Field(..., description="Credits from topup purchases")
+    credits_bonus: int = Field(..., description="Bonus/promotional credits")
+    credits_refunded: int = Field(..., description="Refunded credits")
+
+    # Credits Out (negative transactions)
+    total_credits_out: int = Field(..., description="Total credits spent")
+    credits_spent: int = Field(..., description="Credits spent on actions")
+    credits_expired: int = Field(..., description="Credits that expired")
+
+    # Summary
+    net_credits: int = Field(..., description="Net credits (in - out)")
+    current_balance: int = Field(..., description="Current wallet balance")
+
+    # Time period
+    period_start: Optional[date] = Field(None, description="Start date for summary period")
+    period_end: Optional[date] = Field(None, description="End date for summary period")
+
+    # Breakdown by month (for charts)
+    monthly_breakdown: List[Dict[str, Any]] = Field(default_factory=list, description="Monthly in/out breakdown")
+
+
 # =============================================================================
 # UNLOCKED INFLUENCERS MODELS
 # =============================================================================

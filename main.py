@@ -249,6 +249,7 @@ from app.api.brand_proposals_routes import router as brand_proposals_router
 # NOTE: Removed team_instagram_routes - replaced by simple API endpoints
 from app.api.team_management_routes import router as team_management_router
 from app.api.stripe_subscription_routes import router as stripe_router
+from app.api.stripe_webhook_routes import router as stripe_webhook_router
 app.include_router(brand_proposals_router, prefix="/api")
 
 # NOTE: Removed team_router (team_instagram_routes.py) - replaced by simple API endpoints
@@ -258,6 +259,9 @@ app.include_router(team_management_router, prefix="/api/v1")
 
 # Include Stripe Subscription routes - Billing and subscription management
 app.include_router(stripe_router, prefix="/api/v1")
+
+# Include Stripe Webhook routes - Automatic subscription event processing
+app.include_router(stripe_webhook_router)
 
 # DISABLED: Simple Creator Search routes - Replaced by bulletproof compatibility endpoints below
 # from app.api.simple_creator_search_routes import router as simple_creator_router

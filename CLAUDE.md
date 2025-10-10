@@ -813,10 +813,60 @@ Usage Analytics Cache: 1 hour TTL
 
 # 🏢 B2B SaaS Platform Features
 
-### Subscription Tiers
-- **Free**: 5 profiles/month (individual only)
-- **Standard ($199/month)**: 2 team members, 500 profiles, 250 emails, 125 posts
-- **Premium ($499/month)**: 5 team members, 2000 profiles, 800 emails, 300 posts, 20% topup discount
+## 💳 **Subscription Plans (Base + Topup Model)**
+
+### **🆓 Free Plan**
+- **Price**: $0/month
+- **Team Members**: 1 (individual only)
+- **Monthly Included Allowances**:
+  - Profiles: 5 unlocks
+  - Emails: 0 unlocks
+  - Posts: 0 analytics
+- **Features**: Basic analytics only
+- **Topup Discount**: 0%
+
+### **📈 Standard Plan**
+- **Price**: $199/month
+- **Team Members**: 2
+- **Monthly Included Allowances**:
+  - Profiles: 500 unlocks
+  - Emails: 250 unlocks
+  - Posts: 125 analytics
+- **Features**: Full analytics, campaigns, lists, export, priority support
+- **Topup Discount**: 0%
+
+### **⭐ Premium Plan**
+- **Price**: $499/month
+- **Team Members**: 5
+- **Monthly Included Allowances**:
+  - Profiles: 2,000 unlocks
+  - Emails: 800 unlocks
+  - Posts: 300 analytics
+- **Features**: Full analytics, campaigns, lists, export, priority support, topup discount
+- **Topup Discount**: 20% on all credit topup purchases
+
+## 💰 **Credit Topup Packages (Additional Purchase)**
+
+Users can buy **additional credits** at any time - before or after reaching their monthly limits:
+
+### **Topup Packages**
+- **Package A - Starter**: 1,000 additional credits ($50 base price)
+- **Package B - Professional**: 2,500 additional credits ($125 base price)
+- **Enterprise Package**: 10,000 additional credits ($500 base price)
+
+### **Action Credit Costs**
+- Profile Analysis: 25 credits
+- Post Analytics: 5 credits
+- Discovery: 1 credit
+- Email Unlock: 1 credit
+- Campaign Analysis: 10 credits
+- Bulk Export: 50 credits
+
+## 🔗 **Business Model**
+1. **Subscription Plan** = Base monthly allowance + team features + platform access
+2. **Credit Topups** = Additional credits you can purchase anytime (proactive or reactive)
+3. **Premium users get 20% discount** on all credit topup purchases
+4. **Actions consume credits** from monthly allowance first, then topup credits
 
 ### Team Management System
 - Professional team collaboration with role-based permissions

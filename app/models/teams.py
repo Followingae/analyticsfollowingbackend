@@ -271,38 +271,88 @@ SUBSCRIPTION_TIER_LIMITS = {
         "monthly_profile_limit": 5,
         "monthly_email_limit": 0,
         "monthly_posts_limit": 0,
+        "monthly_credits": 125,  # 5 profiles × 25 credits
         "price_per_month": 0,
         "topup_discount": 0.0,
-        "features": ["basic_analytics"]
+        "features": ["basic_analytics"],
+        "description": "Individual only, basic analytics",
+        "currency": "USD"
     },
     SubscriptionTier.STANDARD: {
         "max_team_members": 2,
         "monthly_profile_limit": 500,
         "monthly_email_limit": 250,
         "monthly_posts_limit": 125,
+        "monthly_credits": 13375,  # 500×25 + 250×1 + 125×5 = 12500 + 250 + 625
         "price_per_month": 199,
         "topup_discount": 0.0,
-        "features": ["full_analytics", "campaigns", "lists", "export", "priority_support"]
+        "features": ["full_analytics", "campaigns", "lists", "export", "priority_support"],
+        "description": "2 team members, 500 profile unlocks, 250 email unlocks, 125 post analytics",
+        "currency": "USD"
     },
     SubscriptionTier.PREMIUM: {
         "max_team_members": 5,
         "monthly_profile_limit": 2000,
         "monthly_email_limit": 800,
         "monthly_posts_limit": 300,
+        "monthly_credits": 52300,  # 2000×25 + 800×1 + 300×5 = 50000 + 800 + 1500
         "price_per_month": 499,
-        "topup_discount": 0.2,  # 20% discount
-        "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"]
+        "topup_discount": 0.2,  # 20% discount on credit topups
+        "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"],
+        "description": "5 team members, 2000 profile unlocks, 800 email unlocks, 300 post analytics, 20% topup discount",
+        "currency": "USD"
     },
-    # CRITICAL FIX: Add professional tier for existing users
+    # Legacy support for existing users
     "professional": {
         "max_team_members": 5,
         "monthly_profile_limit": 2000,
         "monthly_email_limit": 800,
         "monthly_posts_limit": 300,
+        "monthly_credits": 52300,  # 2000×25 + 800×1 + 300×5 = 50000 + 800 + 1500
         "price_per_month": 499,
-        "topup_discount": 0.2,  # 20% discount
-        "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"]
+        "topup_discount": 0.2,  # 20% discount on credit topups
+        "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"],
+        "description": "Legacy professional tier (same as Premium)",
+        "currency": "USD"
     }
+}
+
+# Credit Topup Packages (Additional credits users can purchase anytime)
+CREDIT_TOPUP_PACKAGES = {
+    "package_a": {
+        "name": "Package A - Starter",
+        "credits": 1000,
+        "description": "Perfect for small brands and agencies getting started with influencer discovery",
+        "base_price_usd": 50.00,  # Base price before any discounts
+        "sort_order": 1,
+        "is_active": True
+    },
+    "package_b": {
+        "name": "Package B - Professional",
+        "credits": 2500,
+        "description": "Ideal for growing brands with regular influencer collaboration needs",
+        "base_price_usd": 125.00,  # Base price before any discounts
+        "sort_order": 2,
+        "is_active": True
+    },
+    "package_enterprise": {
+        "name": "Enterprise Package",
+        "credits": 10000,
+        "description": "Unlimited access for large brands and agencies",
+        "base_price_usd": 500.00,  # Base price before any discounts
+        "sort_order": 3,
+        "is_active": True
+    }
+}
+
+# Action credit costs (what each action costs in credits)
+ACTION_CREDIT_COSTS = {
+    "profile_analysis": 25,
+    "post_analytics": 5,
+    "discovery": 1,
+    "email_unlock": 1,
+    "campaign_analysis": 10,
+    "bulk_export": 50
 }
 
 TEAM_ROLE_PERMISSIONS = {

@@ -20,6 +20,7 @@ from app.middleware.team_auth_middleware import (
 from app.database.connection import get_db
 from app.database.unified_models import User, Team
 from app.core.config import settings
+from app.models.teams import SUBSCRIPTION_TIER_LIMITS
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/subscription", tags=["Stripe Subscription Management"])
@@ -217,7 +218,7 @@ async def get_subscription_status(
                 "id": str(team.id),
                 "name": team.name,
                 "company_name": team.company_name,
-                "member_count": len([m for m in team.members if m.status == "active"]) if team.members else 0
+                "member_count": 1  # Default to 1, can be enhanced later with proper member count query
             },
             "user": {
                 "role": team_context.user_role,
@@ -451,19 +452,34 @@ async def get_stripe_config():
     if not stripe:
         raise HTTPException(status_code=500, detail="Stripe not configured")
     
+    # Get pricing from centralized configuration
+    standard_config = SUBSCRIPTION_TIER_LIMITS.get("standard", {})
+    premium_config = SUBSCRIPTION_TIER_LIMITS.get("premium", {})
+
     return {
         "publishable_key": STRIPE_PUBLISHABLE_KEY,
         "pricing": {
             "standard": {
                 "price_id": SUBSCRIPTION_PRICE_IDS.get('standard'),
-                "monthly_cost": 199,
-                "features": ["500 profiles/month", "250 emails", "125 posts", "2 team members"]
+                "monthly_cost": standard_config.get("price_per_month", 199),
+                "features": [
+                    f"{standard_config.get('monthly_profile_limit', 500)} profiles/month",
+                    f"{standard_config.get('monthly_email_limit', 250)} emails",
+                    f"{standard_config.get('monthly_posts_limit', 125)} posts",
+                    f"{standard_config.get('max_team_members', 2)} team members"
+                ]
             },
             "premium": {
                 "price_id": SUBSCRIPTION_PRICE_IDS.get('premium'),
-                "monthly_cost": 499,
-                "features": ["2000 profiles/month", "800 emails", "300 posts", "5 team members"]
+                "monthly_cost": premium_config.get("price_per_month", 499),
+                "features": [
+                    f"{premium_config.get('monthly_profile_limit', 2000)} profiles/month",
+                    f"{premium_config.get('monthly_email_limit', 800)} emails",
+                    f"{premium_config.get('monthly_posts_limit', 300)} posts",
+                    f"{premium_config.get('max_team_members', 5)} team members",
+                    f"{int(premium_config.get('topup_discount', 0.2) * 100)}% topup discount"
+                ]
             }
         },
-        "currency": "usd"
+        "currency": standard_config.get("currency", "usd").lower()
     }

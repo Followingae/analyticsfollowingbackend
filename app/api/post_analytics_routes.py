@@ -103,19 +103,20 @@ async def analyze_posts_batch(
     Analyze multiple Instagram posts in batch
 
     Features:
-    - Process up to 10 posts at once
-    - Controlled concurrency to avoid rate limits
+    - Process up to 50 posts at once
+    - True concurrent processing with controlled concurrency (max 5 simultaneous)
     - Individual success/failure tracking per post
     - Detailed results for each post
+    - Follows complete Post Analytics sequence (Apify → AI → CDN → Creator Analytics trigger)
     """
     try:
         logger.info(f"📦 Batch analysis requested by user {current_user.id}: {len(request.post_urls)} posts")
 
         # Validate batch size
-        if len(request.post_urls) > 10:
+        if len(request.post_urls) > 50:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Maximum 10 posts allowed per batch request"
+                detail="Maximum 50 posts allowed per batch request"
             )
 
         if len(request.post_urls) == 0:
@@ -126,29 +127,60 @@ async def analyze_posts_batch(
 
         # URL validation handled by Apify
 
-        # Process each post
-        results = []
-        for post_url in request.post_urls:
+        # Process posts with controlled concurrency
+        import asyncio
+        from typing import List
+
+        async def analyze_single_post(post_url: str) -> dict:
+            """Analyze a single post and return result - each gets its own DB session"""
             try:
-                analysis_result = await standalone_post_analytics_service.analyze_post_by_url(
-                    post_url=post_url,
-                    db=db,
-                    user_id=current_user.id
-                )
-
-                results.append({
-                    "success": True,
-                    "post_url": post_url,
-                    "data": analysis_result
-                })
-
+                # Each concurrent task gets its own database session
+                from app.database.connection import get_session
+                async with get_session() as post_db:
+                    analysis_result = await standalone_post_analytics_service.analyze_post_by_url(
+                        post_url=post_url,
+                        db=post_db,
+                        user_id=current_user.id
+                    )
+                    return {
+                        "success": True,
+                        "post_url": post_url,
+                        "data": analysis_result
+                    }
             except Exception as e:
                 logger.error(f"❌ Failed to analyze {post_url}: {e}")
-                results.append({
+                return {
                     "success": False,
                     "post_url": post_url,
                     "error": str(e)
+                }
+
+        # Process with semaphore to control concurrency
+        max_concurrent = min(request.max_concurrent or 3, 5)  # Max 5 concurrent
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def analyze_with_semaphore(post_url: str) -> dict:
+            async with semaphore:
+                return await analyze_single_post(post_url)
+
+        # Run all posts concurrently with controlled concurrency
+        logger.info(f"🚀 Processing {len(request.post_urls)} posts with max {max_concurrent} concurrent")
+        tasks = [analyze_with_semaphore(post_url) for post_url in request.post_urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Handle any exceptions from gather
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                processed_results.append({
+                    "success": False,
+                    "post_url": request.post_urls[i],
+                    "error": str(result)
                 })
+            else:
+                processed_results.append(result)
+
+        results = processed_results
 
         # Calculate summary statistics
         successful_analyses = sum(1 for r in results if r["success"])

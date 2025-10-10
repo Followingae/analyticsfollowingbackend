@@ -64,7 +64,7 @@ def requires_credits(
                     detail="Authentication required for credit-gated actions"
                 )
             
-            user_id = UUID(str(current_user.id))
+            user_id = UUID(str(current_user.supabase_user_id))
             
             # CRITICAL OPTIMIZATION: Check if profile is already unlocked (skip credit check)
             if check_unlock_status:

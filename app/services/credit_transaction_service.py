@@ -155,7 +155,7 @@ class CreditTransactionService:
                     description=transaction.description,
                     reference_id=transaction.reference_id,
                     reference_type=transaction.reference_type,
-                    billing_cycle_date=transaction.billing_cycle_date,
+                    billing_cycle_date=transaction.month_year,
                     metadata=transaction.transaction_metadata,
                     created_at=transaction.created_at
                 )
@@ -189,29 +189,27 @@ class CreditTransactionService:
         
         try:
             async with get_session() as session:
-                # Use UPSERT to update or insert usage tracking
-                await session.execute(
-                    text("""
-                        INSERT INTO public.credit_usage_tracking 
-                        (user_id, action_type, month_year, free_actions_used, paid_actions_used, total_credits_spent)
-                        VALUES (:user_id, :action_type, :month_year, :free_used, :paid_used, :credits_spent)
-                        ON CONFLICT (user_id, action_type, month_year)
-                        DO UPDATE SET
-                            free_actions_used = credit_usage_tracking.free_actions_used + :free_used,
-                            paid_actions_used = credit_usage_tracking.paid_actions_used + :paid_used,
-                            total_credits_spent = credit_usage_tracking.total_credits_spent + :credits_spent,
-                            last_updated = NOW()
-                    """),
-                    {
-                        "user_id": str(user_id),
-                        "action_type": action_type,
-                        "month_year": current_month,
-                        "free_used": 1 if used_free_allowance else 0,
-                        "paid_used": 0 if used_free_allowance else 1,
-                        "credits_spent": credits_spent
-                    }
-                )
-                
+                # Use raw SQL to insert using actual database schema
+                query = text("""
+                    INSERT INTO credit_usage_tracking
+                    (user_id, action_type, month_year, free_actions_used, paid_actions_used, total_credits_spent)
+                    VALUES (:user_id, :action_type, :month_year, :free_used, :paid_used, :credits_spent)
+                    ON CONFLICT (user_id, action_type, month_year)
+                    DO UPDATE SET
+                        free_actions_used = credit_usage_tracking.free_actions_used + :free_used,
+                        paid_actions_used = credit_usage_tracking.paid_actions_used + :paid_used,
+                        total_credits_spent = credit_usage_tracking.total_credits_spent + :credits_spent,
+                        last_updated = NOW()
+                """)
+
+                await session.execute(query, {
+                    "user_id": str(user_id),
+                    "action_type": action_type,
+                    "month_year": current_month,
+                    "free_used": 1 if used_free_allowance else 0,
+                    "paid_used": 0 if used_free_allowance else 1,
+                    "credits_spent": credits_spent
+                })
                 await session.commit()
                 
                 # Clear analytics cache
@@ -248,53 +246,67 @@ class CreditTransactionService:
             return MonthlyUsageSummary(**cached_summary)
         
         try:
-            # TEMPORARY FIX: Skip usage tracking due to model mismatch
-            # TODO: Fix CreditUsageTracking model schema mismatch
-            logger.warning(f"TEMP FIX: Skipping usage tracking for user {user_id} due to model mismatch")
-            usage_records = []
-                
-            # Calculate totals and breakdown
-            total_spent = 0  # sum(record.total_credits_spent for record in usage_records)
+            async with get_session() as session:
+                # Use raw SQL to query the actual database schema
+                query = text("""
+                    SELECT action_type,
+                           SUM(free_actions_used) as free_used,
+                           SUM(paid_actions_used) as paid_used,
+                           SUM(total_credits_spent) as credits_spent
+                    FROM credit_usage_tracking
+                    WHERE user_id = :user_id
+                      AND month_year = :month_year
+                    GROUP BY action_type
+                """)
+
+                result = await session.execute(query, {
+                    "user_id": str(user_id),
+                    "month_year": month_year
+                })
+                usage_records = result.fetchall()
+
+            # Calculate totals and breakdown using actual database fields
+            total_spent = sum(record.credits_spent for record in usage_records)
             actions_breakdown = {}
-                
-            # TEMP: Skip processing since usage_records is empty
+
+            # Process records from actual database
             for record in usage_records:
                 actions_breakdown[record.action_type] = {
-                    "free_used": record.free_actions_used,
-                        "paid_used": record.paid_actions_used,
-                        "credits_spent": record.total_credits_spent
+                    "free_used": record.free_used,
+                    "paid_used": record.paid_used,
+                    "credits_spent": record.credits_spent
+                }
+
+            # Get top actions by credits spent (after processing all records)
+            top_actions = sorted(
+                [
+                    {
+                        "action_type": action_type,
+                        "credits_spent": data["credits_spent"],
+                        "total_actions": data["free_used"] + data["paid_used"]
                     }
-                
-                # Get top actions by credits spent
-                top_actions = sorted(
-                    [
-                        {
-                            "action_type": action_type,
-                            "credits_spent": data["credits_spent"],
-                            "total_actions": data["free_used"] + data["paid_used"]
-                        }
-                        for action_type, data in actions_breakdown.items()
-                    ],
-                    key=lambda x: x["credits_spent"],
-                    reverse=True
-                )[:5]  # Top 5 actions
-                
-                summary = MonthlyUsageSummary(
-                    month_year=month_year,
-                    total_spent=total_spent,
-                    actions_breakdown=actions_breakdown,
-                    top_actions=top_actions
-                )
-                
-                # Cache the summary
-                import json
-                await cache_manager.redis_client.setex(
-                    cache_key, 
-                    self.analytics_cache_ttl, 
-                    json.dumps(summary.dict(), default=str)
-                )
-                
-                return summary
+                    for action_type, data in actions_breakdown.items()
+                ],
+                key=lambda x: x["credits_spent"],
+                reverse=True
+            )[:5]  # Top 5 actions
+
+            summary = MonthlyUsageSummary(
+                month_year=month_year,
+                total_spent=total_spent,
+                actions_breakdown=actions_breakdown,
+                top_actions=top_actions
+            )
+
+            # Cache the summary
+            import json
+            await cache_manager.redis_client.setex(
+                cache_key,
+                self.analytics_cache_ttl,
+                json.dumps(summary.dict(), default=str)
+            )
+
+            return summary
                 
         except Exception as e:
             logger.error(f"Error getting monthly usage for user {user_id}: {e}")
@@ -358,26 +370,25 @@ class CreditTransactionService:
                 
                 transactions_data = transactions_result.fetchall()
                 
-                # Get usage tracking aggregates
-                usage_result = await session.execute(
-                    text("""
-                        SELECT 
-                            month_year,
-                            action_type,
-                            SUM(free_actions_used) as total_free,
-                            SUM(paid_actions_used) as total_paid,
-                            SUM(total_credits_spent) as total_spent
-                        FROM public.credit_usage_tracking
-                        WHERE user_id = :user_id 
-                          AND month_year >= :start_date
-                        GROUP BY month_year, action_type
-                        ORDER BY month_year DESC, total_spent DESC
-                    """),
-                    {
-                        "user_id": str(user_id),
-                        "start_date": start_date
-                    }
+                # Get usage tracking aggregates using actual database schema
+                usage_query = (
+                    select(
+                        CreditUsageTracking.month_year.label('month_year'),
+                        CreditUsageTracking.action_type.label('action_type'),
+                        func.count().label('total_actions'),
+                        func.sum(CreditUsageTracking.total_credits_spent).label('total_spent')
+                    )
+                    .where(
+                        and_(
+                            CreditUsageTracking.user_id == user_id,
+                            CreditUsageTracking.month_year >= start_date
+                        )
+                    )
+                    .group_by(CreditUsageTracking.month_year, CreditUsageTracking.action_type)
+                    .order_by(CreditUsageTracking.month_year.desc(), func.sum(CreditUsageTracking.total_credits_spent).desc())
                 )
+
+                usage_result = await session.execute(usage_query)
                 
                 usage_data = usage_result.fetchall()
                 
@@ -399,11 +410,11 @@ class CreditTransactionService:
                     month_key = row.month_year.strftime('%Y-%m')
                     if month_key not in action_usage:
                         action_usage[month_key] = {}
-                    
+
                     action_usage[month_key][row.action_type] = {
-                        "free_actions": row.total_free,
-                        "paid_actions": row.total_paid,
-                        "credits_spent": row.total_spent
+                        "free_actions": 0,  # Not tracked in current schema
+                        "paid_actions": row.total_actions,
+                        "credits_spent": row.total_spent or 0
                     }
                 
                 analytics = {
@@ -450,7 +461,160 @@ class CreditTransactionService:
                 "action_usage": {},
                 "totals": {"total_spent": 0, "total_purchased": 0, "total_earned": 0}
             }
-    
+
+    # =========================================================================
+    # CREDITS IN/OUT SUMMARY
+    # =========================================================================
+
+    async def get_credits_in_out_summary(
+        self,
+        user_id: UUID,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        include_monthly_breakdown: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Get comprehensive credits in vs credits out summary
+
+        Args:
+            user_id: User UUID
+            start_date: Optional start date for filtering
+            end_date: Optional end date for filtering
+            include_monthly_breakdown: Whether to include monthly breakdown for charts
+
+        Returns:
+            CreditsInOutSummary data with detailed breakdown
+        """
+        try:
+            async with get_session() as session:
+                # Base query for user transactions
+                base_query = select(CreditTransaction).where(CreditTransaction.user_id == user_id)
+
+                # Apply date filters if provided
+                if start_date:
+                    base_query = base_query.where(CreditTransaction.created_at >= start_date)
+                if end_date:
+                    # Include full end date
+                    end_datetime = datetime.combine(end_date, datetime.max.time())
+                    base_query = base_query.where(CreditTransaction.created_at <= end_datetime)
+
+                # Execute query to get all transactions
+                result = await session.execute(base_query.order_by(CreditTransaction.created_at))
+                transactions = result.scalars().all()
+
+                # Initialize counters
+                credits_in = {
+                    'earned': 0,      # Monthly allowances, rewards
+                    'purchased': 0,   # Topup purchases
+                    'bonus': 0,       # Promotional credits
+                    'refunded': 0     # Refunded credits
+                }
+
+                credits_out = {
+                    'spent': 0,       # Used for actions
+                    'expired': 0      # Expired credits
+                }
+
+                monthly_data = {}
+
+                # Process each transaction
+                for transaction in transactions:
+                    amount = abs(transaction.amount)
+                    month_key = transaction.created_at.strftime('%Y-%m')
+
+                    # Initialize monthly data if needed
+                    if month_key not in monthly_data:
+                        monthly_data[month_key] = {
+                            'month': month_key,
+                            'credits_in': 0,
+                            'credits_out': 0,
+                            'net': 0
+                        }
+
+                    # Categorize transaction based on type
+                    if transaction.transaction_type == 'earned':
+                        credits_in['earned'] += amount
+                        monthly_data[month_key]['credits_in'] += amount
+
+                    elif transaction.transaction_type == 'spent':
+                        credits_out['spent'] += amount
+                        monthly_data[month_key]['credits_out'] += amount
+
+                    elif transaction.transaction_type == 'refunded':
+                        credits_in['refunded'] += amount
+                        monthly_data[month_key]['credits_in'] += amount
+
+                    elif transaction.transaction_type == 'expired':
+                        credits_out['expired'] += amount
+                        monthly_data[month_key]['credits_out'] += amount
+
+                    elif transaction.transaction_type == 'bonus':
+                        credits_in['bonus'] += amount
+                        monthly_data[month_key]['credits_in'] += amount
+
+                # Calculate monthly net
+                for month_data in monthly_data.values():
+                    month_data['net'] = month_data['credits_in'] - month_data['credits_out']
+
+                # Calculate totals
+                total_credits_in = sum(credits_in.values())
+                total_credits_out = sum(credits_out.values())
+                net_credits = total_credits_in - total_credits_out
+
+                # Get current balance from wallet
+                from app.services.credit_wallet_service import credit_wallet_service
+                balance_info = await credit_wallet_service.get_wallet_balance(user_id)
+                current_balance = balance_info.balance if balance_info else 0
+
+                # Prepare monthly breakdown for charts
+                monthly_breakdown = []
+                if include_monthly_breakdown:
+                    monthly_breakdown = sorted(monthly_data.values(), key=lambda x: x['month'])
+
+                return {
+                    # Credits In (positive transactions)
+                    "total_credits_in": total_credits_in,
+                    "credits_earned": credits_in['earned'],
+                    "credits_purchased": credits_in['purchased'],
+                    "credits_bonus": credits_in['bonus'],
+                    "credits_refunded": credits_in['refunded'],
+
+                    # Credits Out (negative transactions)
+                    "total_credits_out": total_credits_out,
+                    "credits_spent": credits_out['spent'],
+                    "credits_expired": credits_out['expired'],
+
+                    # Summary
+                    "net_credits": net_credits,
+                    "current_balance": current_balance,
+
+                    # Time period
+                    "period_start": start_date,
+                    "period_end": end_date,
+
+                    # Breakdown by month
+                    "monthly_breakdown": monthly_breakdown
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to get credits in/out summary for user {user_id}: {str(e)}")
+            # Return empty summary on error
+            return {
+                "total_credits_in": 0,
+                "credits_earned": 0,
+                "credits_purchased": 0,
+                "credits_bonus": 0,
+                "credits_refunded": 0,
+                "total_credits_out": 0,
+                "credits_spent": 0,
+                "credits_expired": 0,
+                "net_credits": 0,
+                "current_balance": 0,
+                "period_start": start_date,
+                "period_end": end_date,
+                "monthly_breakdown": []
+            }
+
     # =========================================================================
     # TRANSACTION SEARCH & FILTERING
     # =========================================================================

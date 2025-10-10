@@ -222,6 +222,10 @@ docker-compose.override.yml
 .claude/settings.local.jsonnul
 redis-server/
 
+# Files with API keys and secrets (keep local only)
+.mcp.json.old
+update_stripe_products_marketing.py
+
 # Database development files
 *.sql
 database_schema_audit.md
