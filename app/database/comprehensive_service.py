@@ -157,7 +157,7 @@ class ComprehensiveDataService:
     # PROFILE DATA STORAGE - COMPREHENSIVE APIFY MAPPING
     # ==========================================================================
     
-    async def store_complete_profile(self, db: AsyncSession, username: str, raw_data: Dict[str, Any]) -> Tuple[Profile, bool]:
+    async def store_complete_profile(self, db: AsyncSession, username: str, raw_data: Dict[str, Any], is_background_discovery: bool = False) -> Tuple[Profile, bool]:
         """Store COMPLETE profile with ALL related data (posts, related profiles, etc.)"""
         from app.database.robust_storage import store_profile_robust
         
@@ -184,7 +184,7 @@ class ComprehensiveDataService:
                 # Store related profiles
                 logger.info(f"Processing related profiles for profile {profile.id}")
                 print(f"DATABASE: Processing related profiles...")
-                related_count = await self._store_related_profiles(db, profile.id, user_data)
+                related_count = await self._store_related_profiles(db, profile.id, user_data, is_background_discovery)
                 print(f"DATABASE: Stored {related_count} related profiles")
 
                 # Store profile images metadata
@@ -759,7 +759,7 @@ class ComprehensiveDataService:
         
         return post_data
 
-    async def _store_related_profiles(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any]) -> int:
+    async def _store_related_profiles(self, db: AsyncSession, profile_id: UUID, user_data: Dict[str, Any], is_background_discovery: bool = False) -> int:
         """Store related/suggested profiles"""
         try:
             print(f" DATABASE: Cleaning existing related profiles...")
@@ -807,7 +807,8 @@ class ComprehensiveDataService:
                     'related_profile_pic_url': node.get('profile_pic_url', ''),
                     'related_followers_count': node.get('edge_followed_by', {}).get('count', 0),
                     'similarity_score': max(100 - (i * 5), 10),  # Decreasing similarity score
-                    'relationship_type': 'suggested'
+                    'relationship_type': 'suggested',
+                    'source_type': 'background_discovery' if is_background_discovery else 'user_search'
                 }
                 
                 related_profile = RelatedProfile(**related_data)
@@ -819,6 +820,41 @@ class ComprehensiveDataService:
             await db.commit()
             logger.info(f"Stored {related_count} related profiles for profile {profile_id}")
             print(f"[SUCCESS] DATABASE: Successfully committed {related_count} related profiles")
+
+            # 🔄 DISCOVERY SYSTEM INTEGRATION: Trigger similar profiles discovery for related profiles
+            # 🚫 INFINITE LOOP PREVENTION: Only trigger discovery for user-initiated searches, not background discovered profiles
+            if related_count > 0:
+                try:
+                    # Check explicit background discovery flag first, then fall back to stack trace detection
+                    if is_background_discovery:
+                        logger.info(f"[DISCOVERY] 🚫 Skipping discovery hook for background-discovered profile (explicit flag)")
+                    else:
+                        # Additional safety check - look at stack trace for processor calls
+                        import inspect
+                        frame_info = inspect.stack()
+                        is_stack_background_discovery = any("similar_profiles_processor" in str(frame.filename) for frame in frame_info)
+
+                        if is_stack_background_discovery:
+                            logger.info(f"[DISCOVERY] 🚫 Skipping discovery hook for background-discovered profile (stack trace detection)")
+                        else:
+                            from app.services.background.similar_profiles_processor import hook_related_profiles_stored
+
+                            # Get the source profile username for the hook
+                            profile_query = await db.execute(select(Profile.username).where(Profile.id == profile_id))
+                            profile_result = profile_query.scalar_one_or_none()
+                            source_username = profile_result if profile_result else "unknown"
+
+                            await hook_related_profiles_stored(
+                                source_username=source_username,
+                                profile_id=str(profile_id),
+                                related_profiles_count=related_count
+                            )
+                            logger.info(f"[DISCOVERY] ✅ Related profiles discovery hook triggered: {related_count} similar profiles found for @{source_username}")
+
+                except Exception as discovery_error:
+                    logger.warning(f"[DISCOVERY] Hook trigger failed for profile {profile_id}: {discovery_error}")
+                    # Don't fail the main request if discovery hook fails
+
             return related_count
             
         except Exception as e:

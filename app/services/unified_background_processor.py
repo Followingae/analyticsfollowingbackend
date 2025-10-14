@@ -9,10 +9,11 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
 from enum import Enum
 
-from app.services.comprehensive_cdn_service import comprehensive_cdn_service
+from app.services.cdn_image_service import cdn_image_service
 from app.services.ai.production_ai_orchestrator import production_ai_orchestrator
 from app.database.connection import get_session
 from sqlalchemy import text
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class UnifiedBackgroundProcessor:
     """
 
     def __init__(self):
-        self.cdn_service = comprehensive_cdn_service
+        self.cdn_service = cdn_image_service
         self.ai_orchestrator = production_ai_orchestrator
         self.max_processing_time = 600  # 10 minutes max
 
@@ -140,12 +141,63 @@ class UnifiedBackgroundProcessor:
 
             logger.info(f"[UNIFIED-PROCESSOR] Stage 1 complete: Apify data verified for {username}")
 
-            # STAGE 2: Process CDN images
+            # STAGE 2: Process CDN images using the same approach as regular creator analytics
             logger.info(f"[UNIFIED-PROCESSOR] Stage 2: Processing CDN images for {username}")
             pipeline_results['stages']['cdn_processing']['started_at'] = datetime.now(timezone.utc)
             pipeline_results['stages']['cdn_processing']['status'] = ProcessingStatus.PROCESSING.value
 
-            cdn_results = await self.cdn_service.process_profile_images_comprehensive(profile_id, username)
+            # Use the same CDN approach as regular creator analytics
+            async with get_session() as db:
+                try:
+                    # Set database session for CDN service
+                    self.cdn_service.set_db_session(db)
+
+                    # Get the profile data needed for CDN processing
+                    profile_query = await db.execute(
+                        text("SELECT profile_pic_url_hd, username, full_name FROM profiles WHERE id = :profile_id"),
+                        {"profile_id": profile_id}
+                    )
+                    profile_row = profile_query.fetchone()
+
+                    if profile_row:
+                        profile_data = {
+                            'profile_pic_url_hd': profile_row[0],
+                            'username': profile_row[1],
+                            'full_name': profile_row[2]
+                        }
+
+                        # Enqueue CDN jobs using the same method as regular creator analytics
+                        result = await self.cdn_service.enqueue_profile_assets(
+                            UUID(profile_id), profile_data, db
+                        )
+
+                        cdn_results = {
+                            'success': True,
+                            'jobs_created': result.jobs_created,
+                            'processed_images': 0,  # Will be processed by background workers
+                            'total_images': result.jobs_created,
+                            'message': f"CDN processing queued: {result.jobs_created} jobs created"
+                        }
+
+                        logger.info(f"[UNIFIED-PROCESSOR] CDN processing queued: {result.jobs_created} jobs created")
+
+                    else:
+                        cdn_results = {
+                            'success': False,
+                            'error': 'Profile not found for CDN processing',
+                            'processed_images': 0,
+                            'total_images': 0
+                        }
+
+                except Exception as e:
+                    logger.error(f"[UNIFIED-PROCESSOR] CDN processing failed for {username}: {e}")
+                    cdn_results = {
+                        'success': False,
+                        'error': str(e),
+                        'processed_images': 0,
+                        'total_images': 0
+                    }
+
             pipeline_results['results']['cdn_results'] = cdn_results
 
             if not cdn_results['success']:
@@ -156,7 +208,7 @@ class UnifiedBackgroundProcessor:
             pipeline_results['current_stage'] = ProcessingStage.AI_PROCESSING.value
 
             logger.info(f"[UNIFIED-PROCESSOR] Stage 2 complete: CDN processing for {username}")
-            logger.info(f"[CDN-SUMMARY] Processed {cdn_results['processed_images']}/{cdn_results['total_images']} images")
+            logger.info(f"[CDN-SUMMARY] Queued {cdn_results.get('jobs_created', 0)} CDN jobs for background processing")
 
             # STAGE 3: Execute AI analysis (all 10 models)
             logger.info(f"[UNIFIED-PROCESSOR] Stage 3: Executing AI analysis for {username}")

@@ -590,6 +590,7 @@ class RelatedProfile(Base):
     
     # Discovery details
     discovered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    source_type = Column(String(50), default='user_search', index=True)  # 'user_search' or 'background_discovery'
     source = Column(String(50))  # 'apify', 'manual', 'algorithm'
     
     # Relationship

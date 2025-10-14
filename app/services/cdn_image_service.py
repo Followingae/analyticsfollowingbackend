@@ -109,7 +109,13 @@ class CDNImageService:
         except Exception as e:
             logger.error(f"[ERROR] Error getting profile media URLs: {e}")
             raise CDNServiceError(f"Failed to get media URLs: {e}")
-    
+
+    async def get_profile_media_urls(self, profile_id: UUID) -> ProfileMediaResponse:
+        """Get CDN URLs for profile avatar and recent posts (using existing session)"""
+        if not self.db:
+            raise CDNServiceError("Database session not set. Call set_db_session() first.")
+        return await self.get_profile_media_urls_with_session(profile_id, self.db)
+
     async def enqueue_profile_assets(self, profile_id: UUID, apify_data: Dict, db: AsyncSession = None) -> EnqueueResult:
         """Enqueue profile assets for CDN processing"""
         try:

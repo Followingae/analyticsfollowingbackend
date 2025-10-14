@@ -64,6 +64,46 @@ async def lifespan(app: FastAPI):
         print("Comprehensive service initialized")
     except Exception as e:
         print(f"Comprehensive service failed: {e}")
+
+    # Initialize Profile Completeness & Discovery System with AUTO WORKER
+    try:
+        from app.services.background.similar_profiles_processor import similar_profiles_background_processor
+        from app.services.worker_auto_manager import worker_auto_manager
+        from app.core.discovery_config import discovery_settings
+
+        if discovery_settings.DISCOVERY_ENABLED:
+            logger.info("Starting Industry Standard Discovery System...")
+
+            # AUTO-START DISCOVERY WORKER (Industry Standard)
+            logger.info("Auto-starting Discovery Worker as separate process...")
+            worker_started = await worker_auto_manager.start_discovery_worker()
+
+            if worker_started:
+                logger.info("Discovery Worker: STARTED (separate process)")
+                logger.info("Architecture: Industry standard Celery worker")
+                logger.info("Impact on main app: ZERO")
+                logger.info("Handles: Startup processing + new creator searches")
+            else:
+                logger.warning("Discovery Worker: FAILED TO START (falling back to local processing)")
+
+            # Start the local background processor (for hooks and fallback)
+            await similar_profiles_background_processor.start()
+            logger.info("Discovery System: ENABLED & RUNNING")
+            logger.info(f"Discovery Config: Max concurrent={discovery_settings.DISCOVERY_MAX_CONCURRENT_PROFILES}, Rate limit={discovery_settings.DISCOVERY_RATE_LIMIT_PROFILES_PER_DAY}/day")
+
+            if worker_started:
+                logger.info("Processing Mode: INDUSTRY STANDARD (separate worker process)")
+                logger.info("User Experience: Main app remains 100% responsive")
+                logger.info("New creator searches will queue related profiles to worker instantly")
+            else:
+                logger.info("Processing Mode: FALLBACK (local processing with delays)")
+                logger.info("Local processor will wait 90 seconds then process with 5s delays")
+
+        else:
+            logger.info("Profile Completeness & Discovery System: DISABLED")
+    except Exception as e:
+        logger.error(f"Discovery System initialization failed: {e}")
+        logger.warning("Discovery System will be unavailable - continuing without it")
     
     # Simple cache management
     print("Cache management integrated into Redis cache system")
@@ -115,11 +155,17 @@ async def lifespan(app: FastAPI):
     # Shutdown
     print("Shutting down Analytics Following Backend...")
     try:
-        # Stop background workers first
+        # Stop discovery worker first
+        print("Stopping discovery worker...")
+        from app.services.worker_auto_manager import worker_auto_manager
+        await worker_auto_manager.stop_discovery_worker()
+        print("Discovery worker stopped")
+
+        # Stop other background workers
         print("Stopping background workers...")
         from app.services.worker_manager import worker_manager
         worker_manager.stop_all_workers()
-        
+
         await close_database()
         await comprehensive_service.close_pool()
     except Exception as e:
@@ -216,9 +262,13 @@ app.include_router(currency_router)
 from app.api.lists_routes import router as lists_router
 app.include_router(lists_router, prefix="/api/v1")
 
-# Include Discovery routes
-from app.api.discovery_routes import router as discovery_router
-app.include_router(discovery_router, prefix="/api/v1")
+# Include User Discovery routes (Frontend Discovery API)
+from app.api.user_discovery_routes import router as user_discovery_router
+app.include_router(user_discovery_router)
+
+# Include Admin Repair routes (Profile Completeness & Discovery System)
+from app.api.admin_repair_routes import router as admin_repair_router
+app.include_router(admin_repair_router, prefix="/api/v1")
 
 # Include Post Analytics routes
 from app.api.post_analytics_routes import router as post_analytics_router
@@ -1131,6 +1181,34 @@ async def bulletproof_creator_search(
                 logger.info(f"[PIPELINE-COMPLETE] CDN: {pipeline_results.get('results', {}).get('cdn_results', {}).get('processed_images', 0)} images processed")
                 logger.info(f"[PIPELINE-COMPLETE] AI: {pipeline_results.get('results', {}).get('ai_results', {}).get('completed_models', 0)}/10 models completed")
                 bulletproof_logger.info(f"BULLETPROOF: Complete unified processing pipeline FINISHED for {username}")
+
+                # 🔄 DISCOVERY SYSTEM INTEGRATION: Trigger similar profiles discovery for new creator
+                # 🚫 INFINITE LOOP PREVENTION: Only trigger discovery for user-initiated searches, not background discovered profiles
+                try:
+                    # Check if this is a background-discovered profile by looking at stack trace
+                    import inspect
+                    frame_info = inspect.stack()
+                    is_background_discovery = any("similar_profiles_processor" in str(frame.filename) for frame in frame_info)
+
+                    if is_background_discovery:
+                        logger.info(f"[DISCOVERY] 🚫 Skipping discovery hook for background-discovered profile @{username} (prevents infinite loops)")
+                    else:
+                        from app.services.background.similar_profiles_processor import hook_creator_analytics_complete
+                        await hook_creator_analytics_complete(
+                            source_username=username,
+                            profile_id=str(profile.id),
+                            analytics_metadata={
+                                "processing_type": "new_creator_complete_pipeline",
+                                "cdn_images_processed": pipeline_results.get('results', {}).get('cdn_results', {}).get('processed_images', 0),
+                                "ai_models_completed": pipeline_results.get('results', {}).get('ai_results', {}).get('completed_models', 0),
+                                "pipeline_success": pipeline_results.get('overall_success', False)
+                            }
+                        )
+                        logger.info(f"[DISCOVERY] ✅ Similar profiles discovery hook triggered for new creator {username}")
+
+                except Exception as discovery_error:
+                    logger.warning(f"[DISCOVERY] Hook trigger failed for {username}: {discovery_error}")
+                    # Don't fail the main request if discovery hook fails
 
             except Exception as processing_error:
                 logger.error(f"[CRITICAL] STEP 4 ERROR: Unified processing failed for {username}: {processing_error}")

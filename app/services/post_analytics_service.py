@@ -74,6 +74,30 @@ class PostAnalyticsService:
             # Update post with AI analysis
             await self._update_post_ai_analysis(db, stored_post.id, ai_analysis)
 
+            # 🔄 DISCOVERY SYSTEM INTEGRATION: Trigger similar profiles discovery for post analytics
+            try:
+                from app.services.background.similar_profiles_processor import hook_post_analytics_complete
+
+                # Get username from post data
+                source_username = post_data.get('username', 'unknown')
+
+                await hook_post_analytics_complete(
+                    source_username=source_username,
+                    profile_id=None,  # Post analytics doesn't always have profile_id
+                    post_shortcode=shortcode,
+                    analytics_metadata={
+                        "processing_type": "individual_post_analysis",
+                        "ai_analysis_success": ai_analysis.get("status") == "success" if ai_analysis else False,
+                        "likes_count": post_data.get('likesCount', 0),
+                        "comments_count": post_data.get('commentsCount', 0),
+                        "is_video": post_data.get('isVideo', False)
+                    }
+                )
+                logger.info(f"[DISCOVERY] ✅ Post analytics discovery hook triggered for @{source_username} post {shortcode}")
+            except Exception as discovery_error:
+                logger.warning(f"[DISCOVERY] Hook trigger failed for post {shortcode}: {discovery_error}")
+                # Don't fail the main request if discovery hook fails
+
             # Return complete analytics
             final_post = await self._get_post_by_id(db, stored_post.id)
             return await self._format_post_analytics(final_post, db)

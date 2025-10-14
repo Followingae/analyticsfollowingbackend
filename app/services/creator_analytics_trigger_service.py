@@ -40,7 +40,8 @@ class CreatorAnalyticsTriggerService:
         self,
         username: str,
         db: AsyncSession,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        is_background_discovery: bool = False
     ) -> Tuple[Optional[Profile], Dict[str, Any]]:
         """
         Trigger FULL creator analytics with complete rules
@@ -49,6 +50,7 @@ class CreatorAnalyticsTriggerService:
             username: Instagram username
             db: Database session
             force_refresh: Force fresh fetch even if data exists
+            is_background_discovery: True if this is background discovery processing (prevents further discovery)
 
         Returns:
             Tuple of (Profile object, metadata dict)
@@ -143,7 +145,7 @@ class CreatorAnalyticsTriggerService:
             # Step 4: Store complete profile + posts in database
             logger.info(f"[2/4] 💾 Storing profile + posts in database...")
             profile, is_new = await self.comprehensive_service.store_complete_profile(
-                db, username, apify_data
+                db, username, apify_data, is_background_discovery
             )
 
             if not profile:
