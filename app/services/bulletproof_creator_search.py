@@ -29,7 +29,7 @@ from app.database.connection import get_session, init_database
 from app.database.unified_models import Profile, Post
 from app.services.robust_creator_search_service import robust_creator_search_service
 from app.services.cdn_image_service import cdn_image_service
-from app.scrapers.enhanced_apify_client import EnhancedApifyClient
+from app.scrapers.apify_instagram_client import ApifyInstagramClient
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
 from app.core.config import settings
 
@@ -289,9 +289,8 @@ class BulletproofCreatorSearch:
             logger.info(f"🚨 Emergency basic search for {username}")
             
             # Direct basic Instagram API call
-            async with EnhancedApifyClient(
-                settings.SMARTPROXY_USERNAME,
-                settings.SMARTPROXY_PASSWORD
+            async with ApifyInstagramClient(
+                settings.APIFY_API_TOKEN
             ) as client:
                 # Get only basic profile data
                 basic_data = await client.get_instagram_profile_comprehensive(username)

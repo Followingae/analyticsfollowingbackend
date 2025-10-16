@@ -24,7 +24,7 @@ from app.database.unified_models import Profile, Post
 # AI and Services
 from app.services.ai.comprehensive_ai_manager import comprehensive_ai_manager, AIModelType
 from app.services.ai.comprehensive_ai_models_part2 import AdvancedAIModelImplementations
-from app.scrapers.enhanced_apify_client import EnhancedApifyClient
+from app.scrapers.apify_instagram_client import ApifyInstagramClient
 from app.core.config import settings
 from app.services.redis_cache_service import redis_cache
 
@@ -221,7 +221,7 @@ class BulletproofDataPopulationService:
                 job_status['apify_status'] = 'in_progress'
                 
                 # Use existing PERFECT Apify client with proper initialization
-                async with EnhancedApifyClient(settings.SMARTPROXY_USERNAME, settings.SMARTPROXY_PASSWORD) as apify_client:
+                async with ApifyInstagramClient(settings.APIFY_API_TOKEN) as apify_client:
                     # First get comprehensive profile data
                     profile_result = await apify_client.get_instagram_profile_comprehensive(username)
                     

@@ -110,14 +110,3 @@ class ProfileAnalysisResponse(BaseModel):
     raw_data: Optional[Dict[str, Any]] = Field(None, description="Complete raw response data from Apify API")
 
 
-class SmartProxyRequest(BaseModel):
-    url: str = Field(..., description="Instagram URL to scrape")
-    target: str = Field("instagram", description="Target platform")
-    parse: bool = Field(True, description="Parse the response")
-    headless: Optional[str] = Field("html", description="Headless mode")
-    
-    
-class SmartProxyResponse(BaseModel):
-    results: List[Dict[str, Any]] = Field(default_factory=list, description="Scraping results")
-    status: str = Field("success", description="Request status")
-    message: Optional[str] = Field(None, description="Response message")

@@ -146,30 +146,63 @@ class UnifiedBackgroundProcessor:
             pipeline_results['stages']['cdn_processing']['started_at'] = datetime.now(timezone.utc)
             pipeline_results['stages']['cdn_processing']['status'] = ProcessingStatus.PROCESSING.value
 
-            # Use the same CDN approach as regular creator analytics
+            # Use the same CDN approach as regular creator analytics with fresh DB session
             async with get_session() as db:
                 try:
-                    # Set database session for CDN service
-                    self.cdn_service.set_db_session(db)
-
-                    # Get the profile data needed for CDN processing
+                    # Get the COMPLETE profile data needed for CDN processing
                     profile_query = await db.execute(
-                        text("SELECT profile_pic_url_hd, username, full_name FROM profiles WHERE id = :profile_id"),
+                        text("""
+                            SELECT
+                                profile_pic_url_hd,
+                                profile_pic_url,
+                                username,
+                                full_name,
+                                biography,
+                                external_url,
+                                followers_count,
+                                following_count,
+                                posts_count,
+                                is_verified,
+                                is_private,
+                                is_business_account,
+                                category
+                            FROM profiles
+                            WHERE id = :profile_id
+                        """),
                         {"profile_id": profile_id}
                     )
                     profile_row = profile_query.fetchone()
 
                     if profile_row:
+                        # Reconstruct the Apify data format that CDN service expects
                         profile_data = {
                             'profile_pic_url_hd': profile_row[0],
-                            'username': profile_row[1],
-                            'full_name': profile_row[2]
+                            'profile_pic_url': profile_row[1],
+                            'username': profile_row[2],
+                            'full_name': profile_row[3],
+                            'biography': profile_row[4],
+                            'external_url': profile_row[5],
+                            'followers_count': profile_row[6],
+                            'following_count': profile_row[7],
+                            'posts_count': profile_row[8],
+                            'is_verified': profile_row[9],
+                            'is_private': profile_row[10],
+                            'is_business_account': profile_row[11],
+                            'category': profile_row[12]
                         }
 
-                        # Enqueue CDN jobs using the same method as regular creator analytics
-                        result = await self.cdn_service.enqueue_profile_assets(
-                            UUID(profile_id), profile_data, db
-                        )
+                        # Use fresh DB session for CDN service to avoid transaction errors
+                        async with get_session() as cdn_db:
+                            try:
+                                self.cdn_service.set_db_session(cdn_db)
+                                result = await self.cdn_service.enqueue_profile_assets(
+                                    UUID(profile_id), profile_data, cdn_db
+                                )
+                                await cdn_db.commit()  # Ensure transaction is committed
+                            except Exception as cdn_error:
+                                await cdn_db.rollback()
+                                logger.error(f"[UNIFIED-PROCESSOR] CDN transaction error: {cdn_error}")
+                                raise cdn_error
 
                         cdn_results = {
                             'success': True,

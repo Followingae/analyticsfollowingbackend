@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     CORS_PROXY_URL: str = os.getenv("CORS_PROXY_URL", "https://corsproxy.io")
     CORS_PROXY_API_KEY: str = os.getenv("CORS_PROXY_API_KEY", "b416e4ec")
     ENABLE_CORS_PROXY: bool = os.getenv("ENABLE_CORS_PROXY", "true").lower() == "true"
+
+    # Legacy SmartProxy Configuration (DEPRECATED - NOT USED)
+    # These are kept only to prevent AttributeError during migration
+    SMARTPROXY_USERNAME: str = os.getenv("SMARTPROXY_USERNAME", "")
+    SMARTPROXY_PASSWORD: str = os.getenv("SMARTPROXY_PASSWORD", "")
+    SMARTPROXY_BASE_URL: str = os.getenv("SMARTPROXY_BASE_URL", "")
     
     class Config:
         case_sensitive = True

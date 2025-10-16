@@ -181,11 +181,16 @@ class ComprehensiveDataService:
                 posts_count = await self._store_profile_posts(db, profile.id, user_data)
                 print(f"DATABASE: Stored {posts_count} posts")
 
-                # Store related profiles
-                logger.info(f"Processing related profiles for profile {profile.id}")
-                print(f"DATABASE: Processing related profiles...")
-                related_count = await self._store_related_profiles(db, profile.id, user_data, is_background_discovery)
-                print(f"DATABASE: Stored {related_count} related profiles")
+                # Store related profiles ONLY for user-initiated searches, NOT background analytics
+                if not is_background_discovery:
+                    logger.info(f"Processing related profiles for profile {profile.id}")
+                    print(f"DATABASE: Processing related profiles...")
+                    related_count = await self._store_related_profiles(db, profile.id, user_data, is_background_discovery)
+                    print(f"DATABASE: Stored {related_count} related profiles")
+                else:
+                    logger.info(f"🚫 Skipping related profiles storage for background analytics")
+                    print(f"DATABASE: Skipping related profiles (background analytics)")
+                    related_count = 0
 
                 # Store profile images metadata
                 logger.info(f"Processing profile images for profile {profile.id}")
@@ -1290,10 +1295,24 @@ class ComprehensiveDataService:
             safe_metadata = {}
             if metadata:
                 try:
-                    # Ensure metadata is JSON serializable
+                    # Convert UUIDs to strings for JSON serialization
                     import json
-                    json.dumps(metadata)  # Test serialization
-                    safe_metadata = metadata
+                    from uuid import UUID
+
+                    def convert_uuids_to_strings(obj):
+                        """Recursively convert UUID objects to strings"""
+                        if isinstance(obj, UUID):
+                            return str(obj)
+                        elif isinstance(obj, dict):
+                            return {k: convert_uuids_to_strings(v) for k, v in obj.items()}
+                        elif isinstance(obj, list):
+                            return [convert_uuids_to_strings(item) for item in obj]
+                        else:
+                            return obj
+
+                    serializable_metadata = convert_uuids_to_strings(metadata)
+                    json.dumps(serializable_metadata)  # Test serialization
+                    safe_metadata = serializable_metadata
                 except (TypeError, ValueError) as json_error:
                     logger.warning(f"Metadata not JSON serializable, using empty dict: {json_error}")
                     safe_metadata = {}

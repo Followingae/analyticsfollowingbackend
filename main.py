@@ -1630,6 +1630,14 @@ app.include_router(superadmin_extension_router, prefix="/api")
 from app.api.v1.admin.cdn_repair import router as cdn_repair_router
 app.include_router(cdn_repair_router, prefix="/api/v1")
 
+# Superadmin Analytics Completeness Routes (Superadmin Only)
+from app.api.superadmin_analytics_routes import router as superadmin_analytics_router
+app.include_router(superadmin_analytics_router)
+
+# Worker Monitoring Routes (Admin Only)
+from app.api.worker_monitoring_routes import router as worker_monitoring_router
+app.include_router(worker_monitoring_router)
+
 # Include CDN Media and Health routes
 from app.api.cdn_media_routes import router as cdn_media_router
 from app.api.cdn_health_routes import router as cdn_health_router
@@ -1637,6 +1645,10 @@ from app.api.cdn_monitoring_routes import router as cdn_monitoring_router
 app.include_router(cdn_media_router, prefix="/api/v1")
 app.include_router(cdn_health_router, prefix="/api/v1")
 app.include_router(cdn_monitoring_router)
+
+# Include Cloudflare MCP Integration routes
+from app.api.cloudflare_mcp_routes import router as cloudflare_mcp_router
+app.include_router(cloudflare_mcp_router)
 
 # REMOVED: Duplicate credit router with wrong prefix - causing API documentation duplication
 # Frontend should use /api/v1/credits/* endpoints (single inclusion above)

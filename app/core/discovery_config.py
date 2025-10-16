@@ -17,7 +17,7 @@ class DiscoverySettings(BaseSettings):
     """Discovery system configuration"""
 
     # Similar Profiles Discovery Settings
-    DISCOVERY_ENABLED: bool = True
+    DISCOVERY_ENABLED: bool = True  # ✅ ENABLED - Infinite loop prevention fixed
     DISCOVERY_MAX_CONCURRENT_PROFILES: int = 3
     DISCOVERY_BATCH_SIZE: int = 10
     DISCOVERY_RETRY_ATTEMPTS: int = 3

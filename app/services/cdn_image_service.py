@@ -693,13 +693,22 @@ class CDNImageService:
             )
             transcoder = ImageTranscoderService(r2_client)
             
-            # Process image to 512px WebP
+            # Process image to 512px WebP using existing process_job method
             logger.info(f"[IMMEDIATE] Processing image to 512px WebP...")
-            processed_images = await transcoder.process_image(
-                image_data, 
-                target_sizes=[512],
-                output_format='webp'
-            )
+            job_data = {
+                'asset_id': str(job.asset_id),
+                'source_url': job.source_url,
+                'target_sizes': [512],
+                'profile_id': str(job.source_id) if hasattr(job, 'source_id') else None,
+                'media_id': job.media_id if hasattr(job, 'media_id') else 'unknown'
+            }
+
+            process_result = await transcoder.process_job(job_data)
+
+            if not process_result.success:
+                raise Exception(f"Image processing failed: {process_result.error}")
+
+            processed_images = process_result.derivatives
             
             if not processed_images or 512 not in processed_images:
                 raise Exception("Failed to process image to 512px")

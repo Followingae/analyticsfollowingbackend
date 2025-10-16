@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 
 from app.integrations.cloudflare_mcp_client import CloudflareMCPContext, create_cloudflare_client
-from app.middleware.role_based_auth import get_current_active_user
+from app.middleware.auth_middleware import get_current_active_user
 
 router = APIRouter(prefix="/api/v1/cloudflare", tags=["cloudflare-mcp"])
 logger = logging.getLogger(__name__)

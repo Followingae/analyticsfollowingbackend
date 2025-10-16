@@ -227,7 +227,7 @@ def require_premium():
 
 def require_admin():
     """Dependency to require admin access"""
-    return require_roles([UserRole.ADMIN])
+    return require_roles([UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.SUPER_ADMIN])
 
 
 async def verify_api_key(request: Request) -> bool:

@@ -36,7 +36,6 @@ def setup_logging():
     logging.getLogger("app.api").setLevel(logging.WARNING)
 
     # Reduce verbose logging
-    logging.getLogger("app.scrapers.smartproxy_client").setLevel(logging.WARNING)
 
     # Database logging optimized for production
     logging.getLogger("app.database.robust_storage").setLevel(logging.WARNING)

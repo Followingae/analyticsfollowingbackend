@@ -69,16 +69,11 @@ class ImageTranscoderService:
         
         logger.info("🖼️ Image Transcoder Service initialized")
         
-        # CORS proxy configuration
+        # CORS proxy configuration for Instagram URL access
         from app.core.config import settings
         self.cors_proxy_url = settings.CORS_PROXY_URL
         self.cors_proxy_api_key = settings.CORS_PROXY_API_KEY
         self.enable_cors_proxy = settings.ENABLE_CORS_PROXY
-        
-        # SmartProxy configuration for Instagram access
-        self.smartproxy_username = settings.SMARTPROXY_USERNAME
-        self.smartproxy_password = settings.SMARTPROXY_PASSWORD
-        self.use_smartproxy = bool(self.smartproxy_username and self.smartproxy_password)
     
     def _get_proxied_url(self, url: str) -> Tuple[str, Dict[str, str]]:
         """Get CORS proxied URL for Instagram images with appropriate headers"""
@@ -198,16 +193,9 @@ class ImageTranscoderService:
                 try:
                     return await self._download_via_cors_proxy(url)
                 except Exception as e:
-                    logger.debug(f"CORS proxy failed: {e}, trying SmartProxy...")
-            
-            # Strategy 2: Try SmartProxy for Instagram URLs
-            if self.use_smartproxy and self._is_instagram_url(url):
-                try:
-                    return await self._download_via_smartproxy(url)
-                except Exception as e:
-                    logger.debug(f"SmartProxy failed: {e}, trying direct...")
-            
-            # Strategy 3: Try direct download with enhanced headers
+                    logger.debug(f"CORS proxy failed: {e}, trying direct...")
+
+            # Strategy 2: Try direct download with enhanced headers
             return await self._download_direct(url)
                 
         except Exception as e:

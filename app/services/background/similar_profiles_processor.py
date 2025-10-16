@@ -440,7 +440,7 @@ similar_profiles_background_processor = SimilarProfilesBackgroundProcessor()
 
 async def hook_related_profiles_stored(
     source_username: str,
-    profile_id: UUID,
+    profile_id: str,  # Accept string instead of UUID
     related_profiles_count: int
 ) -> None:
     """
@@ -452,6 +452,9 @@ async def hook_related_profiles_stored(
         return
 
     try:
+        # Convert string to UUID if needed
+        uuid_profile_id = UUID(profile_id) if isinstance(profile_id, str) else profile_id
+
         # Try Celery worker first (industry standard)
         try:
             from app.services.celery_discovery_service import celery_discovery_service
@@ -464,7 +467,7 @@ async def hook_related_profiles_stored(
             async with get_session() as db:
                 # Get the related usernames for this profile
                 query = select(RelatedProfile.related_username).where(
-                    RelatedProfile.profile_id == profile_id
+                    RelatedProfile.profile_id == uuid_profile_id
                 ).distinct()
                 result = await db.execute(query)
                 related_usernames = [row[0] for row in result.fetchall()]
@@ -489,7 +492,7 @@ async def hook_related_profiles_stored(
         event = ProcessorEvent(
             event_type=ProcessorEventType.RELATED_PROFILES_STORED,
             source_username=source_username,
-            profile_id=profile_id,
+            profile_id=uuid_profile_id,
             metadata={"related_profiles_count": related_profiles_count}
         )
 
@@ -502,7 +505,7 @@ async def hook_related_profiles_stored(
 
 async def hook_creator_analytics_complete(
     source_username: str,
-    profile_id: UUID,
+    profile_id: str,  # Accept string instead of UUID
     analytics_metadata: Dict[str, Any]
 ) -> None:
     """
@@ -513,11 +516,20 @@ async def hook_creator_analytics_complete(
     if not discovery_settings.DISCOVERY_ENABLED:
         return
 
+    # 🚫 DISABLE DISCOVERY FOR BACKGROUND ANALYTICS - NO INFINITE LOOPS
+    # Check if this is background analytics (repair, discovery, etc.)
+    if analytics_metadata.get("is_background_discovery") or analytics_metadata.get("processing_type") == "bulk_repair":
+        logger.info(f"🚫 Skipping discovery hook for background analytics: {source_username}")
+        return
+
     try:
+        # Convert string to UUID if needed
+        uuid_profile_id = UUID(profile_id) if isinstance(profile_id, str) else profile_id
+
         event = ProcessorEvent(
             event_type=ProcessorEventType.CREATOR_ANALYTICS_COMPLETE,
             source_username=source_username,
-            profile_id=profile_id,
+            profile_id=uuid_profile_id,
             metadata=analytics_metadata
         )
 
@@ -530,7 +542,7 @@ async def hook_creator_analytics_complete(
 
 async def hook_post_analytics_complete(
     source_username: str,
-    profile_id: UUID,
+    profile_id: str,  # Accept string instead of UUID
     post_shortcode: str,
     analytics_metadata: Dict[str, Any]
 ) -> None:
@@ -543,10 +555,13 @@ async def hook_post_analytics_complete(
         return
 
     try:
+        # Convert string to UUID if needed
+        uuid_profile_id = UUID(profile_id) if isinstance(profile_id, str) else profile_id
+
         event = ProcessorEvent(
             event_type=ProcessorEventType.POST_ANALYTICS_COMPLETE,
             source_username=source_username,
-            profile_id=profile_id,
+            profile_id=uuid_profile_id,
             metadata={
                 "post_shortcode": post_shortcode,
                 **analytics_metadata
