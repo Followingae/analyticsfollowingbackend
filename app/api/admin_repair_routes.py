@@ -218,21 +218,73 @@ async def get_discovery_config(
 
 @router.get("/discovery/queue-status")
 async def get_discovery_queue_status(
+    db: AsyncSession = Depends(get_session),
     admin_user: User = Depends(require_admin())
 ) -> Dict[str, Any]:
     """
-    Get discovery background processor queue status
+    🔴 REAL-TIME Discovery Queue Status - Shows ACTUAL unprocessed profiles
 
-    Admin-only endpoint for monitoring background processing queue.
+    This endpoint shows discovered profiles that are NOT processed yet and allows manual triggering.
     """
     try:
         logger.info(f"Discovery queue status request by {admin_user.email}")
 
+        # Get background processor internal queue status
         queue_status = await similar_profiles_background_processor.get_queue_status()
+
+        # 🔴 CRITICAL: Get ACTUAL discovered profiles that need processing from database
+        from sqlalchemy import text
+
+        unprocessed_query = text("""
+            SELECT
+              rp.related_username,
+              rp.related_followers_count,
+              rp.similarity_score,
+              rp.discovered_at,
+              rp.source,
+              p.id as profile_exists,
+              p.followers_count as actual_followers,
+              (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) as stored_posts,
+              p.ai_profile_analyzed_at,
+              CASE
+                WHEN p.id IS NULL THEN 'not_in_database'
+                WHEN p.followers_count IS NULL OR p.followers_count = 0 THEN 'incomplete_no_data'
+                WHEN (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) < 12 THEN 'incomplete_posts'
+                WHEN p.ai_profile_analyzed_at IS NULL THEN 'incomplete_no_ai'
+                ELSE 'complete'
+              END as processing_status
+            FROM related_profiles rp
+            LEFT JOIN profiles p ON p.username = rp.related_username
+            WHERE p.id IS NULL
+               OR p.followers_count IS NULL
+               OR p.followers_count = 0
+               OR (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) < 12
+               OR p.ai_profile_analyzed_at IS NULL
+            ORDER BY rp.discovered_at DESC
+            LIMIT 50
+        """)
+
+        result = await db.execute(unprocessed_query)
+        unprocessed_profiles = [dict(row._mapping) for row in result.fetchall()]
+
+        # Count total discovered vs processed
+        total_discovered_query = text("SELECT COUNT(*) FROM related_profiles")
+        total_result = await db.execute(total_discovered_query)
+        total_discovered = total_result.scalar()
 
         return {
             "success": True,
-            **queue_status
+            "processor_running": queue_status.get("is_running", False),
+            "internal_queue_size": queue_status.get("queue_size", 0),
+            "worker_active": queue_status.get("worker_active", False),
+            "discovery_stats": {
+                "total_discovered": total_discovered,
+                "unprocessed_count": len(unprocessed_profiles),
+                "processed_count": total_discovered - len(unprocessed_profiles)
+            },
+            "unprocessed_profiles": unprocessed_profiles[:20],  # Show top 20
+            "action_required": len(unprocessed_profiles) > 0,
+            "manual_trigger_endpoint": "/api/v1/admin/repair/discovery/process-all-unprocessed"
         }
 
     except Exception as e:
@@ -288,6 +340,112 @@ async def manual_trigger_discovery(
     except Exception as e:
         logger.error(f"Manual discovery trigger failed for @{username}: {e}")
         raise HTTPException(status_code=500, detail=f"Manual trigger failed: {str(e)}")
+
+
+@router.post("/discovery/process-all-unprocessed")
+async def process_all_unprocessed_profiles(
+    limit: int = Query(10, description="Max profiles to process in this batch"),
+    background_tasks: BackgroundTasks = None,
+    db: AsyncSession = Depends(get_session),
+    admin_user: User = Depends(require_admin())
+) -> Dict[str, Any]:
+    """
+    🔴 MANUAL TRIGGER: Process ALL unprocessed discovered profiles NOW
+
+    This endpoint processes discovered profiles that haven't been analyzed yet.
+    It triggers full Creator Analytics (APIFY + CDN + AI) for each profile.
+    """
+    try:
+        logger.info(f"🔴 MANUAL BATCH PROCESSING triggered by {admin_user.email}, limit={limit}")
+
+        # Get unprocessed profiles from related_profiles table
+        from sqlalchemy import text
+
+        unprocessed_query = text("""
+            SELECT DISTINCT rp.related_username
+            FROM related_profiles rp
+            LEFT JOIN profiles p ON p.username = rp.related_username
+            WHERE p.id IS NULL
+               OR p.followers_count IS NULL
+               OR p.followers_count = 0
+               OR (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) < 12
+               OR p.ai_profile_analyzed_at IS NULL
+            ORDER BY rp.discovered_at DESC
+            LIMIT :limit
+        """)
+
+        result = await db.execute(unprocessed_query, {"limit": limit})
+        unprocessed_usernames = [row.related_username for row in result.fetchall()]
+
+        if not unprocessed_usernames:
+            return {
+                "success": True,
+                "message": "No unprocessed profiles found - all discovered profiles are complete!",
+                "processed_count": 0,
+                "profiles": []
+            }
+
+        logger.info(f"🔴 Found {len(unprocessed_usernames)} unprocessed profiles to analyze")
+
+        # Trigger Creator Analytics for each profile
+        from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
+
+        results = []
+        successful = 0
+        failed = 0
+
+        for username in unprocessed_usernames:
+            try:
+                logger.info(f"🔴 Processing discovered profile: @{username}")
+
+                # Trigger full Creator Analytics pipeline
+                analytics_result = await creator_analytics_trigger_service.trigger_creator_analytics(
+                    username=username,
+                    db=db,
+                    force_refresh=False  # Use cache if exists
+                )
+
+                if analytics_result.get("success"):
+                    successful += 1
+                    results.append({
+                        "username": username,
+                        "status": "success",
+                        "profile_id": analytics_result.get("profile_id")
+                    })
+                else:
+                    failed += 1
+                    results.append({
+                        "username": username,
+                        "status": "failed",
+                        "error": analytics_result.get("error", "Unknown error")
+                    })
+
+            except Exception as e:
+                failed += 1
+                logger.error(f"🔴 Failed to process @{username}: {e}")
+                results.append({
+                    "username": username,
+                    "status": "error",
+                    "error": str(e)
+                })
+
+        logger.info(f"🔴 BATCH PROCESSING COMPLETE: {successful} successful, {failed} failed")
+
+        return {
+            "success": True,
+            "message": f"Processed {len(unprocessed_usernames)} discovered profiles",
+            "summary": {
+                "total_processed": len(unprocessed_usernames),
+                "successful": successful,
+                "failed": failed
+            },
+            "profiles": results,
+            "triggered_by": admin_user.email
+        }
+
+    except Exception as e:
+        logger.error(f"🔴 Batch processing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
 
 
 # System Health and Monitoring

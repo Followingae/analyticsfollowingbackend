@@ -635,118 +635,149 @@ class CDNImageService:
             return -1
     
     async def _process_cdn_job_immediately(self, job_id: str, source_url: str) -> Dict[str, Any]:
-        """Process CDN job immediately for fast results"""
+        """
+        BULLETPROOF SYNCHRONOUS CDN PROCESSOR
+        Process CDN job immediately without Redis/Celery - 100% reliable
+        Uses proven logic from process_stuck_cdn_jobs.py
+        """
         try:
             from sqlalchemy import text
             import httpx
             import io
+            from PIL import Image
             from app.core.config import settings
             from app.infrastructure.r2_storage_client import R2StorageClient
-            from app.services.image_transcoder_service import ImageTranscoderService
-            
-            logger.info(f"[IMMEDIATE] Starting immediate CDN processing for job {job_id}")
-            
+
+            logger.info(f"[IMMEDIATE] Starting bulletproof CDN processing for job {job_id}")
+
             # Get job details from database
             job_sql = text("""
-                SELECT j.*, a.source_id, a.media_id, a.source_type, a.source_url
+                SELECT j.*, a.source_id, a.media_id, a.source_type
                 FROM cdn_image_jobs j
                 JOIN cdn_image_assets a ON j.asset_id = a.id
                 WHERE j.id = :job_id
             """)
-            
+
             result = await self.db.execute(job_sql, {'job_id': job_id})
             job = result.fetchone()
-            
+
             if not job:
                 return {"success": False, "error": "Job not found"}
-            
+
             # Update job status to processing
             update_sql = text("""
-                UPDATE cdn_image_jobs 
+                UPDATE cdn_image_jobs
                 SET status = 'processing', started_at = NOW()
                 WHERE id = :job_id
             """)
             await self.db.execute(update_sql, {'job_id': job_id})
             await self.db.commit()
-            
-            # Download image from source URL
-            logger.info(f"[IMMEDIATE] Downloading image from: {source_url[:80]}...")
-            
-            timeout = httpx.Timeout(30.0, connect=10.0)  # 30s total, 10s connect
-            async with httpx.AsyncClient(timeout=timeout) as client:
+
+            # Download image from Instagram
+            logger.info(f"[IMMEDIATE] Downloading image from Instagram...")
+            timeout = httpx.Timeout(30.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 response = await client.get(source_url)
                 if response.status_code != 200:
-                    raise Exception(f"Failed to download image: HTTP {response.status_code}")
-                
+                    raise Exception(f"Failed to download: HTTP {response.status_code}")
+
                 image_data = response.content
                 if len(image_data) == 0:
                     raise Exception("Downloaded image is empty")
-                
+
                 logger.info(f"[IMMEDIATE] Downloaded {len(image_data)} bytes")
-            
-            # Initialize R2 and transcoder services
+
+            # Process image: Resize to 512px WebP (proven PIL method)
+            logger.info(f"[IMMEDIATE] Processing to 512px WebP...")
+            img = Image.open(io.BytesIO(image_data))
+
+            # Convert RGBA/LA/P to RGB for WebP compatibility
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+
+            # Resize to 512px (maintain aspect ratio)
+            img.thumbnail((512, 512), Image.Resampling.LANCZOS)
+
+            # Save as WebP with quality settings
+            output = io.BytesIO()
+            img.save(output, format='WEBP', quality=85, method=6)
+            processed_data = output.getvalue()
+
+            logger.info(f"[IMMEDIATE] Processed to {len(processed_data)} bytes")
+
+            # Generate R2 key based on source type
+            source_type = job.source_type
+            source_id = str(job.source_id)
+            media_id = job.media_id
+
+            if source_type == 'profile_avatar':
+                r2_key = f"profiles/{source_id}/avatar-512.webp"
+            else:  # post_thumbnail
+                r2_key = f"posts/{media_id}/thumbnail-512.webp"
+
+            # Upload to R2
+            logger.info(f"[IMMEDIATE] Uploading to R2: {r2_key}")
             r2_client = R2StorageClient(
                 account_id=settings.CF_ACCOUNT_ID,
                 access_key=settings.R2_ACCESS_KEY_ID,
                 secret_key=settings.R2_SECRET_ACCESS_KEY,
                 bucket_name=settings.R2_BUCKET_NAME
             )
-            transcoder = ImageTranscoderService(r2_client)
-            
-            # Process image to 512px WebP using existing process_job method
-            logger.info(f"[IMMEDIATE] Processing image to 512px WebP...")
-            job_data = {
-                'asset_id': str(job.asset_id),
-                'source_url': job.source_url,
-                'target_sizes': [512],
-                'profile_id': str(job.source_id) if hasattr(job, 'source_id') else None,
-                'media_id': job.media_id if hasattr(job, 'media_id') else 'unknown'
-            }
 
-            process_result = await transcoder.process_job(job_data)
-
-            if not process_result.success:
-                raise Exception(f"Image processing failed: {process_result.error}")
-
-            processed_images = process_result.derivatives
-            
-            if not processed_images or 512 not in processed_images:
-                raise Exception("Failed to process image to 512px")
-            
-            # Generate unique filename
-            from uuid import uuid4
-            unique_id = str(uuid4())[:8]
-            filename = f"{job.source_type}_{job.source_id}_{job.media_id}_{unique_id}.webp"
-            
-            # Upload to R2
-            logger.info(f"[IMMEDIATE] Uploading to R2: {filename}")
             upload_result = await r2_client.upload_object(
-                filename,
-                processed_images[512],
+                r2_key,
+                processed_data,
                 content_type='image/webp'
             )
-            
-            if not upload_result.get('success'):
-                raise Exception(f"Failed to upload to R2: {upload_result.get('error')}")
-            
-            cdn_url = f"https://cdn.following.ae/{filename}"
-            
-            # Update asset with CDN URL
+
+            if not upload_result:  # R2 client returns True/False, not dict
+                raise Exception("R2 upload failed")
+
+            cdn_url = f"https://cdn.following.ae/{r2_key}"
+            logger.info(f"[IMMEDIATE] Uploaded to CDN: {cdn_url}")
+
+            # Update cdn_image_assets table
             asset_update_sql = text("""
-                UPDATE cdn_image_assets 
+                UPDATE cdn_image_assets
                 SET cdn_url_512 = :cdn_url,
+                    cdn_path_512 = :cdn_path,
                     processing_status = 'completed',
-                    processed_at = NOW()
+                    processing_completed_at = NOW()
                 WHERE id = :asset_id
             """)
             await self.db.execute(asset_update_sql, {
                 'cdn_url': cdn_url,
+                'cdn_path': r2_key,
                 'asset_id': job.asset_id
             })
-            
+
+            # Update posts table if it's a post thumbnail
+            if source_type == 'post_thumbnail':
+                posts_update_sql = text("""
+                    UPDATE posts
+                    SET cdn_thumbnail_url = :cdn_url
+                    WHERE instagram_post_id = :media_id
+                """)
+                await self.db.execute(posts_update_sql, {
+                    'cdn_url': cdn_url,
+                    'media_id': media_id
+                })
+
+            # Update profiles table if it's a profile avatar
+            if source_type == 'profile_avatar':
+                profiles_update_sql = text("""
+                    UPDATE profiles
+                    SET profile_pic_url_cdn = :cdn_url
+                    WHERE id = :profile_id
+                """)
+                await self.db.execute(profiles_update_sql, {
+                    'cdn_url': cdn_url,
+                    'profile_id': source_id
+                })
+
             # Update job status to completed
             job_complete_sql = text("""
-                UPDATE cdn_image_jobs 
+                UPDATE cdn_image_jobs
                 SET status = 'completed',
                     completed_at = NOW(),
                     result = :result
@@ -756,24 +787,24 @@ class CDNImageService:
                 'job_id': job_id,
                 'result': {'cdn_url_512': cdn_url, 'processed_immediately': True}
             })
-            
+
             await self.db.commit()
-            
-            logger.info(f"[SUCCESS] Immediate CDN processing completed: {cdn_url}")
+
+            logger.info(f"[SUCCESS] Bulletproof CDN processing completed: {cdn_url}")
             return {
                 "success": True,
                 "cdn_url_512": cdn_url,
-                "message": "Image processed immediately"
+                "message": "Image processed and uploaded successfully"
             }
-            
+
         except Exception as e:
             # Mark job as failed
             try:
                 fail_sql = text("""
-                    UPDATE cdn_image_jobs 
+                    UPDATE cdn_image_jobs
                     SET status = 'failed',
                         completed_at = NOW(),
-                        error = :error
+                        error_message = :error
                     WHERE id = :job_id
                 """)
                 await self.db.execute(fail_sql, {
@@ -783,7 +814,7 @@ class CDNImageService:
                 await self.db.commit()
             except Exception:
                 pass
-            
+
             logger.error(f"[ERROR] Immediate CDN processing failed for job {job_id}: {e}")
             return {"success": False, "error": str(e)}
 

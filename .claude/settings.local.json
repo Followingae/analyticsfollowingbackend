@@ -18,7 +18,13 @@
       "Bash(npx -y @cloudflare/mcp-server-cloudflare run 189e3487e64c5c71c8bdae14f475f075)",
       "Bash(npx:*)",
       "Bash(echo $CF_API_TOKEN)",
-      "Bash(set)"
+      "Bash(set)",
+      "Bash(where redis-server)",
+      "Bash(where:*)",
+      "Bash(choco:*)",
+      "Bash(wsl:*)",
+      "Bash(tee:*)",
+      "Bash(timeout:*)"
     ],
     "deny": [],
     "ask": [],

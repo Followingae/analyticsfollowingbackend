@@ -252,7 +252,8 @@ class SuperadminAnalyticsCompletenessService:
 
             execution_time = (datetime.now(timezone.utc) - start_time).total_seconds()
 
-            logger.info(f"✅ Completeness scan complete: {total_profiles} profiles, {complete_profiles} complete ({complete_profiles/total_profiles*100:.1f}%)")
+            completion_pct = (complete_profiles/total_profiles*100) if total_profiles > 0 else 0.0
+            logger.info(f"✅ Completeness scan complete: {total_profiles} profiles, {complete_profiles} complete ({completion_pct:.1f}%)")
 
             # Convert UUID objects to strings for JSON serialization
             def analysis_to_dict(analysis: ProfileCompletenessAnalysis) -> Dict[str, Any]:
@@ -276,7 +277,9 @@ class SuperadminAnalyticsCompletenessService:
             }
 
         except Exception as e:
+            import traceback
             logger.error(f"❌ Completeness scan failed: {e}")
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
             raise Exception(f"Profile completeness scan failed: {str(e)}")
 
     async def repair_incomplete_profiles(
@@ -487,7 +490,10 @@ class SuperadminAnalyticsCompletenessService:
                 SELECT
                     cs.*,
                     ra.*,
-                    (cs.complete_profiles::float / cs.total_profiles * 100) as completeness_percentage
+                    CASE WHEN cs.total_profiles > 0
+                        THEN (cs.complete_profiles::float / cs.total_profiles * 100)
+                        ELSE 0
+                    END as completeness_percentage
                 FROM completeness_stats cs, recent_activity ra
             """)
 

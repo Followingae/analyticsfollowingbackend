@@ -268,7 +268,7 @@ app.include_router(user_discovery_router)
 
 # Include Admin Repair routes (Profile Completeness & Discovery System)
 from app.api.admin_repair_routes import router as admin_repair_router
-app.include_router(admin_repair_router, prefix="/api/v1")
+app.include_router(admin_repair_router)  # Router already has /api/v1/admin/repair prefix
 
 # Include Post Analytics routes
 from app.api.post_analytics_routes import router as post_analytics_router
