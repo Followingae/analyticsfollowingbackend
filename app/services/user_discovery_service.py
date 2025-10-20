@@ -265,6 +265,23 @@ class UserDiscoveryService:
         try:
             logger.info(f"🔓 Profile Unlock: user={user_id}, profile={profile_id}")
 
+            # CRITICAL FIX: Map auth.users ID to public.users ID
+            from app.database.unified_models import User
+            user_query = select(User).where(User.supabase_user_id == str(user_id))
+            user_result = await db.execute(user_query)
+            app_user = user_result.scalar_one_or_none()
+
+            if not app_user:
+                logger.error(f"🔓 No app user found for auth user_id={user_id}")
+                return {
+                    "success": False,
+                    "error": "user_not_found",
+                    "message": "User not found in application database"
+                }
+
+            actual_user_id = app_user.id
+            logger.info(f"🔓 Mapped auth user {user_id} to app user {actual_user_id}")
+
             # Check if profile exists
             profile_query = select(Profile).where(Profile.id == profile_id)
             profile_result = await db.execute(profile_query)
@@ -280,7 +297,7 @@ class UserDiscoveryService:
             # Check if already unlocked and not expired
             existing_access_query = select(UserProfileAccess).where(
                 and_(
-                    UserProfileAccess.user_id == user_id,
+                    UserProfileAccess.user_id == actual_user_id,
                     UserProfileAccess.profile_id == profile_id,
                     UserProfileAccess.expires_at > datetime.now(timezone.utc)
                 )
@@ -343,7 +360,7 @@ class UserDiscoveryService:
             expires_at = now + timedelta(days=30)
 
             new_access = UserProfileAccess(
-                user_id=user_id,
+                user_id=actual_user_id,
                 profile_id=profile_id,
                 granted_at=now,
                 expires_at=expires_at,
@@ -409,19 +426,44 @@ class UserDiscoveryService:
         try:
             logger.info(f"📊 Getting unlocked profiles: user={user_id}")
 
+            # CRITICAL FIX: Map auth.users ID to public.users ID
+            # The current_user.id from auth middleware is auth.users.id
+            # But user_profile_access table uses public.users.id
+            from app.database.unified_models import User
+            user_query = select(User).where(User.supabase_user_id == str(user_id))
+            user_result = await db.execute(user_query)
+            app_user = user_result.scalar_one_or_none()
+
+            if not app_user:
+                logger.error(f"📊 No app user found for auth user_id={user_id}")
+                return {
+                    "success": False,
+                    "error": "User not found in application database",
+                    "unlocked_profiles": [],
+                    "pagination": {
+                        "page": page,
+                        "page_size": page_size,
+                        "total_pages": 0,
+                        "total_unlocked": 0
+                    }
+                }
+
+            actual_user_id = app_user.id
+            logger.info(f"📊 Mapped auth user {user_id} to app user {actual_user_id}")
+
             # Validate pagination
             page = max(1, page)
             page_size = min(max(1, page_size), self.max_page_size)
             offset = (page - 1) * page_size
 
-            # Build query
+            # Build query using the mapped user ID
             base_query = select(
                 UserProfileAccess,
                 Profile
             ).join(
                 Profile, UserProfileAccess.profile_id == Profile.id
             ).where(
-                UserProfileAccess.user_id == user_id
+                UserProfileAccess.user_id == actual_user_id
             )
 
             # Filter expired access if not requested

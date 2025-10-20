@@ -597,5 +597,163 @@ async def optimize_database(
 
 
 # Import required dependencies
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import text
+
+
+# =============================================================================
+# BULK REPAIR PROGRESS MONITORING ENDPOINTS
+# =============================================================================
+
+@router.get("/progress/{operation_id}")
+async def get_bulk_repair_progress(
+    operation_id: str,
+    admin_user: User = Depends(require_superadmin())
+) -> Dict[str, Any]:
+    """
+    Get real-time progress of a bulk repair operation
+
+    **Superadmin Only** - Monitor sequential bulk repair progress with detailed stage tracking.
+    Shows current profile being processed, queue status, and individual stage progress.
+    """
+    try:
+        from app.services.bulk_repair_progress_service import bulk_repair_progress_service
+
+        progress = await bulk_repair_progress_service.get_operation_progress(operation_id)
+
+        if not progress:
+            raise HTTPException(status_code=404, detail=f"Operation {operation_id} not found")
+
+        logger.info(f"📊 Progress check for operation {operation_id} by {admin_user.email}")
+
+        return {
+            "success": True,
+            "operation_id": operation_id,
+            "progress": progress,
+            "last_updated": progress.get("last_updated"),
+            "real_time": True
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get progress for operation {operation_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get operation progress: {str(e)}")
+
+
+@router.get("/operations/active")
+async def get_active_bulk_operations(
+    admin_user: User = Depends(require_superadmin())
+) -> Dict[str, Any]:
+    """
+    Get all currently active bulk repair operations
+
+    **Superadmin Only** - Monitor all running bulk repair operations.
+    Useful for system-wide monitoring and operation management.
+    """
+    try:
+        from app.services.bulk_repair_progress_service import bulk_repair_progress_service
+
+        operations = await bulk_repair_progress_service.get_all_active_operations()
+
+        logger.info(f"📊 Active operations check by {admin_user.email}: {len(operations)} operations")
+
+        return {
+            "success": True,
+            "active_operations_count": len(operations),
+            "operations": operations,
+            "checked_at": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to get active operations: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get active operations: {str(e)}")
+
+
+@router.post("/operations/{operation_id}/cancel")
+async def cancel_bulk_repair_operation(
+    operation_id: str,
+    admin_user: User = Depends(require_superadmin())
+) -> Dict[str, Any]:
+    """
+    Cancel an active bulk repair operation
+
+    **Superadmin Only** - Emergency cancellation of bulk repair operations.
+    Will stop processing after the current profile completes.
+    """
+    try:
+        from app.services.bulk_repair_progress_service import bulk_repair_progress_service
+
+        cancelled = await bulk_repair_progress_service.cancel_operation(operation_id)
+
+        if not cancelled:
+            raise HTTPException(status_code=404, detail=f"Operation {operation_id} not found or already completed")
+
+        logger.info(f"🛑 Operation {operation_id} cancelled by {admin_user.email}")
+
+        return {
+            "success": True,
+            "operation_id": operation_id,
+            "status": "cancelled",
+            "cancelled_by": admin_user.email,
+            "cancelled_at": datetime.now(timezone.utc).isoformat(),
+            "message": "Operation will stop after current profile completes"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to cancel operation {operation_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to cancel operation: {str(e)}")
+
+
+@router.get("/operations/{operation_id}/live")
+async def get_live_repair_status(
+    operation_id: str,
+    admin_user: User = Depends(require_superadmin())
+) -> Dict[str, Any]:
+    """
+    Get live status updates for frontend real-time monitoring
+
+    **Superadmin Only** - Optimized endpoint for real-time frontend updates.
+    Returns minimal, frequently-updated data for live monitoring dashboards.
+    """
+    try:
+        from app.services.bulk_repair_progress_service import bulk_repair_progress_service
+
+        progress = await bulk_repair_progress_service.get_operation_progress(operation_id)
+
+        if not progress:
+            raise HTTPException(status_code=404, detail=f"Operation {operation_id} not found")
+
+        # Extract key live data for frontend
+        current_profile = progress.get("current_profile", {})
+        live_status = {
+            "operation_id": operation_id,
+            "status": progress.get("operation_status"),
+            "current_profile_index": progress.get("current_profile_index", 0),
+            "total_profiles": progress.get("total_profiles", 0),
+            "profiles_completed": progress.get("profiles_completed", 0),
+            "profiles_failed": progress.get("profiles_failed", 0),
+            "current_profile": {
+                "username": current_profile.get("username"),
+                "stage": current_profile.get("stage"),
+                "stage_message": current_profile.get("stage_message"),
+                "progress_percent": current_profile.get("stage_progress_percent", 0)
+            } if current_profile else None,
+            "queue_remaining": len(progress.get("queue", [])),
+            "last_updated": progress.get("last_updated"),
+            "estimated_completion": progress.get("estimated_completion")
+        }
+
+        return {
+            "success": True,
+            "live_status": live_status,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get live status for operation {operation_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get live status: {str(e)}")

@@ -24,7 +24,17 @@
       "Bash(choco:*)",
       "Bash(wsl:*)",
       "Bash(tee:*)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "Bash(py scriptstest_external_workers.py)",
+      "Bash(py scripts/test_external_workers.py)",
+      "Bash(py scripts/test_external_workers_simple.py)",
+      "Bash(py:*)",
+      "Bash(CLOUDFLARE_API_TOKEN=qBkxKlziYq0pSelqJo4iSYxovnFhCPy5rxTbphCm CLOUDFLARE_ACCOUNT_ID=189e3487e64c5c71c8bdae14f475f075 npx @cloudflare/mcp-server-cloudflare run 189e3487e64c5c71c8bdae14f475f075)",
+      "Bash(wrangler r2:*)",
+      "Bash(mv:*)",
+      "Bash(find:*)",
+      "Bash(wrangler:*)",
+      "Bash(findstr:*)"
     ],
     "deny": [],
     "ask": [],

@@ -765,41 +765,83 @@ class StandalonePostAnalyticsService:
 
     async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID]):
         """
-        Trigger FULL Creator Analytics using the dedicated Creator Analytics Module
+        Trigger FULL Creator Analytics via job queue for proper resource isolation
 
-        CRITICAL: This uses creator_analytics_trigger_service which implements
-        ALL the rules from Creator Analytics module:
+        INDUSTRY STANDARD: Uses job queue instead of direct processing to ensure
+        complete isolation from user-facing requests. The background workers will:
         - Check if FULL analytics exists in database
         - Only serve from DB if followers > 0, posts > 0, AI complete
         - If incomplete, fetch from Apify + CDN + ALL 10 AI models
         - Store results same as individual creator search
         """
-        from app.database.connection import SessionLocal
-        from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
+        try:
+            # PRACTICAL SOLUTION: Use asyncio task with isolated resources
+            # This achieves discovery without blocking post analytics requests
 
-        async with SessionLocal() as db:
-            try:
-                # Use the dedicated Creator Analytics Trigger Service
-                # This implements EXACT same logic as individual creator search
+            # REAL BACKGROUND WORKER: Queue job for external worker processing
+            from app.core.job_queue import job_queue, JobPriority, QueueType
+
+            job_id = await job_queue.enqueue_job(
+                user_id=str(user_id) if user_id else "discovery",
+                job_type="profile_analysis_background",
+                params={
+                    "username": username,
+                    "credit_cost": 0,  # No credit cost for discovery
+                    "discovery_context": "post_analytics_discovery"
+                },
+                priority=JobPriority.LOW,  # Low priority for discovery
+                queue_type=QueueType.DISCOVERY_QUEUE,
+                estimated_duration=180,  # 3 minutes
+                user_tier="discovery"
+            )
+
+            logger.info(f"✅ Creator Analytics Queued for Background Processing:")
+            logger.info(f"   Username: {username}")
+            logger.info(f"   Job ID: {job_id[:8]}")
+            logger.info(f"   Processing Mode: External Worker")
+            logger.info(f"   Context: Post Analytics Discovery")
+
+        except Exception as e:
+                logger.error(f"❌ Creator analytics trigger failed: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
+    async def _trigger_creator_analytics_isolated(self, username: str, user_id: Optional[UUID]):
+        """
+        Trigger Creator Analytics via isolated resources for post discovery
+        This runs in background without blocking post analytics requests
+        """
+        try:
+            # Use dedicated background connection pool for isolation
+            from app.database.optimized_pools import optimized_pools
+
+            logger.info(f"🔧 Starting isolated creator analytics for @{username}")
+
+            # Use isolated background session
+            async with optimized_pools.get_background_session() as db:
+                # Import here to avoid circular imports
+                from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
+
+                # Execute with isolated resources
                 profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
                     username=username,
                     db=db,
-                    force_refresh=False  # Respect cache rules
+                    force_refresh=False  # Respect cache rules for discovery
                 )
 
                 if profile:
-                    logger.info(f"✅ Creator Analytics Complete:")
+                    logger.info(f"✅ Isolated Creator Analytics Complete:")
                     logger.info(f"   Source: {metadata.get('source')}")
                     logger.info(f"   Followers: {profile.followers_count:,}")
                     logger.info(f"   Posts: {profile.posts_count}")
                     logger.info(f"   AI Analyzed: {profile.ai_profile_analyzed_at is not None}")
                 else:
-                    logger.error(f"❌ Creator Analytics failed: {metadata.get('error')}")
+                    logger.error(f"❌ Isolated Creator Analytics failed: {metadata.get('error')}")
 
-            except Exception as e:
-                logger.error(f"❌ Creator analytics trigger failed: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
+        except Exception as e:
+            logger.error(f"❌ Isolated creator analytics failed for @{username}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     async def _auto_create_collaborator_profiles(self, post_data: Dict[str, Any], user_id: UUID):
         """

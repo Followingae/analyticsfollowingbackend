@@ -357,91 +357,40 @@ class SuperadminAnalyticsCompletenessService:
                 total_profiles=total_profiles
             )
 
-            # Execute repairs with rate limiting
-            successful_repairs = 0
-            failed_repairs = 0
-            repair_results = []
+            # Execute repairs sequentially with detailed progress tracking
+            from app.services.bulk_repair_progress_service import bulk_repair_progress_service
 
-            # Process in batches with concurrency control
-            semaphore = asyncio.Semaphore(self.max_concurrent_repairs)
-
-            async def repair_single_profile(profile: Profile) -> Dict[str, Any]:
-                async with semaphore:
-                    try:
-                        logger.info(f"🔄 Repairing profile @{profile.username} ({profile.id})")
-
-                        # Use creator analytics trigger service for complete analytics
-                        async with get_session() as repair_db:
-                            repaired_profile, analytics_data = await creator_analytics_trigger_service.trigger_full_creator_analytics(
-                                username=profile.username,
-                                db=repair_db,
-                                force_refresh=True,  # Force complete re-analysis
-                                is_background_discovery=True  # Mark as background analytics to prevent discovery loops
-                            )
-
-                        if repaired_profile and analytics_data.get("success", False):
-                            return {
-                                "profile_id": str(profile.id),
-                                "username": profile.username,
-                                "status": "success",
-                                "message": "Profile repair completed successfully"
-                            }
-                        else:
-                            return {
-                                "profile_id": str(profile.id),
-                                "username": profile.username,
-                                "status": "failed",
-                                "error": analytics_data.get("error", "Creator analytics failed")
-                            }
-
-                    except Exception as e:
-                        logger.error(f"❌ Profile repair failed for @{profile.username}: {e}")
-                        return {
-                            "profile_id": str(profile.id),
-                            "username": profile.username,
-                            "status": "failed",
-                            "error": str(e)
-                        }
-
-            # Execute repairs concurrently
-            repair_tasks = [repair_single_profile(profile) for profile in profiles_to_repair]
-            repair_results = await asyncio.gather(*repair_tasks, return_exceptions=True)
-
-            # Process results
-            for result in repair_results:
-                if isinstance(result, Exception):
-                    failed_repairs += 1
-                    logger.error(f"❌ Repair task exception: {result}")
-                elif result["status"] == "success":
-                    successful_repairs += 1
-                else:
-                    failed_repairs += 1
-
-            # Update repair operation record
-            await self._update_repair_operation_record(
-                db=db,
-                operation_id=operation_id,
-                status=RepairStatus.COMPLETED,
-                completed_profiles=successful_repairs,
-                failed_profiles=failed_repairs
+            # Start sequential bulk repair operation
+            profile_usernames = [profile.username for profile in profiles_to_repair]
+            operation_id = await bulk_repair_progress_service.start_bulk_repair_operation(
+                admin_email=admin_email,
+                profile_usernames=profile_usernames
             )
 
-            execution_time = (datetime.now(timezone.utc) - start_time).total_seconds()
+            logger.info(f"🚀 Started sequential bulk repair operation {operation_id} for {len(profile_usernames)} profiles")
 
-            logger.info(f"✅ Repair operation {operation_id} completed: {successful_repairs}/{total_profiles} successful")
-
+            # Return operation ID for progress tracking (the actual processing happens in background)
             return {
                 "success": True,
                 "operation_id": str(operation_id),
-                "execution_time_seconds": execution_time,
+                "execution_time_seconds": (datetime.now(timezone.utc) - start_time).total_seconds(),
+                "dry_run": False,
+                "processing_mode": "sequential",
+                "message": f"Sequential bulk repair started for {len(profile_usernames)} profiles",
+                "progress_tracking": True,
                 "summary": {
-                    "total_profiles": total_profiles,
-                    "successful_repairs": successful_repairs,
-                    "failed_repairs": failed_repairs,
-                    "success_rate": (successful_repairs / total_profiles * 100) if total_profiles > 0 else 0
+                    "total_profiles": len(profile_usernames),
+                    "processing_started": True,
+                    "estimated_duration_minutes": len(profile_usernames) * 3  # 3 minutes per profile estimate
                 },
-                "repair_results": [r for r in repair_results if not isinstance(r, Exception)]
+                "repair_results": [],  # Will be populated as processing completes
+                "monitor_endpoint": f"/api/v1/admin/superadmin/analytics-completeness/progress/{operation_id}"
             }
+
+            # NOTE: The actual repair processing happens asynchronously in bulk_repair_progress_service
+            # This allows the endpoint to return immediately while processing continues in background
+
+            # Legacy concurrent processing code removed - replaced with sequential processing above
 
         except Exception as e:
             logger.error(f"❌ Profile repair operation failed: {e}")
@@ -607,8 +556,8 @@ class SuperadminAnalyticsCompletenessService:
                     COUNT(*) as total_posts,
                     COUNT(CASE WHEN ai_analyzed_at IS NOT NULL THEN 1 END) as ai_analyzed_posts,
                     COUNT(CASE WHEN cdn_thumbnail_url IS NOT NULL THEN 1 END) as cdn_processed_posts,
-                    MIN(created_at) as oldest_post,
-                    MAX(created_at) as newest_post,
+                    MIN(p.created_at) as oldest_post,
+                    MAX(p.created_at) as newest_post,
                     AVG(likes_count) as avg_likes,
                     AVG(comments_count) as avg_comments
                 FROM posts p

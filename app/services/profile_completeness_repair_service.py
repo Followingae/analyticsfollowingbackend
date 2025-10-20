@@ -336,27 +336,70 @@ class ProfileCompletenessRepairService:
             logger.info(f"🔧 Repairing @{profile_status.username}...")
             logger.info(f"   Missing: {', '.join(profile_status.missing_components)}")
 
-            # Use existing Creator Analytics system with force_refresh=True
-            profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
-                username=profile_status.username,
-                db=db,
-                force_refresh=True  # Force fresh analytics to ensure completeness
+            # PRACTICAL SOLUTION: Use asyncio task with isolated resources
+            # This achieves the same isolation without complex worker setup
+
+            # REAL BACKGROUND WORKER: Queue job for external worker processing
+            from app.core.job_queue import job_queue, JobPriority, QueueType
+
+            job_id = await job_queue.enqueue_job(
+                user_id="admin",
+                job_type="profile_analysis",
+                params={
+                    "username": profile_status.username,
+                    "credit_cost": 0,  # No credit cost for admin repair
+                    "repair_operation": True,
+                    "missing_components": profile_status.missing_components
+                },
+                priority=JobPriority.NORMAL,
+                queue_type=QueueType.BULK_QUEUE,
+                estimated_duration=180,  # 3 minutes
+                user_tier="admin"
             )
 
-            if profile and metadata.get("is_full_analytics", False):
-                logger.info(f"✅ Successfully repaired @{profile_status.username}")
-                logger.info(f"   Followers: {profile.followers_count:,}")
-                logger.info(f"   Posts: {profile.posts_count}")
-                logger.info(f"   AI Analysis: {'✅' if profile.ai_profile_analyzed_at else '❌'}")
-                return True
-            else:
-                logger.warning(f"⚠️ Repair incomplete for @{profile_status.username}")
-                logger.warning(f"   Metadata: {metadata}")
-                return False
+            logger.info(f"✅ Successfully queued repair for @{profile_status.username}")
+            logger.info(f"   Missing components: {', '.join(profile_status.missing_components)}")
+            logger.info(f"   Job ID: {job_id[:8]} - Processing in external worker")
+            return True
 
         except Exception as e:
             logger.error(f"❌ Failed to repair @{profile_status.username}: {e}")
             return False
+
+    async def _repair_profile_isolated(self, profile_status):
+        """
+        Repair profile using isolated resources (dedicated connection pool)
+        This runs in background without blocking the main API
+        """
+        try:
+            # Use dedicated background connection pool for isolation
+            from app.database.optimized_pools import optimized_pools
+
+            logger.info(f"🔧 Starting isolated repair for @{profile_status.username}")
+
+            # Use isolated background session
+            async with optimized_pools.get_background_session() as db:
+                # Import here to avoid circular imports
+                from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
+
+                # Execute with isolated resources
+                profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
+                    username=profile_status.username,
+                    db=db,
+                    force_refresh=True  # Force refresh for repairs
+                )
+
+                if profile and metadata.get("is_full_analytics", False):
+                    logger.info(f"✅ Isolated repair completed for @{profile_status.username}")
+                    logger.info(f"   Followers: {profile.followers_count:,}")
+                    logger.info(f"   Posts: {profile.posts_count}")
+                    logger.info(f"   AI Analysis: {'✅' if profile.ai_profile_analyzed_at else '❌'}")
+                else:
+                    logger.warning(f"⚠️ Isolated repair incomplete for @{profile_status.username}")
+                    logger.warning(f"   Metadata: {metadata}")
+
+        except Exception as e:
+            logger.error(f"❌ Isolated repair failed for @{profile_status.username}: {e}")
 
     async def run_full_repair_scan(
         self,

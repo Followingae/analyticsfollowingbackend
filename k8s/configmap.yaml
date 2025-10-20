@@ -1,0 +1,89 @@
+# Configuration for the analytics platform
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: analytics-config
+  namespace: analytics-platform
+data:
+  # Environment configuration
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+
+  # Service configuration
+  SERVICE_MODE: "api_only"  # Overridden per deployment
+
+  # Database configuration
+  DB_POOL_SIZE: "20"
+  DB_MAX_OVERFLOW: "10"
+  DB_POOL_TIMEOUT: "30"
+
+  # Redis configuration
+  REDIS_POOL_SIZE: "20"
+  REDIS_TIMEOUT: "5"
+
+  # AI configuration
+  AI_BATCH_SIZE: "16"
+  AI_MAX_WORKERS: "2"
+  ENABLE_AI_ANALYSIS: "true"
+  AI_MODEL_CACHE_DIR: "/app/models"
+
+  # Background processing
+  CELERY_WORKER_CONCURRENCY: "4"
+  CELERY_WORKER_PREFETCH_MULTIPLIER: "1"
+  CELERY_TASK_ACKS_LATE: "true"
+
+  # Monitoring
+  ENABLE_PERFORMANCE_MONITORING: "true"
+  MONITORING_INTERVAL: "30"
+  METRICS_RETENTION_HOURS: "24"
+
+  # Queue configuration
+  QUEUE_MAX_DEPTH_CRITICAL: "50"
+  QUEUE_MAX_DEPTH_HIGH: "200"
+  QUEUE_MAX_DEPTH_NORMAL: "500"
+  QUEUE_MAX_DEPTH_LOW: "1000"
+
+  # Rate limiting
+  RATE_LIMIT_REQUESTS_PER_MINUTE: "1000"
+  RATE_LIMIT_BURST_SIZE: "100"
+
+  # Health checks
+  HEALTH_CHECK_INTERVAL: "30"
+  HEALTH_CHECK_TIMEOUT: "10"
+
+  # External services
+  EXTERNAL_API_TIMEOUT: "30"
+  EXTERNAL_API_RETRIES: "3"
+
+---
+# Secret template (values should be set via external secret management)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: analytics-secrets
+  namespace: analytics-platform
+type: Opaque
+data:
+  # Database connection string (base64 encoded)
+  DATABASE_URL: ""
+
+  # Supabase configuration
+  SUPABASE_URL: ""
+  SUPABASE_ANON_KEY: ""
+  SUPABASE_SERVICE_ROLE_KEY: ""
+
+  # Redis connection
+  REDIS_URL: ""
+  REDIS_PASSWORD: ""
+
+  # External API keys
+  DECODO_API_KEY: ""
+  SMARTPROXY_USERNAME: ""
+  SMARTPROXY_PASSWORD: ""
+
+  # Monitoring webhooks
+  MONITORING_ALERT_WEBHOOK: ""
+
+  # JWT secrets
+  JWT_SECRET_KEY: ""
+  JWT_ALGORITHM: "HS256"

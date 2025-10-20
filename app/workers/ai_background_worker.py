@@ -12,7 +12,7 @@ import json
 from celery import Celery
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import select, update
+from sqlalchemy import select, update, text
 
 # Import our comprehensive AI services
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
@@ -148,13 +148,30 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
                 }
             
             logger.info(f"Task {task_id}: Found {len(posts)} posts to analyze for {profile_username}")
-            
+
+            # CRITICAL FIX: Fetch CDN URLs for all posts to ensure AI visual analysis uses CDN instead of Instagram URLs
+            post_ids = [post.instagram_post_id for post in posts]
+            posts_cdn_query = text("""
+                SELECT cia.media_id, cia.cdn_url_512
+                FROM cdn_image_assets cia
+                WHERE cia.media_id = ANY(:post_ids)
+                AND cia.processing_status = 'completed'
+                AND cia.cdn_url_512 IS NOT NULL
+            """)
+            posts_cdn_result = await db.execute(posts_cdn_query, {'post_ids': post_ids})
+            posts_cdn_urls = {row[0]: row[1] for row in posts_cdn_result.fetchall()}
+
+            logger.info(f"Task {task_id}: Found CDN URLs for {len(posts_cdn_urls)}/{len(posts)} posts")
+
             # Prepare COMPREHENSIVE posts data for advanced analysis
             posts_data = []
             for post in posts:
                 # ENHANCED: Extract more data from Apify raw data for comprehensive analysis
                 raw_data = post.raw_data or {}
-                
+
+                # CRITICAL FIX: Get CDN URL for this post to ensure AI visual analysis uses CDN instead of Instagram URLs
+                post_cdn_url = posts_cdn_urls.get(post.instagram_post_id)
+
                 post_data = {
                     'id': str(post.id),
                     'instagram_post_id': post.instagram_post_id,
@@ -163,9 +180,9 @@ async def _async_analyze_profile_posts(profile_id: str, profile_username: str, t
                     'media_type': post.media_type,
                     'likes_count': post.likes_count or 0,  # CRITICAL FIX: Use correct field names for AI analysis
                     'comments_count': post.comments_count or 0,  # CRITICAL FIX: Use correct field names for AI analysis
-                    'display_url': post.display_url,
+                    'display_url': post_cdn_url or post.display_url,  # CDN first, Instagram fallback
                     'thumbnail_url': post.thumbnail_src,
-                    'cdn_thumbnail_url': getattr(post, 'cdn_thumbnail_url', None),
+                    'cdn_thumbnail_url': post_cdn_url,  # CRITICAL: Use actual CDN URL from database
                     'is_video': post.is_video or False,
                     'video_view_count': post.video_view_count or 0,
                     'posted_at': post.taken_at_timestamp,

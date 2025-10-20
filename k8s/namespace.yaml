@@ -1,0 +1,47 @@
+# Kubernetes namespace for analytics platform
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: analytics-platform
+  labels:
+    name: analytics-platform
+    environment: production
+---
+# Resource quotas for production workload
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: analytics-quota
+  namespace: analytics-platform
+spec:
+  hard:
+    requests.cpu: "8"        # 8 CPU cores total
+    requests.memory: 16Gi    # 16GB RAM total
+    limits.cpu: "16"         # 16 CPU cores max
+    limits.memory: 32Gi      # 32GB RAM max
+    persistentvolumeclaims: "10"
+    services: "20"
+    secrets: "20"
+    configmaps: "20"
+---
+# Network policies for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: analytics-network-policy
+  namespace: analytics-platform
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - namespaceSelector:
+        matchLabels:
+          name: analytics-platform
+  egress:
+  - {} # Allow all outbound traffic for external APIs

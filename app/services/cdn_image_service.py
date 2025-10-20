@@ -767,7 +767,7 @@ class CDNImageService:
             if source_type == 'profile_avatar':
                 profiles_update_sql = text("""
                     UPDATE profiles
-                    SET profile_pic_url_cdn = :cdn_url
+                    SET cdn_avatar_url = :cdn_url
                     WHERE id = :profile_id
                 """)
                 await self.db.execute(profiles_update_sql, {
@@ -779,13 +779,11 @@ class CDNImageService:
             job_complete_sql = text("""
                 UPDATE cdn_image_jobs
                 SET status = 'completed',
-                    completed_at = NOW(),
-                    result = :result
+                    completed_at = NOW()
                 WHERE id = :job_id
             """)
             await self.db.execute(job_complete_sql, {
-                'job_id': job_id,
-                'result': {'cdn_url_512': cdn_url, 'processed_immediately': True}
+                'job_id': job_id
             })
 
             await self.db.commit()

@@ -1,0 +1,347 @@
+# Background Workers Deployment - CDN and discovery processing
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-workers
+  namespace: analytics-platform
+  labels:
+    app: analytics-workers
+    component: workers
+    version: v1
+spec:
+  replicas: 2  # Dedicated background processing
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: analytics-workers
+  template:
+    metadata:
+      labels:
+        app: analytics-workers
+        component: workers
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: worker
+        image: analytics-platform/workers:latest
+        imagePullPolicy: Always
+
+        # Environment configuration for workers
+        env:
+        - name: SERVICE_MODE
+          value: "background_worker"
+        - name: CELERY_WORKER_CONCURRENCY
+          value: "4"
+        - name: C_FORCE_ROOT
+          value: "1"
+        envFrom:
+        - configMapRef:
+            name: analytics-config
+        - secretRef:
+            name: analytics-secrets
+
+        # Resource allocation for background processing
+        resources:
+          requests:
+            cpu: "1000m"     # 1 CPU core per worker
+            memory: "2Gi"    # 2GB RAM per worker
+          limits:
+            cpu: "2000m"     # 2 CPU cores max
+            memory: "4Gi"    # 4GB RAM max
+
+        # Health checks for workers
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import redis; r=redis.Redis(host='redis'); r.ping()"
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import redis; r=redis.Redis(host='redis'); r.ping()"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+
+        # Volume mounts
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: worker-data
+          mountPath: /app/worker_data
+
+      # Pod security
+      securityContext:
+        fsGroup: 1000
+
+      # Volumes
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+      - name: worker-data
+        emptyDir:
+          sizeLimit: 2Gi
+
+      # Node affinity for worker pods
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node-type
+                operator: In
+                values: ["memory-optimized", "general-purpose"]
+
+      # Tolerations for worker nodes
+      tolerations:
+      - key: "node-type"
+        operator: "Equal"
+        value: "worker"
+        effect: "NoSchedule"
+
+      # Restart policy for background workers
+      restartPolicy: Always
+
+---
+# AI Workers Deployment - CPU/GPU intensive tasks
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-ai-workers
+  namespace: analytics-platform
+  labels:
+    app: analytics-ai-workers
+    component: ai-workers
+    version: v1
+spec:
+  replicas: 1  # Start with 1, scale based on load
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Keep AI capability available
+  selector:
+    matchLabels:
+      app: analytics-ai-workers
+  template:
+    metadata:
+      labels:
+        app: analytics-ai-workers
+        component: ai-workers
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+      - name: ai-worker
+        image: analytics-platform/ai-workers:latest
+        imagePullPolicy: Always
+
+        # Environment for AI workers
+        env:
+        - name: SERVICE_MODE
+          value: "ai_worker"
+        - name: AI_WORKER_CONCURRENCY
+          value: "2"
+        - name: AI_MODEL_CACHE_DIR
+          value: "/app/models"
+        envFrom:
+        - configMapRef:
+            name: analytics-config
+        - secretRef:
+            name: analytics-secrets
+
+        # High resource allocation for AI
+        resources:
+          requests:
+            cpu: "2000m"     # 2 CPU cores per AI worker
+            memory: "4Gi"    # 4GB RAM per AI worker
+          limits:
+            cpu: "4000m"     # 4 CPU cores max
+            memory: "8Gi"    # 8GB RAM max
+            # nvidia.com/gpu: 1  # Uncomment if GPU available
+
+        # AI worker health checks
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import torch; print('AI worker healthy')"
+          initialDelaySeconds: 120  # AI models take time to load
+          periodSeconds: 120
+          timeoutSeconds: 30
+          failureThreshold: 3
+
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - "import torch; print('AI models ready')"
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 20
+          failureThreshold: 3
+
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+
+        # Volume mounts for AI models
+        volumeMounts:
+        - name: tmp-volume
+          mountPath: /tmp
+        - name: ai-models
+          mountPath: /app/models
+        - name: ai-cache
+          mountPath: /app/ai_cache
+
+      # Pod security
+      securityContext:
+        fsGroup: 1000
+
+      # Volumes for AI processing
+      volumes:
+      - name: tmp-volume
+        emptyDir: {}
+      - name: ai-models
+        emptyDir:
+          sizeLimit: 10Gi  # Space for AI models
+      - name: ai-cache
+        emptyDir:
+          sizeLimit: 5Gi
+
+      # AI worker node preferences
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node-type
+                operator: In
+                values: ["compute-optimized", "gpu-optimized"]
+
+      # GPU tolerations (if using GPU nodes)
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-type"
+        operator: "Equal"
+        value: "ai"
+        effect: "NoSchedule"
+
+---
+# Worker Services (for monitoring and health checks)
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-workers-service
+  namespace: analytics-platform
+  labels:
+    app: analytics-workers
+    component: workers
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: metrics
+  selector:
+    app: analytics-workers
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-ai-workers-service
+  namespace: analytics-platform
+  labels:
+    app: analytics-ai-workers
+    component: ai-workers
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: metrics
+  selector:
+    app: analytics-ai-workers
+
+---
+# HPA for AI Workers based on queue depth
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: analytics-ai-workers-hpa
+  namespace: analytics-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: analytics-ai-workers
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 85
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 300  # 5 minutes
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 300
+    scaleDown:
+      stabilizationWindowSeconds: 600  # 10 minutes
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 600

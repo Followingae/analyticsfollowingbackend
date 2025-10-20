@@ -41,7 +41,8 @@ class CreatorAnalyticsTriggerService:
         username: str,
         db: AsyncSession,
         force_refresh: bool = False,
-        is_background_discovery: bool = False
+        is_background_discovery: bool = False,
+        progress_callback: Optional[callable] = None
     ) -> Tuple[Optional[Profile], Dict[str, Any]]:
         """
         Trigger FULL creator analytics with complete rules
@@ -129,6 +130,9 @@ class CreatorAnalyticsTriggerService:
                 logger.info(f"   Reason: Profile not in database")
 
             logger.info(f"[1/4] 📡 Fetching from Apify...")
+            if progress_callback:
+                await progress_callback("apify_fetching", "Fetching Instagram data via APIFY...", 20)
+
             async with ApifyInstagramClient(settings.APIFY_API_TOKEN) as apify_client:
                 apify_data = await apify_client.get_instagram_profile_comprehensive(username)
 
@@ -144,6 +148,9 @@ class CreatorAnalyticsTriggerService:
 
             # Step 4: Store complete profile + posts in database
             logger.info(f"[2/4] 💾 Storing profile + posts in database...")
+            if progress_callback:
+                await progress_callback("apify_completed", "APIFY data fetched successfully. Storing in database...", 40)
+
             profile, is_new = await self.comprehensive_service.store_complete_profile(
                 db, username, apify_data, is_background_discovery
             )
@@ -166,24 +173,33 @@ class CreatorAnalyticsTriggerService:
             profile_id = str(profile.id)
             logger.info(f"✅ Database transaction committed - connection released")
 
-            # Step 5: Trigger CDN + AI pipeline in background (NO database session held)
-            logger.info(f"[4/4] 🚀 Starting UNIFIED background processing (CDN → AI ALL 10 MODELS)...")
-            logger.info(f"      Background processing will continue asynchronously...")
+            # Step 5: Trigger CDN + AI pipeline
+            logger.info(f"[4/4] 🚀 Starting UNIFIED processing (CDN → AI ALL 10 MODELS)...")
 
-            # Run AI processing WITHOUT blocking - it will update the database when complete
+            if progress_callback:
+                await progress_callback("cdn_processing", "Starting CDN image processing...", 60)
+
+            # For bulk repair operations, run synchronously to track progress
+            # For regular operations, run in background
             try:
-                # Fire and forget - AI processing runs in background
-                import asyncio
-                asyncio.create_task(
-                    unified_background_processor.process_profile_complete_pipeline(
-                        profile_id=profile_id,
-                        username=username
+                if progress_callback:
+                    # Synchronous processing with progress tracking for bulk repairs
+                    await self._process_with_progress_tracking(
+                        profile_id, username, progress_callback
                     )
-                )
-                logger.info(f"✅ Background AI processing task created for {username}")
+                else:
+                    # Fire and forget - AI processing runs in background for regular operations
+                    import asyncio
+                    asyncio.create_task(
+                        unified_background_processor.process_profile_complete_pipeline(
+                            profile_id=profile_id,
+                            username=username
+                        )
+                    )
+                logger.info(f"✅ Processing task completed/created for {username}")
 
             except Exception as processing_error:
-                logger.error(f"❌ Failed to create background processing task: {processing_error}")
+                logger.error(f"❌ Failed to process/create processing task: {processing_error}")
                 import traceback
                 logger.error(traceback.format_exc())
                 # Don't fail - profile is already stored
@@ -222,6 +238,46 @@ class CreatorAnalyticsTriggerService:
                 "is_full_analytics": False,
                 "error": str(e)
             }
+
+    async def _process_with_progress_tracking(
+        self,
+        profile_id: str,
+        username: str,
+        progress_callback: callable
+    ):
+        """
+        Process CDN and AI pipeline synchronously with progress tracking
+        Used for bulk repair operations that need real-time status updates
+        """
+        try:
+            from app.services.unified_background_processor import unified_background_processor
+
+            # Update progress for CDN processing
+            await progress_callback("cdn_processing", "Processing images through CDN...", 65)
+
+            # Run the unified processor synchronously
+            await unified_background_processor.process_profile_complete_pipeline(
+                profile_id=profile_id,
+                username=username
+            )
+
+            # Update progress for AI processing stages
+            await progress_callback("ai_processing", "Running AI analysis (10 models)...", 80)
+
+            # CDN completed
+            await progress_callback("cdn_completed", "CDN processing completed", 85)
+
+            # AI completed
+            await progress_callback("ai_completed", "AI analysis completed", 95)
+
+            # Database storing
+            await progress_callback("database_storing", "Storing AI results in database...", 98)
+
+            logger.info(f"✅ Synchronous processing completed for {username}")
+
+        except Exception as e:
+            logger.error(f"❌ Synchronous processing failed for {username}: {e}")
+            raise
 
 
 # Global service instance

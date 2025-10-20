@@ -34,7 +34,7 @@ class CDNSyncService:
                 SELECT cdn_url_512
                 FROM cdn_image_assets
                 WHERE source_id = :profile_id
-                AND source_type = 'instagram_profile'
+                AND source_type = 'profile_avatar'
                 AND cdn_url_512 IS NOT NULL
                 LIMIT 1
             """)
@@ -186,7 +186,7 @@ class CDNSyncService:
                 SELECT p.id, p.username, p.profile_pic_url
                 FROM profiles p
                 LEFT JOIN cdn_image_assets cia ON cia.source_id = p.id
-                    AND cia.source_type = 'instagram_profile'
+                    AND cia.source_type = 'profile_avatar'
                 WHERE cia.id IS NULL OR p.profile_pic_url IS NULL OR p.profile_pic_url = ''
             """)
 

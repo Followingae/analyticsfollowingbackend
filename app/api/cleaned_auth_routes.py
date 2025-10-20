@@ -574,6 +574,7 @@ async def get_user_dashboard(
 
 
 @router.get("/unlocked-profiles")
+@router.get("/unlocked")  # Alias for frontend compatibility
 async def get_unlocked_profiles(
     page: int = Query(1, ge=1, description="Page number (starts at 1)"),
     page_size: int = Query(20, ge=1, le=50, description="Results per page (max 50)"),

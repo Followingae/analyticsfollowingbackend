@@ -826,39 +826,6 @@ class ComprehensiveDataService:
             logger.info(f"Stored {related_count} related profiles for profile {profile_id}")
             print(f"[SUCCESS] DATABASE: Successfully committed {related_count} related profiles")
 
-            # 🔄 DISCOVERY SYSTEM INTEGRATION: Trigger similar profiles discovery for related profiles
-            # 🚫 INFINITE LOOP PREVENTION: Only trigger discovery for user-initiated searches, not background discovered profiles
-            if related_count > 0:
-                try:
-                    # Check explicit background discovery flag first, then fall back to stack trace detection
-                    if is_background_discovery:
-                        logger.info(f"[DISCOVERY] 🚫 Skipping discovery hook for background-discovered profile (explicit flag)")
-                    else:
-                        # Additional safety check - look at stack trace for processor calls
-                        import inspect
-                        frame_info = inspect.stack()
-                        is_stack_background_discovery = any("similar_profiles_processor" in str(frame.filename) for frame in frame_info)
-
-                        if is_stack_background_discovery:
-                            logger.info(f"[DISCOVERY] 🚫 Skipping discovery hook for background-discovered profile (stack trace detection)")
-                        else:
-                            from app.services.background.similar_profiles_processor import hook_related_profiles_stored
-
-                            # Get the source profile username for the hook
-                            profile_query = await db.execute(select(Profile.username).where(Profile.id == profile_id))
-                            profile_result = profile_query.scalar_one_or_none()
-                            source_username = profile_result if profile_result else "unknown"
-
-                            await hook_related_profiles_stored(
-                                source_username=source_username,
-                                profile_id=str(profile_id),
-                                related_profiles_count=related_count
-                            )
-                            logger.info(f"[DISCOVERY] ✅ Related profiles discovery hook triggered: {related_count} similar profiles found for @{source_username}")
-
-                except Exception as discovery_error:
-                    logger.warning(f"[DISCOVERY] Hook trigger failed for profile {profile_id}: {discovery_error}")
-                    # Don't fail the main request if discovery hook fails
 
             return related_count
             
@@ -1493,6 +1460,7 @@ class ComprehensiveDataService:
                     "full_name": profile.full_name or "",
                     "profile_pic_url": profile.profile_pic_url or "",
                     "profile_pic_url_hd": profile.profile_pic_url_hd or "",
+                    "cdn_avatar_url": profile.cdn_avatar_url or "",  # CDN processed profile picture URL
                     # Pre-proxied URLs for frontend consistency
                     "proxied_profile_pic_url": profile.profile_pic_url or "",  # External proxy service handles these
                     "proxied_profile_pic_url_hd": profile.profile_pic_url_hd or "",  # External proxy service handles these
@@ -1509,7 +1477,7 @@ class ComprehensiveDataService:
                     "days_remaining": days_remaining,
                     "profile_id": str(profile.id),
                     "credits_spent": 25,  # Standard cost for 30-day access
-                    
+
                     # Add AI analysis data if available
                     "ai_analysis": {
                         "primary_content_type": profile.ai_primary_content_type,
@@ -1976,15 +1944,20 @@ class ComprehensiveDataService:
             profile_data_for_detection["audience_top_countries"] = []
 
             # Run location detection
+            logger.info(f"Starting location detection for {profile.username}")
             location_result = self.location_service.detect_country(profile_data_for_detection)
+            logger.info(f"Location detection completed for {profile.username}: {location_result}")
 
             # Update profile with location data (only detected_country column exists)
-            if location_result["country_code"]:
+            if location_result and location_result.get("country_code"):
+                country_code = location_result["country_code"]
+                confidence = location_result.get("confidence", 0)
+
                 update_query = (
                     update(Profile)
                     .where(Profile.id == profile.id)
                     .values(
-                        detected_country=location_result["country_code"]
+                        detected_country=country_code
                     )
                 )
 
@@ -1992,22 +1965,50 @@ class ComprehensiveDataService:
                 await db.commit()
 
                 logger.info(
-                    f"Location detected for {profile.username}: "
-                    f"{location_result['country_code']} "
-                    f"(confidence: {location_result['confidence']:.2f})"
+                    f"✅ Location detected and saved for {profile.username}: "
+                    f"{country_code} (confidence: {confidence:.2f})"
                 )
                 print(
-                    f"LOCATION: {profile.username} -> "
-                    f"{location_result['country_code']} "
-                    f"({location_result['confidence']:.1%})"
+                    f"✅ LOCATION: {profile.username} -> "
+                    f"{country_code} ({confidence:.1%})"
                 )
             else:
-                logger.info(f"No location detected for {profile.username}")
-                print(f"LOCATION: {profile.username} -> No country detected")
+                logger.info(f"No location detected for {profile.username} - location_result: {location_result}")
+                print(f"❌ LOCATION: {profile.username} -> No country detected")
+
+                # Mark as NULL to indicate no location detected (VARCHAR(2) field)
+                try:
+                    await db.execute(
+                        update(Profile)
+                        .where(Profile.id == profile.id)
+                        .values(detected_country=None)  # Use NULL instead of 'NONE' for VARCHAR(2) field
+                    )
+                    await db.commit()
+                    logger.info(f"Set detected_country=NULL for {profile.username} (no location found)")
+                except Exception as db_error:
+                    logger.error(f"Failed to set detected_country=NULL: {db_error}")
 
         except Exception as e:
-            logger.error(f"Error in location detection for {profile.username}: {e}")
-            print(f"LOCATION ERROR: {profile.username} -> {str(e)}")
+            logger.error(f"LOCATION DETECTION FAILED for {profile.username}: {e}")
+            logger.error(f"Location detection error details: {type(e).__name__}: {str(e)}")
+            print(f"🚨 LOCATION ERROR: {profile.username} -> {str(e)}")
+
+            # Log the full exception for debugging
+            import traceback
+            logger.error(f"Location detection traceback: {traceback.format_exc()}")
+
+            # Set detected_country to 'XX' to indicate a processing error (VARCHAR(2) field)
+            try:
+                await db.execute(
+                    update(Profile)
+                    .where(Profile.id == profile.id)
+                    .values(detected_country='XX')  # Use 'XX' instead of 'FAILED' for VARCHAR(2) field
+                )
+                await db.commit()
+                logger.warning(f"Set detected_country='XX' for {profile.username} due to processing error")
+            except Exception as db_error:
+                logger.error(f"Failed to mark location detection failure in DB: {db_error}")
+
             # Don't raise - location detection failure shouldn't stop profile processing
 
     async def cleanup(self):

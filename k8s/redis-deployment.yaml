@@ -1,0 +1,276 @@
+# Redis Deployment for caching and job queues
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: analytics-platform
+  labels:
+    app: redis
+    component: cache
+    version: v1
+spec:
+  replicas: 1  # Single Redis instance (consider Redis Cluster for HA)
+  strategy:
+    type: Recreate  # Redis requires persistent storage
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        component: cache
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        imagePullPolicy: IfNotPresent
+
+        # Redis configuration
+        command:
+        - redis-server
+        - /usr/local/etc/redis/redis.conf
+
+        # Resource allocation
+        resources:
+          requests:
+            cpu: "200m"      # 0.2 CPU core
+            memory: "1Gi"    # 1GB RAM
+          limits:
+            cpu: "500m"      # 0.5 CPU core max
+            memory: "2Gi"    # 2GB RAM max
+
+        # Health checks
+        livenessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+        # Ports
+        ports:
+        - containerPort: 6379
+          name: redis
+          protocol: TCP
+
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999  # Redis user
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+            - ALL
+
+        # Volume mounts
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        - name: redis-config
+          mountPath: /usr/local/etc/redis/redis.conf
+          subPath: redis.conf
+
+      # Redis exporter for Prometheus monitoring
+      - name: redis-exporter
+        image: oliver006/redis_exporter:latest
+        imagePullPolicy: IfNotPresent
+
+        # Environment for exporter
+        env:
+        - name: REDIS_ADDR
+          value: "redis://localhost:6379"
+
+        # Resource allocation for exporter
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "100m"
+            memory: "128Mi"
+
+        # Exporter ports
+        ports:
+        - containerPort: 9121
+          name: metrics
+          protocol: TCP
+
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 999
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+      # Pod security
+      securityContext:
+        fsGroup: 999
+
+      # Volumes
+      volumes:
+      - name: redis-data
+        persistentVolumeClaim:
+          claimName: redis-pvc
+      - name: redis-config
+        configMap:
+          name: redis-config
+
+      # Node affinity for Redis
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node-type
+                operator: In
+                values: ["memory-optimized", "general-purpose"]
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: analytics-platform
+  labels:
+    app: redis
+    component: cache
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6379
+    targetPort: 6379
+    protocol: TCP
+    name: redis
+  - port: 9121
+    targetPort: 9121
+    protocol: TCP
+    name: metrics
+  selector:
+    app: redis
+
+---
+# Redis Persistent Volume Claim
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: analytics-platform
+  labels:
+    app: redis
+    component: cache
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi  # 10GB for Redis data
+  storageClassName: fast-ssd  # Use SSD storage class
+
+---
+# Redis Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: analytics-platform
+  labels:
+    app: redis
+    component: cache
+data:
+  redis.conf: |
+    # Redis configuration optimized for analytics platform
+
+    # Network
+    bind 0.0.0.0
+    port 6379
+    timeout 300
+
+    # General
+    daemonize no
+    supervised no
+    pidfile /var/run/redis_6379.pid
+    loglevel notice
+    logfile ""
+
+    # Persistence
+    save 900 1      # Save if at least 1 key changed in 900 seconds
+    save 300 10     # Save if at least 10 keys changed in 300 seconds
+    save 60 10000   # Save if at least 10000 keys changed in 60 seconds
+
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    dir /data
+
+    # Memory management
+    maxmemory 1.5gb
+    maxmemory-policy allkeys-lru
+    maxmemory-samples 5
+
+    # Append only file
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+
+    # Slow log
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+
+    # Security
+    # requirepass <password>  # Set via secret
+
+    # Client management
+    maxclients 1000
+
+    # Advanced config
+    hash-max-ziplist-entries 512
+    hash-max-ziplist-value 64
+    list-max-ziplist-size -2
+    list-compress-depth 0
+    set-max-intset-entries 512
+    zset-max-ziplist-entries 128
+    zset-max-ziplist-value 64
+    hll-sparse-max-bytes 3000
+
+    # Active rehashing
+    activerehashing yes
+
+    # Client output buffer limits
+    client-output-buffer-limit normal 0 0 0
+    client-output-buffer-limit replica 256mb 64mb 60
+    client-output-buffer-limit pubsub 32mb 8mb 60
+
+    # TCP keepalive
+    tcp-keepalive 300
+
+    # Disable dangerous commands in production
+    rename-command FLUSHDB ""
+    rename-command FLUSHALL ""
+    rename-command KEYS ""
+    rename-command DEBUG ""

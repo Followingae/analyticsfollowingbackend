@@ -1,28 +1,26 @@
 """
-Admin Repair Routes - Profile Completeness and Discovery Management
+Admin Repair Routes - Profile Completeness Management
 
-Admin-only endpoints for managing profile completeness repair and discovery operations.
-These endpoints provide manual control over the repair and discovery systems.
+Admin-only endpoints for managing profile completeness repair operations.
+These endpoints provide manual control over the repair system.
 """
 
 import asyncio
 import logging
 from typing import Dict, Any, Optional, List
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.database.connection import get_session
 from app.services.profile_completeness_repair_service import profile_completeness_repair_service
-from app.services.similar_profiles_discovery_service import similar_profiles_discovery_service
-from app.services.background.similar_profiles_processor import similar_profiles_background_processor
-from app.core.discovery_config import discovery_settings, validate_discovery_config
 from app.middleware.auth_middleware import get_current_active_user, require_admin
 from app.database.unified_models import User
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/admin/repair", tags=["Admin - Repair & Discovery"])
+router = APIRouter(prefix="/api/v1/admin/repair", tags=["Admin - Repair"])
 
 
 # Pydantic Models for Request/Response
@@ -30,7 +28,7 @@ class ProfileCompletenessRequest(BaseModel):
     """Request model for profile completeness operations"""
     limit: Optional[int] = None
     username_filter: Optional[str] = None
-    dry_run: bool = False
+    dry_run: bool = True
     force_repair: bool = False
 
 
@@ -41,14 +39,6 @@ class ProfileCompletenessResponse(BaseModel):
     scan_results: Dict[str, Any]
     repair_results: Optional[Dict[str, Any]] = None
     incomplete_profiles: Optional[List[Dict[str, Any]]] = None
-
-
-class DiscoveryStatsResponse(BaseModel):
-    """Response model for discovery statistics"""
-    config: Dict[str, Any]
-    stats: Dict[str, Any]
-    rate_limits: Dict[str, Any]
-    processor_stats: Dict[str, Any]
 
 
 # Profile Completeness Repair Endpoints
@@ -144,338 +134,18 @@ async def repair_profile_completeness(
         raise HTTPException(status_code=500, detail=f"Repair failed: {str(e)}")
 
 
-# Discovery System Endpoints
-
-@router.get("/discovery/stats")
-async def get_discovery_stats(
-    db: AsyncSession = Depends(get_session),
-    admin_user: User = Depends(require_admin())
-) -> DiscoveryStatsResponse:
-    """
-    Get discovery system statistics and status
-
-    Admin-only endpoint for monitoring discovery system health and performance.
-    """
-    try:
-        logger.info(f"Discovery stats request by {admin_user.email}")
-
-        # Get discovery service stats
-        discovery_stats = await similar_profiles_discovery_service.get_discovery_stats(db)
-
-        # Get background processor stats
-        processor_stats = similar_profiles_background_processor.get_stats()
-
-        # Get configuration validation
-        config_validation = validate_discovery_config()
-
-        return DiscoveryStatsResponse(
-            config=config_validation["settings"],
-            stats=discovery_stats.get("stats", {}),
-            rate_limits=discovery_stats.get("rate_limits", {}),
-            processor_stats=processor_stats
-        )
-
-    except Exception as e:
-        logger.error(f"Discovery stats failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Stats retrieval failed: {str(e)}")
-
-
-@router.get("/discovery/config")
-async def get_discovery_config(
-    admin_user: User = Depends(require_admin())
-) -> Dict[str, Any]:
-    """
-    Get discovery system configuration and validation status
-
-    Admin-only endpoint for reviewing discovery system configuration.
-    """
-    try:
-        logger.info(f"Discovery config request by {admin_user.email}")
-
-        config_validation = validate_discovery_config()
-
-        return {
-            "success": True,
-            "config_valid": config_validation["valid"],
-            "issues": config_validation["issues"],
-            "warnings": config_validation["warnings"],
-            "current_settings": {
-                "enabled": discovery_settings.DISCOVERY_ENABLED,
-                "max_concurrent": discovery_settings.DISCOVERY_MAX_CONCURRENT_PROFILES,
-                "batch_size": discovery_settings.DISCOVERY_BATCH_SIZE,
-                "min_followers": discovery_settings.DISCOVERY_MIN_FOLLOWERS_COUNT,
-                "daily_limit": discovery_settings.DISCOVERY_RATE_LIMIT_PROFILES_PER_DAY,
-                "hourly_limit": discovery_settings.DISCOVERY_RATE_LIMIT_PROFILES_PER_HOUR,
-                "skip_existing": discovery_settings.DISCOVERY_SKIP_EXISTING_PROFILES,
-                "continue_on_error": discovery_settings.DISCOVERY_CONTINUE_ON_ERROR
-            }
-        }
-
-    except Exception as e:
-        logger.error(f"Discovery config retrieval failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Config retrieval failed: {str(e)}")
-
-
-@router.get("/discovery/queue-status")
-async def get_discovery_queue_status(
-    db: AsyncSession = Depends(get_session),
-    admin_user: User = Depends(require_admin())
-) -> Dict[str, Any]:
-    """
-    🔴 REAL-TIME Discovery Queue Status - Shows ACTUAL unprocessed profiles
-
-    This endpoint shows discovered profiles that are NOT processed yet and allows manual triggering.
-    """
-    try:
-        logger.info(f"Discovery queue status request by {admin_user.email}")
-
-        # Get background processor internal queue status
-        queue_status = await similar_profiles_background_processor.get_queue_status()
-
-        # 🔴 CRITICAL: Get ACTUAL discovered profiles that need processing from database
-        from sqlalchemy import text
-
-        unprocessed_query = text("""
-            SELECT
-              rp.related_username,
-              rp.related_followers_count,
-              rp.similarity_score,
-              rp.discovered_at,
-              rp.source,
-              p.id as profile_exists,
-              p.followers_count as actual_followers,
-              (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) as stored_posts,
-              p.ai_profile_analyzed_at,
-              CASE
-                WHEN p.id IS NULL THEN 'not_in_database'
-                WHEN p.followers_count IS NULL OR p.followers_count = 0 THEN 'incomplete_no_data'
-                WHEN (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) < 12 THEN 'incomplete_posts'
-                WHEN p.ai_profile_analyzed_at IS NULL THEN 'incomplete_no_ai'
-                ELSE 'complete'
-              END as processing_status
-            FROM related_profiles rp
-            LEFT JOIN profiles p ON p.username = rp.related_username
-            WHERE p.id IS NULL
-               OR p.followers_count IS NULL
-               OR p.followers_count = 0
-               OR (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) < 12
-               OR p.ai_profile_analyzed_at IS NULL
-            ORDER BY rp.discovered_at DESC
-            LIMIT 50
-        """)
-
-        result = await db.execute(unprocessed_query)
-        unprocessed_profiles = [dict(row._mapping) for row in result.fetchall()]
-
-        # Count total discovered vs processed
-        total_discovered_query = text("SELECT COUNT(*) FROM related_profiles")
-        total_result = await db.execute(total_discovered_query)
-        total_discovered = total_result.scalar()
-
-        return {
-            "success": True,
-            "processor_running": queue_status.get("is_running", False),
-            "internal_queue_size": queue_status.get("queue_size", 0),
-            "worker_active": queue_status.get("worker_active", False),
-            "discovery_stats": {
-                "total_discovered": total_discovered,
-                "unprocessed_count": len(unprocessed_profiles),
-                "processed_count": total_discovered - len(unprocessed_profiles)
-            },
-            "unprocessed_profiles": unprocessed_profiles[:20],  # Show top 20
-            "action_required": len(unprocessed_profiles) > 0,
-            "manual_trigger_endpoint": "/api/v1/admin/repair/discovery/process-all-unprocessed"
-        }
-
-    except Exception as e:
-        logger.error(f"Discovery queue status failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Queue status retrieval failed: {str(e)}")
-
-
-@router.post("/discovery/manual-trigger/{username}")
-async def manual_trigger_discovery(
-    username: str,
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_session),
-    admin_user: User = Depends(require_admin())
-) -> Dict[str, Any]:
-    """
-    Manually trigger discovery for a specific profile
-
-    Admin-only endpoint to manually trigger similar profiles discovery
-    for a specific username. Useful for testing and debugging.
-    """
-    try:
-        logger.info(f"Manual discovery trigger by {admin_user.email} for @{username}")
-
-        # Check if profile exists
-        from sqlalchemy import select
-        from app.database.unified_models import Profile
-
-        profile_query = select(Profile).where(Profile.username == username)
-        profile_result = await db.execute(profile_query)
-        profile = profile_result.scalar_one_or_none()
-
-        if not profile:
-            raise HTTPException(status_code=404, detail=f"Profile @{username} not found in database")
-
-        # Trigger discovery using the background processor hook
-        from app.services.background.similar_profiles_processor import hook_creator_analytics_complete
-
-        await hook_creator_analytics_complete(
-            source_username=username,
-            profile_id=profile.id,
-            analytics_metadata={"manual_trigger": True, "admin_user": admin_user.email}
-        )
-
-        return {
-            "success": True,
-            "message": f"Discovery manually triggered for @{username}",
-            "profile_id": str(profile.id),
-            "triggered_by": admin_user.email
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Manual discovery trigger failed for @{username}: {e}")
-        raise HTTPException(status_code=500, detail=f"Manual trigger failed: {str(e)}")
-
-
-@router.post("/discovery/process-all-unprocessed")
-async def process_all_unprocessed_profiles(
-    limit: int = Query(10, description="Max profiles to process in this batch"),
-    background_tasks: BackgroundTasks = None,
-    db: AsyncSession = Depends(get_session),
-    admin_user: User = Depends(require_admin())
-) -> Dict[str, Any]:
-    """
-    🔴 MANUAL TRIGGER: Process ALL unprocessed discovered profiles NOW
-
-    This endpoint processes discovered profiles that haven't been analyzed yet.
-    It triggers full Creator Analytics (APIFY + CDN + AI) for each profile.
-    """
-    try:
-        logger.info(f"🔴 MANUAL BATCH PROCESSING triggered by {admin_user.email}, limit={limit}")
-
-        # Get unprocessed profiles from related_profiles table
-        from sqlalchemy import text
-
-        unprocessed_query = text("""
-            SELECT DISTINCT rp.related_username
-            FROM related_profiles rp
-            LEFT JOIN profiles p ON p.username = rp.related_username
-            WHERE p.id IS NULL
-               OR p.followers_count IS NULL
-               OR p.followers_count = 0
-               OR (SELECT COUNT(*) FROM posts WHERE profile_id = p.id) < 12
-               OR p.ai_profile_analyzed_at IS NULL
-            ORDER BY rp.discovered_at DESC
-            LIMIT :limit
-        """)
-
-        result = await db.execute(unprocessed_query, {"limit": limit})
-        unprocessed_usernames = [row.related_username for row in result.fetchall()]
-
-        if not unprocessed_usernames:
-            return {
-                "success": True,
-                "message": "No unprocessed profiles found - all discovered profiles are complete!",
-                "processed_count": 0,
-                "profiles": []
-            }
-
-        logger.info(f"🔴 Found {len(unprocessed_usernames)} unprocessed profiles to analyze")
-
-        # Trigger Creator Analytics for each profile
-        from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
-
-        results = []
-        successful = 0
-        failed = 0
-
-        for username in unprocessed_usernames:
-            try:
-                logger.info(f"🔴 Processing discovered profile: @{username}")
-
-                # Trigger full Creator Analytics pipeline
-                analytics_result = await creator_analytics_trigger_service.trigger_creator_analytics(
-                    username=username,
-                    db=db,
-                    force_refresh=False  # Use cache if exists
-                )
-
-                if analytics_result.get("success"):
-                    successful += 1
-                    results.append({
-                        "username": username,
-                        "status": "success",
-                        "profile_id": analytics_result.get("profile_id")
-                    })
-                else:
-                    failed += 1
-                    results.append({
-                        "username": username,
-                        "status": "failed",
-                        "error": analytics_result.get("error", "Unknown error")
-                    })
-
-            except Exception as e:
-                failed += 1
-                logger.error(f"🔴 Failed to process @{username}: {e}")
-                results.append({
-                    "username": username,
-                    "status": "error",
-                    "error": str(e)
-                })
-
-        logger.info(f"🔴 BATCH PROCESSING COMPLETE: {successful} successful, {failed} failed")
-
-        return {
-            "success": True,
-            "message": f"Processed {len(unprocessed_usernames)} discovered profiles",
-            "summary": {
-                "total_processed": len(unprocessed_usernames),
-                "successful": successful,
-                "failed": failed
-            },
-            "profiles": results,
-            "triggered_by": admin_user.email
-        }
-
-    except Exception as e:
-        logger.error(f"🔴 Batch processing failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Batch processing failed: {str(e)}")
-
-
-# System Health and Monitoring
-
 @router.get("/health")
-async def repair_system_health(
+async def get_repair_system_health(
+    db: AsyncSession = Depends(get_session),
     admin_user: User = Depends(require_admin())
 ) -> Dict[str, Any]:
     """
-    Get repair and discovery system health status
+    Get repair system health status
 
-    Admin-only endpoint for comprehensive system health monitoring.
+    Admin-only endpoint for system health monitoring.
     """
     try:
         logger.info(f"System health check by {admin_user.email}")
-
-        # Check discovery configuration
-        config_validation = validate_discovery_config()
-
-        # Get background processor status
-        processor_stats = similar_profiles_background_processor.get_stats()
-        queue_status = await similar_profiles_background_processor.get_queue_status()
-
-        # Get discovery service stats (if possible)
-        discovery_stats = {}
-        try:
-            async with get_session() as db:
-                discovery_stats = await similar_profiles_discovery_service.get_discovery_stats(db)
-        except Exception as e:
-            discovery_stats = {"error": str(e)}
 
         health_status = {
             "overall_status": "healthy",
@@ -485,86 +155,19 @@ async def repair_system_health(
                     "status": "available",
                     "description": "Profile completeness repair service"
                 },
-                "discovery_service": {
-                    "status": "available" if discovery_settings.DISCOVERY_ENABLED else "disabled",
-                    "description": "Similar profiles discovery service"
-                },
-                "background_processor": {
-                    "status": "running" if queue_status["is_running"] else "stopped",
-                    "queue_size": queue_status["queue_size"],
-                    "worker_active": queue_status["worker_active"]
-                },
-                "configuration": {
-                    "status": "valid" if config_validation["valid"] else "invalid",
-                    "issues": config_validation["issues"],
-                    "warnings": config_validation["warnings"]
+                "database": {
+                    "status": "connected",
+                    "description": "Database connection active"
                 }
-            },
-            "stats": {
-                "processor": processor_stats,
-                "discovery": discovery_stats
             }
         }
-
-        # Determine overall health
-        if config_validation["issues"] or not queue_status["is_running"]:
-            health_status["overall_status"] = "degraded"
-
-        return health_status
-
-    except Exception as e:
-        logger.error(f"System health check failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
-
-
-# Utility endpoint for testing
-@router.post("/test/validate-completeness/{username}")
-async def test_validate_profile_completeness(
-    username: str,
-    db: AsyncSession = Depends(get_session),
-    admin_user: User = Depends(require_admin())
-) -> Dict[str, Any]:
-    """
-    Test profile completeness validation for a specific username
-
-    Admin-only endpoint for testing completeness logic on individual profiles.
-    """
-    try:
-        logger.info(f"Profile completeness test by {admin_user.email} for @{username}")
-
-        # Get profile completeness status
-        statuses = await profile_completeness_repair_service.scan_profile_completeness(
-            db=db,
-            limit=1,
-            username_filter=username
-        )
-
-        if not statuses:
-            raise HTTPException(status_code=404, detail=f"Profile @{username} not found")
-
-        status = statuses[0]
 
         return {
             "success": True,
-            "username": status.username,
-            "profile_id": str(status.profile_id),
-            "is_complete": status.is_complete,
-            "missing_components": status.missing_components,
-            "details": {
-                "followers_count": status.followers_count,
-                "posts_count": status.posts_count,
-                "has_biography": status.has_biography,
-                "has_ai_analysis": status.has_ai_analysis,
-                "stored_posts_count": status.stored_posts_count
-            }
+            "health": health_status,
+            "message": "System health check completed"
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"Profile completeness test failed for @{username}: {e}")
-        raise HTTPException(status_code=500, detail=f"Test failed: {str(e)}")
-
-
-# Import datetime for health endpoint
-from datetime import datetime
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")

@@ -294,6 +294,7 @@ class Profile(Base):
     external_url = Column(Text, nullable=True)
     profile_pic_url = Column(Text, nullable=True)
     profile_pic_url_hd = Column(Text, nullable=True)  # High definition profile picture
+    cdn_avatar_url = Column(Text, nullable=True)  # CDN processed profile picture URL
     
     # Statistics
     followers_count = Column(BigInteger, nullable=True)
@@ -313,6 +314,9 @@ class Profile(Base):
     # Category (Instagram business category)
     category = Column(String(255), nullable=True)
     instagram_business_category = Column(String(100), nullable=True)  # Renamed for clarity
+
+    # Location detection
+    detected_country = Column(String(2), nullable=True)  # ISO 2-letter country code (e.g., "AE", "US")
     
     # AI-Enhanced Content Intelligence (added by AI migration)
     ai_primary_content_type = Column(String(50), nullable=True)  # AI-determined main category (DEPRECATED - use ai_top_3_categories)
