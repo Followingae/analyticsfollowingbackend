@@ -6,7 +6,7 @@ import httpx
 import io
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import uvicorn
 import asyncio
 import os
@@ -1478,8 +1478,7 @@ async def bulletproof_creator_search(
                         new_access = UserProfileAccess(
                             user_id=app_user.id,
                             profile_id=profile.id,
-                            credits_spent=0,  # Free unlock after processing
-                            accessed_at=datetime.now(timezone.utc),
+                            granted_at=datetime.now(timezone.utc),
                             expires_at=datetime.now(timezone.utc) + timedelta(days=30)
                         )
                         db.add(new_access)

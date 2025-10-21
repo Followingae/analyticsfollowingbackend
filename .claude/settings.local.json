@@ -34,7 +34,9 @@
       "Bash(mv:*)",
       "Bash(find:*)",
       "Bash(wrangler:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": [],
