@@ -22,7 +22,7 @@ from app.database.connection import get_db
 from app.database.unified_models import (
     User, Team, TeamMember, CreditWallet, CreditTransaction,
     UserProfileAccess, Profile, Post, MonthlyUsageTracking,
-    AdminBrandProposal, CreditPricingRule, UserList
+    CreditPricingRule, UserList
 )
 from app.services.redis_cache_service import RedisCacheService
 

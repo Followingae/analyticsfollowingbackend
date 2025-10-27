@@ -17,7 +17,7 @@ from app.models.auth import UserInDB
 from app.database.connection import get_db
 from app.database.unified_models import (
     User, Team, TeamMember, CreditWallet, CreditTransaction,
-    UserProfileAccess, Profile, Post, AdminBrandProposal,
+    UserProfileAccess, Profile, Post,
     CreditPricingRule, UserList
 )
 
@@ -1280,474 +1280,13 @@ async def get_influencer_detailed(
             detail=f"Failed to get detailed influencer data: {str(e)}"
         )
 
-# ==================== PROPOSAL MODULE INTEGRATION ====================
 
-@router.get("/proposals/overview")
-async def get_proposals_overview(
-    current_user: UserInDB = Depends(require_super_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Comprehensive proposals system overview for super admin
-    """
-    try:
-        # Get proposal statistics
-        total_proposals_result = await db.execute(select(func.count(AdminBrandProposal.id)))
-        total_proposals = total_proposals_result.scalar() or 0
-        
-        # Get proposals by status
-        status_breakdown_result = await db.execute(
-            select(
-                AdminBrandProposal.status,
-                func.count(AdminBrandProposal.id)
-            ).group_by(AdminBrandProposal.status)
-        )
-        
-        status_breakdown = {}
-        for row in status_breakdown_result:
-            status_breakdown[row.status] = row.count
-        
-        # Get recent proposals - select only existing columns
-        recent_proposals_result = await db.execute(
-            select(
-                AdminBrandProposal.id,
-                AdminBrandProposal.proposal_title,
-                AdminBrandProposal.brand_user_id,
-                AdminBrandProposal.proposed_budget_usd,
-                AdminBrandProposal.status,
-                AdminBrandProposal.created_at,
-                AdminBrandProposal.service_type  # Use service_type instead of proposal_type
-            )
-            .order_by(desc(AdminBrandProposal.created_at))
-            .limit(10)
-        )
-        
-        recent_proposals = []
-        for proposal in recent_proposals_result.fetchall():
-            recent_proposals.append({
-                "id": str(proposal.id),
-                "title": proposal.proposal_title,
-                "brand_user_id": str(proposal.brand_user_id),
-                "budget": float(proposal.proposed_budget_usd or 0),
-                "status": proposal.status,
-                "created_at": proposal.created_at,
-                "campaign_type": proposal.service_type
-            })
-        
-        # Get revenue from proposals
-        revenue_result = await db.execute(
-            select(func.sum(AdminBrandProposal.proposed_budget_usd))
-            .where(AdminBrandProposal.status == 'completed')
-        )
-        total_revenue = float(revenue_result.scalar() or 0)
-        
-        return {
-            "overview": {
-                "total_proposals": total_proposals,
-                "total_revenue": total_revenue,
-                "active_campaigns": status_breakdown.get("active", 0),
-                "pending_approval": status_breakdown.get("pending", 0)
-            },
-            "status_breakdown": status_breakdown,
-            "recent_proposals": recent_proposals,
-            "performance_metrics": {
-                "approval_rate": (status_breakdown.get("approved", 0) / total_proposals * 100) if total_proposals > 0 else 0,
-                "completion_rate": (status_breakdown.get("completed", 0) / total_proposals * 100) if total_proposals > 0 else 0,
-                "average_budget": total_revenue / status_breakdown.get("completed", 1) if status_breakdown.get("completed", 0) > 0 else 0
-            }
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get proposals overview: {str(e)}"
-        )
+# ==================== PROPOSAL MODULE REMOVED ====================
 
-@router.get("/proposals/manage")
-async def manage_proposals(
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    status_filter: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
-    current_user: UserInDB = Depends(require_super_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Manage all proposals with filtering and search
-    """
-    try:
-        # Build base query - select only columns that exist in the actual database
-        base_query = select(
-            AdminBrandProposal.id,
-            AdminBrandProposal.proposal_title,
-            AdminBrandProposal.proposal_description,
-            AdminBrandProposal.service_type,  # This is the actual column name, not proposal_type
-            AdminBrandProposal.proposed_budget_usd,
-            AdminBrandProposal.status,
-            AdminBrandProposal.priority_level,
-            AdminBrandProposal.deliverables,  # This is the actual column name
-            AdminBrandProposal.created_at,
-            AdminBrandProposal.updated_at
-        ).order_by(desc(AdminBrandProposal.created_at))
-        count_query = select(func.count(AdminBrandProposal.id))
-        
-        # Apply filters
-        filters = []
-        if status_filter:
-            filters.append(AdminBrandProposal.status == status_filter)
-        if search:
-            filters.append(or_(
-                AdminBrandProposal.proposal_title.ilike(f"%{search}%"),
-                AdminBrandProposal.brand_name.ilike(f"%{search}%"),
-                AdminBrandProposal.proposal_description.ilike(f"%{search}%")
-            ))
-        
-        if filters:
-            base_query = base_query.where(and_(*filters))
-            count_query = count_query.where(and_(*filters))
-        
-        # Execute queries
-        proposals_result = await db.execute(base_query.offset(offset).limit(limit))
-        proposals = proposals_result.fetchall()
-        
-        total_count_result = await db.execute(count_query)
-        total_count = total_count_result.scalar()
-        
-        # Format proposals using actual database columns
-        formatted_proposals = []
-        for proposal in proposals:
-            formatted_proposals.append({
-                "id": str(proposal.id),
-                "title": proposal.proposal_title,
-                "service_type": proposal.service_type,  # Using actual column name
-                "budget": float(proposal.proposed_budget_usd or 0),
-                "status": proposal.status,
-                "campaign_type": proposal.service_type,  # Use service_type as campaign_type
-                "description": proposal.proposal_description,
-                "requirements": proposal.deliverables or {},  # Using actual column name
-                "timeline": [],  # This column doesn't exist in the actual DB
-                "created_at": proposal.created_at,
-                "updated_at": proposal.updated_at,
-                "brand_contact_email": None,  # Field doesn't exist in this model
-                "priority": proposal.priority_level or "medium"
-            })
-        
-        return {
-            "proposals": formatted_proposals,
-            "pagination": {
-                "total_count": total_count,
-                "limit": limit,
-                "offset": offset,
-                "has_next": offset + limit < total_count
-            },
-            "filters_applied": {
-                "status": status_filter,
-                "search": search
-            }
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to manage proposals: {str(e)}"
-        )
-
-@router.put("/proposals/{proposal_id}/status")
-async def update_proposal_status(
-    proposal_id: UUID,
-    new_status: str,
-    admin_notes: Optional[str] = None,
-    current_user: UserInDB = Depends(require_super_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Update proposal status with admin oversight
-    """
-    try:
-        # Validate status
-        valid_statuses = ["pending", "approved", "rejected", "active", "completed", "cancelled"]
-        if new_status not in valid_statuses:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
-            )
-        
-        # Get proposal - select specific columns to avoid non-existent columns
-        proposal_result = await db.execute(
-            select(
-                AdminBrandProposal.id,
-                AdminBrandProposal.status,
-                AdminBrandProposal.updated_at,
-                AdminBrandProposal.admin_metadata
-            ).where(AdminBrandProposal.id == proposal_id)
-        )
-        proposal_row = proposal_result.fetchone()
-        
-        if not proposal_row:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Proposal not found"
-            )
-        
-        # Now update the proposal using individual update statement
-        old_status = proposal_row.status
-        
-        # Create update values
-        update_values = {
-            "status": new_status,
-            "updated_at": datetime.now()
-        }
-        
-        # Add admin notes to metadata
-        if admin_notes:
-            admin_metadata = proposal_row.admin_metadata or {}
-            if not admin_metadata.get("status_changes"):
-                admin_metadata["status_changes"] = []
-            
-            admin_metadata["status_changes"].append({
-                "from_status": old_status,
-                "to_status": new_status,
-                "admin_notes": admin_notes,
-                "changed_by": current_user.email,
-                "changed_at": datetime.now().isoformat()
-            })
-            update_values["admin_metadata"] = admin_metadata
-        
-        # Execute update
-        await db.execute(
-            update(AdminBrandProposal)
-            .where(AdminBrandProposal.id == proposal_id)
-            .values(**update_values)
-        )
-        await db.commit()
-        
-        return {
-            "success": True,
-            "message": f"Proposal status updated from {old_status} to {new_status}",
-            "proposal": {
-                "id": str(proposal_id),
-                "old_status": old_status,
-                "new_status": new_status,
-                "updated_by": current_user.email,
-                "updated_at": datetime.now().isoformat(),
-                "admin_notes": admin_notes
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update proposal status: {str(e)}"
-        )
-
-# ==================== FEATURE ACCESS MANAGEMENT ====================
-
-@router.post("/users/{user_id}/features/proposals/grant")
-async def grant_proposal_access(
-    user_id: UUID,
-    access_level: str = "full",
-    expires_at: Optional[datetime] = None,
-    reason: str = "Administrative grant",
-    current_user: UserInDB = Depends(require_super_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Grant proposal access to a specific user
-    """
-    try:
-        # Validate access level
-        valid_levels = ["full", "read_only", "custom"]
-        if access_level not in valid_levels:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid access level. Must be one of: {', '.join(valid_levels)}"
-            )
-
-        # Check if user exists
-        user_query = select(User).where(User.id == user_id)
-        user_result = await db.execute(user_query)
-        user = user_result.scalar_one_or_none()
-
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-
-        # Get user's team if they have one
-        team_query = text("""
-            SELECT team_id FROM team_members
-            WHERE user_id = :user_id AND status = 'active'
-            LIMIT 1
-        """)
-        team_result = await db.execute(team_query, {"user_id": str(user_id)})
-        team_row = team_result.first()
-        team_id = team_row[0] if team_row else None
-
-        # Check if access grant already exists
-        existing_query = text("""
-            SELECT id FROM proposal_access_grants
-            WHERE team_id = :team_id
-            AND status = 'active'
-            AND (expires_at IS NULL OR expires_at > now())
-        """)
-        existing_result = await db.execute(existing_query, {"team_id": str(team_id) if team_id else None})
-        existing_grant = existing_result.first()
-
-        if existing_grant:
-            return {
-                "success": True,
-                "message": "User already has active proposal access",
-                "access_id": str(existing_grant[0]),
-                "access_level": access_level,
-                "user_id": str(user_id),
-                "team_id": str(team_id) if team_id else None,
-                "status": "already_granted"
-            }
-
-        # Create new access grant
-        if team_id:
-            grant_query = text("""
-                INSERT INTO proposal_access_grants
-                (team_id, granted_by, granted_at, access_level, expires_at, reason, status)
-                VALUES (:team_id, :granted_by, now(), :access_level, :expires_at, :reason, 'active')
-                RETURNING id
-            """)
-            grant_result = await db.execute(grant_query, {
-                "team_id": str(team_id),
-                "granted_by": str(current_user.id),
-                "access_level": access_level,
-                "expires_at": expires_at,
-                "reason": reason
-            })
-            await db.commit()
-
-            grant_id = grant_result.scalar()
-
-            return {
-                "success": True,
-                "message": "Proposal access granted successfully",
-                "access_id": str(grant_id),
-                "access_level": access_level,
-                "user_id": str(user_id),
-                "team_id": str(team_id),
-                "expires_at": expires_at.isoformat() if expires_at else None,
-                "reason": reason,
-                "granted_by": current_user.email,
-                "granted_at": datetime.utcnow().isoformat(),
-                "status": "granted"
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User must be part of a team to grant proposal access"
-            )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error granting proposal access: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to grant proposal access: {str(e)}"
-        )
-
-@router.post("/users/{user_id}/features/proposals/revoke")
-async def revoke_proposal_access(
-    user_id: UUID,
-    reason: str = "Administrative revocation",
-    immediate: bool = True,
-    current_user: UserInDB = Depends(require_super_admin),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Revoke proposal access from a specific user
-    """
-    try:
-        # Check if user exists
-        user_query = select(User).where(User.id == user_id)
-        user_result = await db.execute(user_query)
-        user = user_result.scalar_one_or_none()
-
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
-            )
-
-        # Get user's team
-        team_query = text("""
-            SELECT team_id FROM team_members
-            WHERE user_id = :user_id AND status = 'active'
-            LIMIT 1
-        """)
-        team_result = await db.execute(team_query, {"user_id": str(user_id)})
-        team_row = team_result.first()
-        team_id = team_row[0] if team_row else None
-
-        if not team_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User is not part of any team"
-            )
-
-        # Revoke access
-        revoke_query = text("""
-            UPDATE proposal_access_grants
-            SET status = 'revoked',
-                revoked_at = now(),
-                revoked_by = :revoked_by,
-                revoked_reason = :reason
-            WHERE team_id = :team_id
-            AND status = 'active'
-            RETURNING id, access_level
-        """)
-        revoke_result = await db.execute(revoke_query, {
-            "team_id": str(team_id),
-            "revoked_by": str(current_user.id),
-            "reason": reason
-        })
-        revoked_grant = revoke_result.first()
-
-        if not revoked_grant:
-            return {
-                "success": True,
-                "message": "No active proposal access found to revoke",
-                "user_id": str(user_id),
-                "team_id": str(team_id),
-                "status": "no_access_found"
-            }
-
-        await db.commit()
-
-        return {
-            "success": True,
-            "message": "Proposal access revoked successfully",
-            "access_id": str(revoked_grant[0]),
-            "previous_access_level": revoked_grant[1],
-            "user_id": str(user_id),
-            "team_id": str(team_id),
-            "reason": reason,
-            "revoked_by": current_user.email,
-            "revoked_at": datetime.utcnow().isoformat(),
-            "status": "revoked"
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error revoking proposal access: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to revoke proposal access: {str(e)}"
-        )
 
 @router.get("/features/access-grants")
 async def get_feature_access_grants(
-    feature_type: Optional[str] = Query("proposals", description="Feature type to check"),
+    feature_type: Optional[str] = Query("system", description="Feature type to check"),
     user_id: Optional[UUID] = Query(None, description="Filter by specific user"),
     team_id: Optional[UUID] = Query(None, description="Filter by specific team"),
     status: Optional[str] = Query("active", description="Filter by status"),
@@ -1771,10 +1310,7 @@ async def get_feature_access_grants(
                 t.name as team_name,
                 u.email as granted_by_email,
                 COUNT(tm.user_id) as team_member_count
-            FROM proposal_access_grants pag
-            LEFT JOIN teams t ON pag.team_id = t.id
-            LEFT JOIN users u ON pag.granted_by = u.id
-            LEFT JOIN team_members tm ON pag.team_id = tm.team_id AND tm.status = 'active'
+            -- PROPOSAL SYSTEM REMOVED - NO DATA
             WHERE 1=1
         """
 
@@ -1877,7 +1413,7 @@ async def get_roles(
                     "users": ["create", "read", "update", "delete", "impersonate"],
                     "teams": ["create", "read", "update", "delete", "manage_members"],
                     "credits": ["create", "read", "update", "delete", "adjust_balance"],
-                    "proposals": ["create", "read", "update", "delete", "grant_access"],
+                    "# proposals": ["REMOVED - SYSTEM DELETED"],
                     "analytics": ["read", "export", "real_time"],
                     "system": ["configuration", "maintenance", "health_monitoring"],
                     "profiles": ["unlimited_access", "export", "analytics"],
@@ -1891,7 +1427,7 @@ async def get_roles(
                     "users": ["create", "read", "update"],
                     "teams": ["read", "update", "manage_members"],
                     "credits": ["read", "adjust_balance"],
-                    "proposals": ["read", "update"],
+                    "# proposals": ["REMOVED - SYSTEM DELETED"],
                     "analytics": ["read", "export"],
                     "system": ["health_monitoring"],
                     "profiles": ["unlimited_access", "analytics"],
@@ -1905,7 +1441,7 @@ async def get_roles(
                     "users": ["read_own"],
                     "teams": ["read", "manage_own"],
                     "credits": ["read_own"],
-                    "proposals": ["read_own", "create", "update_own"],
+                    "# proposals": ["REMOVED - SYSTEM DELETED"],
                     "analytics": ["read_own"],
                     "profiles": ["limited_access", "export_own"],
                     "billing": ["view_own"]
@@ -2053,18 +1589,7 @@ async def get_permissions_matrix(
                         "superadmin": {"profiles_per_month": "unlimited"}
                     }
                 },
-                "proposals_system": {
-                    "description": "Brand proposal management system",
-                    "actions": ["view_proposals", "create_proposals", "manage_proposals", "grant_access"],
-                    "role_permissions": {
-                        "superadmin": ["view_proposals", "create_proposals", "manage_proposals", "grant_access"],
-                        "admin": ["view_proposals", "manage_proposals"],
-                        "premium": [],  # Access granted via superadmin
-                        "standard": [],  # Access granted via superadmin
-                        "free": []
-                    },
-                    "access_control": "Locked by default - requires superadmin grant"
-                },
+                "# proposals_system": "REMOVED - SYSTEM DELETED",
                 "analytics_dashboard": {
                     "description": "Business intelligence and analytics",
                     "actions": ["view_dashboard", "export_reports", "real_time_metrics", "advanced_analytics"],
@@ -2101,11 +1626,7 @@ async def get_permissions_matrix(
                     "POST /api/superadmin/credits/users/{id}/adjust": ["superadmin", "admin"],
                     "GET /api/superadmin/billing/transactions": ["superadmin", "admin"]
                 },
-                "proposal_endpoints": {
-                    "POST /api/superadmin/users/{id}/features/proposals/grant": ["superadmin"],
-                    "POST /api/superadmin/users/{id}/features/proposals/revoke": ["superadmin"],
-                    "GET /api/superadmin/features/access-grants": ["superadmin", "admin"]
-                },
+                "# proposal_endpoints": "REMOVED - SYSTEM DELETED",
                 "system_endpoints": {
                     "GET /api/superadmin/system/health": ["superadmin", "admin"],
                     "GET /api/superadmin/system/stats": ["superadmin"],
@@ -2133,11 +1654,7 @@ async def get_permissions_matrix(
                 }
             },
             "feature_gates": {
-                "proposals_access": {
-                    "default_access": [],
-                    "grant_mechanism": "superadmin_controlled",
-                    "description": "Locked feature requiring superadmin approval"
-                },
+                "# proposals_access": "REMOVED - SYSTEM DELETED",
                 "advanced_analytics": {
                     "default_access": ["premium", "admin", "superadmin"],
                     "grant_mechanism": "subscription_based",
@@ -2174,25 +1691,15 @@ async def get_permissions_matrix(
                 "active_users": stat.active_users
             }
 
-        # Check proposal access grants
-        grants_query = text("""
-            SELECT COUNT(*) as total_grants,
-                   COUNT(CASE WHEN status = 'active' THEN 1 END) as active_grants
-            FROM proposal_access_grants
-        """)
-
-        grants_result = await db.execute(grants_query)
-        grants_stats = grants_result.first()
+        # Proposal access grants - SYSTEM REMOVED
+        grants_stats = None
 
         return {
             "success": True,
             "permission_matrix": permission_matrix,
             "role_statistics": role_stats,
             "feature_access_stats": {
-                "proposal_grants": {
-                    "total_grants": grants_stats.total_grants if grants_stats else 0,
-                    "active_grants": grants_stats.active_grants if grants_stats else 0
-                }
+                "# proposal_grants": "REMOVED - SYSTEM DELETED"
             },
             "matrix_metadata": {
                 "total_features": len(permission_matrix["features"]),

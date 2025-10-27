@@ -23,7 +23,7 @@ from app.middleware.role_based_auth import (
 from app.database.connection import get_db, async_engine
 from app.database.unified_models import (
     Users, UserActivityLogs, AdminActionsLog, SystemHealthMetrics,
-    PlatformMetrics, CreditTransactions, AdminBrandProposals
+    PlatformMetrics, CreditTransactions
 )
 
 router = APIRouter(prefix="/admin/system", tags=["Admin - System Monitoring"])

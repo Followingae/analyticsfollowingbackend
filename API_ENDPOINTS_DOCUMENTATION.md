@@ -247,17 +247,9 @@ const response = await fetch(`/api/v1/search/creator/${username}`, {
 
 ---
 
-## 📄 BRAND PROPOSALS (Limited Access)
-
-### **GET /api/proposals**
-**PURPOSE**: Get brand proposals
-**AUTHENTICATION**: Required (Brand users)
-**RESPONSE**: Available proposals
-
-### **GET /api/proposals/{proposal_id}**
-**PURPOSE**: Get specific proposal
-**AUTHENTICATION**: Required
-**RESPONSE**: Proposal details
+## 📄 PROPOSALS SYSTEM - REMOVED
+**STATUS**: Completely removed from the system
+**NOTE**: All proposal-related endpoints, database tables, and functionality have been deleted
 
 ---
 

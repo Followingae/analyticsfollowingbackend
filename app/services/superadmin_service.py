@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.database.unified_models import (
     User, Team, TeamMember, CreditWallet, CreditTransaction,
     UserProfileAccess, Profile, Post, MonthlyUsageTracking,
-    AdminBrandProposal, CreditPricingRule
+    CreditPricingRule
 )
 from app.services.redis_cache_service import RedisCacheService
 from app.services.credit_wallet_service import CreditWalletService

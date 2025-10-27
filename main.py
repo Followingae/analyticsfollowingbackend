@@ -336,13 +336,10 @@ app.include_router(fast_handoff_router)
 from app.monitoring.system_monitor import router as monitoring_router
 app.include_router(monitoring_router)
 
-# Include Brand Proposals routes
-from app.api.brand_proposals_routes import router as brand_proposals_router
 # NOTE: Removed team_instagram_routes - replaced by simple API endpoints
 from app.api.team_management_routes import router as team_management_router
 from app.api.stripe_subscription_routes import router as stripe_router
 from app.api.stripe_webhook_routes import router as stripe_webhook_router
-app.include_router(brand_proposals_router, prefix="/api")
 
 # NOTE: Removed team_router (team_instagram_routes.py) - replaced by simple API endpoints
 
@@ -1757,16 +1754,7 @@ app.include_router(system_status_router, prefix="/api/v1")
 from app.api.system_health_routes import router as system_health_router
 app.include_router(system_health_router)
 
-# Include Admin Proposals Routes - SECURITY ENABLED
-from app.api.admin_secure.proposals_routes import router as admin_proposals_router
-app.include_router(admin_proposals_router, prefix="/api")
-
-# Include Refined B2B Proposals Routes - NEW SYSTEM
-from app.api.superadmin_proposals_routes import router as superadmin_proposals_router
-from app.api.brand_proposals_routes_v2 import router as brand_proposals_v2_router
-
-app.include_router(superadmin_proposals_router, prefix="/api")
-app.include_router(brand_proposals_v2_router, prefix="/api")
+# Removed all proposal-related routes
 
 # Include Super Admin Dashboard Routes - COMPREHENSIVE ADMIN ACCESS
 from app.api.admin.superadmin_dashboard_routes import router as superadmin_dashboard_router

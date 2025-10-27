@@ -16,7 +16,7 @@ from decimal import Decimal
 from ..database.unified_models import (
     AdminUser, SystemAnalytics, SystemConfiguration, AdminNotification,
     SystemAuditLog, SystemMaintenanceJob, FeatureFlag, AdminUserAction,
-    User, AuthUser, Profile, Campaign, AdminBrandProposal, CreditTransaction,
+    User, AuthUser, Profile, Campaign, CreditTransaction,
     UserProfile, AiAnalysisJob, UserProfileAccess
 )
 

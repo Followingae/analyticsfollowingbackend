@@ -36,7 +36,10 @@
       "Bash(wrangler:*)",
       "Bash(findstr:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(set SUPABASE_URL=https://vkbuxemkprorqxmzzkuu.supabase.co)",
+      "Bash(set:*)",
+      "Bash(del:*)"
     ],
     "deny": [],
     "ask": [],

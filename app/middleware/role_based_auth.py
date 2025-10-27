@@ -41,7 +41,7 @@ class PermissionCategories:
     USER_MANAGEMENT = "user_management"
     FINANCIAL = "financial"
     CONTENT = "content"
-    PROPOSALS = "proposals"
+    # PROPOSALS = "proposals"  # REMOVED - SYSTEM DELETED
     SYSTEM = "system"
 
 class AuthenticationError(HTTPException):
@@ -125,7 +125,7 @@ class RoleBasedAuthService:
                 "can_delete_users",
                 "can_view_system_logs",
                 "can_adjust_credits",
-                "can_view_proposal_analytics"
+                # "can_view_proposal_analytics"  # REMOVED - SYSTEM DELETED
             ]
         elif role_level >= 2:  # Premium and above
             permissions = [

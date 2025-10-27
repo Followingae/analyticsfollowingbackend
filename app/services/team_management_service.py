@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.database.connection import get_session
 from app.database.unified_models import (
     Team, TeamMember, TeamInvitation, EmailUnlock, 
-    MonthlyUsageTracking, TopupOrder, ProposalAccessGrant
+    MonthlyUsageTracking, TopupOrder
 )
 from app.models.teams import (
     TeamCreate, TeamUpdate, TeamResponse,

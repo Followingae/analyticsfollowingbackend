@@ -117,7 +117,7 @@ auth.schema_migrations - Schema version tracking
 - **Credits & Monetization** (3 active): credit_packages, credit_wallets, credit_pricing_rules
 - **Team Management** (4 active): teams, team_members, monthly_usage_tracking, team_profile_access
 - **User Lists & Organization** (1 active): list_templates
-- **Proposal System** (4 active with RLS): brand_proposals, proposal_invitations, proposal_applications, proposal_collaborations
+- **Removed**: Proposal system has been completely removed
 - **CDN & Media Processing** (3 active): cdn_image_assets, cdn_image_jobs, cdn_processing_stats  
 - **System Configuration** (1 active): system_configurations
 
@@ -247,11 +247,7 @@ ai_analysis_jobs.id → ai_analysis_job_logs.job_id
 profiles.id → ai_analysis_jobs.profile_id
 auth.users.id → ai_analysis_jobs.user_id
 
-Proposal System Relationships:
-auth.users.id → brand_proposals.user_id
-auth.users.id → admin_brand_proposals.brand_user_id
-brand_proposals.id → proposal_applications.proposal_id
-brand_proposals.id → proposal_communications.proposal_id
+-- Removed: Proposal system relationships
 ```
 
 ### Schema Status
@@ -412,9 +408,9 @@ ai_profile_analyzed_at TIMESTAMP       -- When profile analysis completed
 ```sql
 -- Core Security Policies Implemented:
 -- ✅ Team-based access control for all team operations
--- ✅ User isolation for personal data and proposals  
+-- ✅ User isolation for personal data and profile access
 -- ✅ Profile access control through user_profile_access table
--- ✅ Proposal system with proper owner/collaborator permissions
+-- ✅ Complete system security with proper permissions
 -- ✅ Credit system with user-specific wallet isolation
 ```
 
@@ -425,7 +421,7 @@ ai_profile_analyzed_at TIMESTAMP       -- When profile analysis completed
 -- Security measures applied:
 -- ✅ SECURITY DEFINER: Functions run with defined privileges
 -- ✅ SET search_path = public, auth: Prevents search path attacks
--- ✅ Covers: CDN, Credit, Team, Proposal, Campaign, List, Discovery functions
+-- ✅ Covers: CDN, Credit, Team, Campaign, List, Discovery functions
 ```
 
 ### Security Advisory Status
@@ -905,7 +901,7 @@ Users can buy **additional credits** at any time - before or after reaching thei
 - Shared access to unlocked profiles and campaigns
 - Email unlock tracking separate from profile analysis
 - Smart topup system with Premium tier discount
-- Proposals locked by default (superadmin unlock for agency clients)
+- Enterprise features for B2B SaaS operations
 - Universal export for all paid tiers
 
 ---
