@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 import uvicorn
 import asyncio
 import os
+import json
 
 # Suppress TensorFlow verbose startup messages
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
@@ -212,6 +213,148 @@ app = FastAPI(
 # CORS middleware - Configured for production and development
 import os
 from typing import List
+
+# Helper functions for API response formatting
+def _normalize_demographics(demo_data):
+    """Normalize demographics data to proper percentages"""
+    if not demo_data or not isinstance(demo_data, dict):
+        return {}
+
+    # Calculate total to check if data needs normalization
+    total = sum(demo_data.values())
+
+    if total <= 0:
+        return {}
+
+    # If total is around 1.0, treat as already normalized percentages
+    if 0.8 <= total <= 1.2:
+        return {k: round(v * 100, 1) for k, v in demo_data.items()}
+
+    # If total is much larger, normalize then convert to percentages
+    return {k: round((v / total) * 100, 1) for k, v in demo_data.items()}
+
+def _format_ai_insights(profile):
+    """Format AI insights from JSONB fields into structured data"""
+    def safe_get_jsonb(field_value):
+        if field_value is None:
+            return {}
+        if isinstance(field_value, dict):
+            return field_value
+        if isinstance(field_value, str):
+            try:
+                return json.loads(field_value)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return {}
+
+    # Extract AI insights from JSONB fields
+    audience_insights = safe_get_jsonb(profile.ai_audience_insights)
+    visual_content = safe_get_jsonb(profile.ai_visual_content)
+    behavioral_patterns = safe_get_jsonb(profile.ai_behavioral_patterns)
+    fraud_detection = safe_get_jsonb(profile.ai_fraud_detection)
+    audience_quality = safe_get_jsonb(profile.ai_audience_quality)
+    trend_detection = safe_get_jsonb(profile.ai_trend_detection)
+    advanced_nlp = safe_get_jsonb(profile.ai_advanced_nlp)
+
+    return {
+        "audience": {
+            "demographics": {
+                "countries": _normalize_demographics(
+                    audience_insights.get('geographic_analysis', {}).get('country_distribution', {})
+                ),
+                "age_groups": _normalize_demographics(
+                    audience_insights.get('demographic_insights', {}).get('estimated_age_groups', {})
+                ),
+                "gender_split": _normalize_demographics(
+                    audience_insights.get('demographic_insights', {}).get('estimated_gender_split', {})
+                )
+            },
+            "quality": {
+                "authenticity_score": audience_quality.get('authenticity_score'),
+                "bot_detection_score": audience_quality.get('bot_detection_score'),
+                "fake_follower_percentage": audience_quality.get('fake_follower_percentage'),
+                "engagement_authenticity": audience_quality.get('engagement_authenticity'),
+                "quality_indicators": audience_quality.get('quality_indicators', {})
+            },
+            "geographic_insights": {
+                "primary_regions": audience_insights.get('geographic_analysis', {}).get('primary_regions', []),
+                "international_reach": audience_insights.get('geographic_analysis', {}).get('international_reach'),
+                "geographic_diversity_score": audience_insights.get('geographic_analysis', {}).get('geographic_diversity_score')
+            },
+            "cultural_analysis": {
+                "social_context": audience_insights.get('cultural_analysis', {}).get('social_context'),
+                "language_indicators": audience_insights.get('cultural_analysis', {}).get('language_indicators', {})
+            }
+        },
+        "content": {
+            "visual_analysis": {
+                "aesthetic_score": visual_content.get('aesthetic_score'),
+                "professional_quality_score": visual_content.get('professional_quality_score'),
+                "image_quality_metrics": {
+                    "average_quality": visual_content.get('image_quality_metrics', {}).get('average_quality'),
+                    "quality_consistency": visual_content.get('image_quality_metrics', {}).get('quality_consistency')
+                },
+                "face_analysis": {
+                    "faces_detected": visual_content.get('face_analysis', {}).get('faces_detected'),
+                    "unique_faces": visual_content.get('face_analysis', {}).get('unique_faces')
+                }
+            },
+            "nlp_insights": {
+                "vocabulary_richness": advanced_nlp.get('text_analysis', {}).get('vocabulary_richness'),
+                "text_complexity_score": advanced_nlp.get('text_analysis', {}).get('text_complexity_score'),
+                "readability_scores": advanced_nlp.get('text_analysis', {}).get('readability_scores', {}),
+                "main_themes": advanced_nlp.get('topic_modeling', {}).get('main_themes', []),
+                "top_keywords": [kw.get('keyword') for kw in advanced_nlp.get('topic_modeling', {}).get('top_keywords', [])[:10] if isinstance(kw, dict) and kw.get('keyword')]
+            }
+        },
+        "engagement": {
+            "behavioral_patterns": {
+                "posting_consistency": behavioral_patterns.get('posting_consistency'),
+                "engagement_optimization": behavioral_patterns.get('engagement_optimization'),
+                "content_strategy_maturity": behavioral_patterns.get('content_strategy_maturity'),
+                "current_stage": behavioral_patterns.get('lifecycle_analysis', {}).get('current_stage')
+            },
+            "trend_analysis": {
+                "viral_potential": trend_detection.get('viral_potential', {}).get('overall_viral_score'),
+                "optimization_recommendations": trend_detection.get('optimization_recommendations', {}).get('recommendations', [])
+            }
+        },
+        "security": {
+            "fraud_detection": {
+                "overall_fraud_score": fraud_detection.get('fraud_assessment', {}).get('overall_fraud_score'),
+                "risk_level": fraud_detection.get('fraud_assessment', {}).get('risk_level'),
+                "authenticity_score": fraud_detection.get('fraud_assessment', {}).get('authenticity_score'),
+                "bot_likelihood_percentage": fraud_detection.get('fraud_assessment', {}).get('bot_likelihood_percentage'),
+                "trust_score": fraud_detection.get('recommendations', {}).get('trust_score')
+            }
+        }
+    }
+
+def _format_content_distribution(content_dist):
+    """Format content distribution from JSONB to proper percentages"""
+    if not content_dist:
+        return {}
+    if isinstance(content_dist, str):
+        try:
+            content_dist = json.loads(content_dist)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(content_dist, dict):
+        return _normalize_demographics(content_dist)
+    return {}
+
+def _format_language_distribution(lang_dist):
+    """Format language distribution from JSONB to proper percentages"""
+    if not lang_dist:
+        return {}
+    if isinstance(lang_dist, str):
+        try:
+            lang_dist = json.loads(lang_dist)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(lang_dist, dict):
+        return _normalize_demographics(lang_dist)
+    return {}
 
 def get_allowed_origins() -> List[str]:
     """Get allowed origins based on environment"""
@@ -644,7 +787,7 @@ async def bulletproof_creator_search(
     try:
         from sqlalchemy import select, text
         from app.database.unified_models import Profile, Post
-        
+
         print(f"\n[SEARCH] ==================== CREATOR SEARCH START ====================")
         logger.info(f"[SEARCH] SEARCH REQUEST: Username='{username}', User='{current_user.email}'")
         bulletproof_logger.info(f"BULLETPROOF: Creator search for {username}")
@@ -664,14 +807,23 @@ async def bulletproof_creator_search(
             posts_result = await db.execute(posts_query)
             stored_posts = posts_result.scalars().all()
 
-            # Check completeness criteria
+            # Check completeness criteria (updated to include country detection)
             has_basic_data = (existing_profile.followers_count and existing_profile.followers_count > 0)
             has_sufficient_posts = len(stored_posts) >= 12
             posts_with_ai = sum(1 for p in stored_posts if p.ai_content_category and p.ai_sentiment and p.ai_language_code)
             has_ai_analysis = posts_with_ai >= 12
             has_profile_ai = existing_profile.ai_profile_analyzed_at is not None
 
-            is_complete = has_basic_data and has_sufficient_posts and has_ai_analysis and has_profile_ai
+            # NEW: Check country detection completeness
+            has_country_detection = existing_profile.detected_country is not None
+
+            # NEW: Check CDN processing (profile + posts)
+            has_profile_cdn = existing_profile.cdn_avatar_url is not None
+            posts_with_cdn = sum(1 for p in stored_posts if p.cdn_thumbnail_url)
+            has_posts_cdn = posts_with_cdn >= 12
+
+            is_complete = (has_basic_data and has_sufficient_posts and has_ai_analysis and
+                         has_profile_ai and has_country_detection and has_profile_cdn and has_posts_cdn)
 
             if not is_complete:
                 logger.info(f"[COMPLETENESS] ❌ Profile '{username}' is INCOMPLETE:")
@@ -679,6 +831,9 @@ async def bulletproof_creator_search(
                 logger.info(f"  - Posts stored: {'✅' if has_sufficient_posts else '❌'} ({len(stored_posts)}/12 required)")
                 logger.info(f"  - AI analysis: {'✅' if has_ai_analysis else '❌'} ({posts_with_ai}/12 posts analyzed)")
                 logger.info(f"  - Profile AI: {'✅' if has_profile_ai else '❌'}")
+                logger.info(f"  - Country detection: {'✅' if has_country_detection else '❌'} ({existing_profile.detected_country})")
+                logger.info(f"  - Profile CDN: {'✅' if has_profile_cdn else '❌'}")
+                logger.info(f"  - Posts CDN: {'✅' if has_posts_cdn else '❌'} ({posts_with_cdn}/12 posts with CDN)")
                 logger.info(f"[TRIGGER] 🔄 Triggering FULL APIFY + CDN + AI pipeline for complete analytics")
 
                 # Skip to new profile processing to trigger full pipeline
@@ -805,16 +960,20 @@ async def bulletproof_creator_search(
                         "influence_score": getattr(existing_profile, 'influence_score', None),
                         "content_quality_score": getattr(existing_profile, 'content_quality_score', None),
                         "follower_growth_rate": getattr(existing_profile, 'follower_growth_rate', None),
+                        # Complete AI analysis (ALL 10 MODELS) - same as complete path
                         "ai_analysis": {
                             "primary_content_type": existing_profile.ai_primary_content_type,
-                            "content_distribution": existing_profile.ai_content_distribution,
+                            "content_distribution": _format_content_distribution(getattr(existing_profile, 'ai_content_distribution', {})),
                             "avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
-                            "language_distribution": existing_profile.ai_language_distribution,
+                            "language_distribution": _format_language_distribution(getattr(existing_profile, 'ai_language_distribution', {})),
                             "content_quality_score": existing_profile.ai_content_quality_score,
-                            "top_3_categories": existing_profile.ai_top_3_categories,
-                            "top_10_categories": existing_profile.ai_top_10_categories,
                             "profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None,
+                            "comprehensive_analyzed_at": getattr(existing_profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(existing_profile, 'ai_comprehensive_analyzed_at', None) else None,
+                            "models_success_rate": getattr(existing_profile, 'ai_models_success_rate', 0.0)
                         },
+
+                        # Structured AI insights (parsed from JSONB)
+                        **_format_ai_insights(existing_profile),
                         "posts": posts_data,
                         "last_refreshed": existing_profile.last_refreshed.isoformat() if existing_profile.last_refreshed else None,
                         "data_quality_score": existing_profile.data_quality_score,
@@ -974,55 +1133,20 @@ async def bulletproof_creator_search(
                     "content_quality_score": getattr(existing_profile, 'content_quality_score', None),
                     "follower_growth_rate": getattr(existing_profile, 'follower_growth_rate', None),
                     
-                    # Complete AI analysis (ALL 10 MODELS)
+                    # Complete AI analysis (structured format)
                     "ai_analysis": {
-                        # Core AI Analysis (existing 3 models)
                         "primary_content_type": existing_profile.ai_primary_content_type,
-                        "content_distribution": existing_profile.ai_content_distribution,
+                        "content_distribution": _format_content_distribution(getattr(existing_profile, 'ai_content_distribution', {})),
                         "avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
-                        "language_distribution": existing_profile.ai_language_distribution,
+                        "language_distribution": _format_language_distribution(getattr(existing_profile, 'ai_language_distribution', {})),
                         "content_quality_score": existing_profile.ai_content_quality_score,
-                        "top_3_categories": existing_profile.ai_top_3_categories,
-                        "top_10_categories": existing_profile.ai_top_10_categories,
                         "profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None,
-                        
-                        # Advanced AI Analysis (NEW 7 MODELS)
-                        "audience_quality_assessment": getattr(existing_profile, 'ai_audience_quality', None),
-                        "visual_content_analysis": getattr(existing_profile, 'ai_visual_content', None),
-                        "audience_insights": getattr(existing_profile, 'ai_audience_insights', None),
-                        "trend_detection": getattr(existing_profile, 'ai_trend_detection', None),
-                        "advanced_nlp_analysis": getattr(existing_profile, 'ai_advanced_nlp', None),
-                        "fraud_detection_analysis": getattr(existing_profile, 'ai_fraud_detection', None),
-                        "behavioral_patterns_analysis": getattr(existing_profile, 'ai_behavioral_patterns', None),
-                        
-                        # Comprehensive Analysis Metadata
-                        "comprehensive_analysis_version": getattr(existing_profile, 'ai_comprehensive_analysis_version', None),
                         "comprehensive_analyzed_at": getattr(existing_profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(existing_profile, 'ai_comprehensive_analyzed_at', None) else None,
-                        "models_success_rate": getattr(existing_profile, 'ai_models_success_rate', 0.0),
-                        "models_status": getattr(existing_profile, 'ai_models_status', {}),
-                        
-                        # Audience Demographics (extracted from ai_audience_insights JSONB)
-                        "audience_demographics": {
-                            "gender_distribution": {
-                                k: round(v * 100, 1) for k, v in
-                                (getattr(existing_profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_gender_split', {})).items()
-                            } if getattr(existing_profile, 'ai_audience_insights', None) else {},
-                            "age_distribution": {
-                                k: round(v * 100, 1) for k, v in
-                                (getattr(existing_profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_age_groups', {})).items()
-                            } if getattr(existing_profile, 'ai_audience_insights', None) else {},
-                            "location_distribution": getattr(existing_profile, 'ai_audience_insights', {}).get('geographic_analysis', {}).get('country_distribution', {}) if getattr(existing_profile, 'ai_audience_insights', None) else {}
-                        },
-
-                        # Overall AI insights summary
-                        "comprehensive_insights": {
-                            "overall_authenticity_score": getattr(existing_profile, 'ai_audience_quality', {}).get('authenticity_score') if getattr(existing_profile, 'ai_audience_quality', None) else None,
-                            "content_quality_rating": getattr(existing_profile, 'ai_visual_content', {}).get('aesthetic_score') if getattr(existing_profile, 'ai_visual_content', None) else None,
-                            "fraud_risk_level": getattr(existing_profile, 'ai_fraud_detection', {}).get('fraud_assessment', {}).get('risk_level') if getattr(existing_profile, 'ai_fraud_detection', None) else None,
-                            "engagement_trend": getattr(existing_profile, 'ai_trend_detection', {}).get('trend_analysis', {}).get('engagement_trend_direction') if getattr(existing_profile, 'ai_trend_detection', None) else None,
-                            "lifecycle_stage": getattr(existing_profile, 'ai_behavioral_patterns', {}).get('lifecycle_analysis', {}).get('current_stage') if getattr(existing_profile, 'ai_behavioral_patterns', None) else None
-                        }
+                        "models_success_rate": getattr(existing_profile, 'ai_models_success_rate', 0.0)
                     },
+
+                    # Structured AI insights (parsed from JSONB)
+                    **_format_ai_insights(existing_profile),
                     
                     # Posts with complete AI analysis
                     "posts": posts_data,
@@ -1396,30 +1520,20 @@ async def bulletproof_creator_search(
                     "engagement_rate": profile.engagement_rate,
                     "detected_country": profile.detected_country,
 
-                    # Complete AI Analysis (after processing)
+                    # Complete AI Analysis (structured format)
                     "ai_analysis": {
                         "primary_content_type": profile.ai_primary_content_type,
-                        "content_distribution": profile.ai_content_distribution,
+                        "content_distribution": _format_content_distribution(getattr(profile, 'ai_content_distribution', {})),
                         "avg_sentiment_score": profile.ai_avg_sentiment_score,
-                        "language_distribution": profile.ai_language_distribution,
+                        "language_distribution": _format_language_distribution(getattr(profile, 'ai_language_distribution', {})),
                         "content_quality_score": profile.ai_content_quality_score,
-                        "top_3_categories": profile.ai_top_3_categories,
-                        "top_10_categories": profile.ai_top_10_categories,
                         "profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
+                        "comprehensive_analyzed_at": getattr(profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(profile, 'ai_comprehensive_analyzed_at', None) else None,
+                        "models_success_rate": getattr(profile, 'ai_models_success_rate', 0.0)
+                    },
 
-                        # Audience Demographics (extracted from ai_audience_insights JSONB)
-                        "audience_demographics": {
-                            "gender_distribution": {
-                                k: round(v * 100, 1) for k, v in
-                                (getattr(profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_gender_split', {})).items()
-                            } if getattr(profile, 'ai_audience_insights', None) else {},
-                            "age_distribution": {
-                                k: round(v * 100, 1) for k, v in
-                                (getattr(profile, 'ai_audience_insights', {}).get('demographic_insights', {}).get('estimated_age_groups', {})).items()
-                            } if getattr(profile, 'ai_audience_insights', None) else {},
-                            "location_distribution": getattr(profile, 'ai_audience_insights', {}).get('geographic_analysis', {}).get('country_distribution', {}) if getattr(profile, 'ai_audience_insights', None) else {}
-                        }
-                    }
+                    # Structured AI insights (parsed from JSONB)
+                    **_format_ai_insights(profile)
                 },
 
                 "posts": posts_data,

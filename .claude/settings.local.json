@@ -39,7 +39,9 @@
       "Bash(git push:*)",
       "Bash(set SUPABASE_URL=https://vkbuxemkprorqxmzzkuu.supabase.co)",
       "Bash(set:*)",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "Bash(powershell:*)",
+      "Bash(\"/c/Users/user/AppData/Local/Programs/Python/Python312/python.exe\" grant_fai_access.py)"
     ],
     "deny": [],
     "ask": [],
