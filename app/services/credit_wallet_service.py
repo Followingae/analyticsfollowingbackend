@@ -22,7 +22,7 @@ from app.models.credits import (
     CreditBalance, CanPerformActionResponse, TotalPlanCredits
 )
 from app.core.exceptions import ValidationError
-from app.cache.redis_cache_manager import cache_manager
+from app.services.redis_cache_service import redis_cache as cache_manager
 
 logger = logging.getLogger(__name__)
 

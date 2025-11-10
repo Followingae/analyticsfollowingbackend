@@ -6,7 +6,7 @@ import time
 from typing import Dict, Any
 
 from app.database.connection import get_db
-from app.cache.redis_cache_manager import redis_cache_manager as cache_manager
+from app.services.redis_cache_service import redis_cache as cache_manager
 from app.monitoring.network_health_monitor import network_health_monitor
 from app.resilience.database_resilience import database_resilience
 from app.services.resilient_auth_service import resilient_auth_service

@@ -17,7 +17,7 @@ from app.models.credits import (
     CreditPricingRule as CreditPricingRuleModel,
     CreditPricingRuleCreate, CreditPricingRuleUpdate
 )
-from app.cache.redis_cache_manager import cache_manager
+from app.services.redis_cache_service import redis_cache as cache_manager
 from app.core.exceptions import ValidationError
 from app.models.teams import ACTION_CREDIT_COSTS, CREDIT_TOPUP_PACKAGES
 

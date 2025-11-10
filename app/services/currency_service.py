@@ -17,7 +17,7 @@ from app.database.unified_models import (
     Team,
     TeamMember
 )
-from app.cache.redis_cache_manager import cache_manager
+from app.services.redis_cache_service import redis_cache as cache_manager
 
 logger = logging.getLogger(__name__)
 

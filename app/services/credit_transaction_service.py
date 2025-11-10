@@ -19,7 +19,7 @@ from app.models.credits import (
     CreditTransactionSummary, CreditTransaction as CreditTransactionModel,
     MonthlyUsageSummary
 )
-from app.cache.redis_cache_manager import cache_manager
+from app.services.redis_cache_service import redis_cache as cache_manager
 
 logger = logging.getLogger(__name__)
 

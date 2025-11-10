@@ -20,7 +20,7 @@ from app.database.unified_models import (
 )
 from app.services.credit_wallet_service import credit_wallet_service
 from app.services.credit_transaction_service import credit_transaction_service
-from app.cache.redis_cache_manager import cache_manager
+from app.services.redis_cache_service import redis_cache as cache_manager
 
 logger = logging.getLogger(__name__)
 

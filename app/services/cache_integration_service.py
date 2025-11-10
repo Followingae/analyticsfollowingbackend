@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 
-from app.cache.redis_cache_manager import redis_cache_manager
+from app.services.redis_cache_service import redis_cache
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +17,9 @@ class CacheIntegrationService:
     High-level caching service that provides smart caching strategies
     for different types of application data
     """
-    
+
     def __init__(self):
-        self.cache_manager = redis_cache_manager
+        self.cache_manager = redis_cache
         
     async def initialize(self) -> bool:
         """Initialize the cache integration service"""

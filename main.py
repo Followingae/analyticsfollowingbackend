@@ -70,19 +70,23 @@ async def lifespan(app: FastAPI):
     # Simple cache management
     print("Cache management integrated into Redis cache system")
     
-    # MANDATORY SYSTEM INITIALIZATION - SIMPLE API SYSTEM
+    # MANDATORY SYSTEM INITIALIZATION - BULLETPROOF CREATOR SEARCH SYSTEM
     try:
-        print("MANDATORY: Initializing Simple API System...")
+        print("=" * 80)
+        print("BULLETPROOF CREATOR SEARCH SYSTEM - INITIALIZING...")
+        print("=" * 80)
         from app.services.startup_initialization import startup_service
-        
+
         # Initialize all critical services (AI, Database, etc.)
         initialization_result = await startup_service.initialize_all_services()
-        
+
         if not initialization_result["success"]:
             raise SystemExit(f"System initialization failed: {initialization_result}")
-        
-        print(f"SUCCESS: System initialization completed in {initialization_result['initialization_time']:.2f}s")
-        print("READY: Simple API Creator Search System is READY")
+
+        print("=" * 80)
+        print(f"✅ SUCCESS: System initialization completed in {initialization_result['initialization_time']:.2f}s")
+        print(f"✅ BULLETPROOF CREATOR SEARCH SYSTEM IS READY")
+        print("=" * 80)
         
     except Exception as e:
         print(f"FATAL ERROR: System initialization failed: {e}")
@@ -1282,7 +1286,7 @@ async def bulletproof_creator_search(
 
             # CRITICAL SAFEGUARD: Check if profile is already being processed
             logger.info(f"[SEARCH] STEP 4: Checking for concurrent processing attempts...")
-            from app.cache.redis_cache_manager import cache_manager
+            from app.services.redis_cache_service import redis_cache as cache_manager
 
             processing_lock_key = f"processing_lock:profile:{username}"
             processing_status_key = f"processing_status:profile:{username}"
