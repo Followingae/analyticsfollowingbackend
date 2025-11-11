@@ -3,7 +3,7 @@ FINAL UNIFIED DATABASE MODELS - Complete Instagram Analytics Platform
 Contains ALL tables required for the platform with real Apify integration
 Includes campaigns, all Apify datapoints, and proper relationships
 """
-from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, Text, Float, ARRAY, ForeignKey, Date, Index, CheckConstraint, UniqueConstraint, text
+from sqlalchemy import Column, String, Integer, BigInteger, Boolean, DateTime, Text, Float, ARRAY, ForeignKey, Date, Index, CheckConstraint, UniqueConstraint, text, Numeric
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship, foreign
