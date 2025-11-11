@@ -728,6 +728,164 @@ class CampaignCreator(Base):
     )
 
 
+# =============================================================================
+# CAMPAIGN WORKFLOW TABLES (SUPERADMIN FLOW)
+# =============================================================================
+
+class CampaignInfluencerSelection(Base):
+    """Influencer selections for superadmin-managed campaigns"""
+    __tablename__ = "campaign_influencer_selections"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Selection details
+    selected_by = Column(UUID(as_uuid=True), nullable=False)
+    selection_status = Column(String(20), nullable=False, default='pending')
+
+    # Locking details
+    locked_at = Column(DateTime(timezone=True))
+    locked_by = Column(UUID(as_uuid=True))
+    lock_expires_at = Column(DateTime(timezone=True))
+
+    # Metadata
+    selection_notes = Column(Text)
+    estimated_cost = Column(Numeric(12, 2))
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    campaign = relationship("Campaign")
+    profile = relationship("Profile")
+
+    __table_args__ = (
+        CheckConstraint("selection_status IN ('pending', 'locked', 'rejected', 'removed')", name='campaign_influencer_selections_status_check'),
+        UniqueConstraint('campaign_id', 'profile_id', name='unique_campaign_profile'),
+        Index('idx_campaign_influencer_selections_campaign', 'campaign_id'),
+        Index('idx_campaign_influencer_selections_profile', 'profile_id'),
+        Index('idx_campaign_influencer_selections_status', 'selection_status'),
+    )
+
+
+class CampaignContentApproval(Base):
+    """Content approval workflow for superadmin-managed campaigns"""
+    __tablename__ = "campaign_content_approvals"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+    post_id = Column(UUID(as_uuid=True), ForeignKey('posts.id', ondelete='CASCADE'))
+
+    # Content details
+    content_type = Column(String(20), nullable=False)
+    content_url = Column(Text)
+    content_caption = Column(Text)
+    content_media_urls = Column(JSONB, default=list)
+
+    # Approval workflow
+    approval_status = Column(String(20), nullable=False, default='pending')
+    submitted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    reviewed_at = Column(DateTime(timezone=True))
+    reviewed_by = Column(UUID(as_uuid=True))
+
+    # Feedback
+    reviewer_notes = Column(Text)
+    revision_notes = Column(Text)
+    revision_count = Column(Integer, default=0)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    campaign = relationship("Campaign")
+    profile = relationship("Profile")
+    post = relationship("Post")
+
+    __table_args__ = (
+        CheckConstraint("content_type IN ('draft', 'final', 'published')", name='campaign_content_approvals_type_check'),
+        CheckConstraint("approval_status IN ('pending', 'approved', 'rejected', 'revision_requested')", name='campaign_content_approvals_status_check'),
+        Index('idx_campaign_content_approvals_campaign', 'campaign_id'),
+        Index('idx_campaign_content_approvals_profile', 'profile_id'),
+        Index('idx_campaign_content_approvals_status', 'approval_status'),
+    )
+
+
+class CampaignWorkflowNotification(Base):
+    """Notifications for campaign workflow events"""
+    __tablename__ = "campaign_workflow_notifications"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Notification details
+    notification_type = Column(String(50), nullable=False)
+    recipient_id = Column(UUID(as_uuid=True), nullable=False)
+
+    # Content
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=False)
+    action_url = Column(Text)
+    notification_metadata = Column('metadata', JSONB, default=dict)
+
+    # Status
+    is_read = Column(Boolean, default=False)
+    read_at = Column(DateTime(timezone=True))
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Relationships
+    campaign = relationship("Campaign")
+
+    __table_args__ = (
+        CheckConstraint("notification_type IN ('influencer_selected', 'influencer_locked', 'influencer_rejected', 'content_submitted', 'content_approved', 'content_rejected', 'revision_requested', 'campaign_completed')", name='campaign_workflow_notifications_type_check'),
+        Index('idx_campaign_workflow_notifications_recipient', 'recipient_id', 'is_read'),
+        Index('idx_campaign_workflow_notifications_campaign', 'campaign_id'),
+        Index('idx_campaign_workflow_notifications_type', 'notification_type'),
+    )
+
+
+class CampaignWorkflowState(Base):
+    """Track campaign workflow state for superadmin-managed campaigns"""
+    __tablename__ = "campaign_workflow_state"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+
+    # Workflow stages
+    current_stage = Column(String(50), nullable=False, default='draft')
+
+    # Stage timestamps
+    draft_started_at = Column(DateTime(timezone=True), server_default=func.now())
+    selection_started_at = Column(DateTime(timezone=True))
+    lock_confirmed_at = Column(DateTime(timezone=True))
+    content_submission_started_at = Column(DateTime(timezone=True))
+    active_started_at = Column(DateTime(timezone=True))
+    completed_at = Column(DateTime(timezone=True))
+
+    # Counters
+    influencers_selected = Column(Integer, default=0)
+    influencers_locked = Column(Integer, default=0)
+    content_pending = Column(Integer, default=0)
+    content_approved = Column(Integer, default=0)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    campaign = relationship("Campaign")
+
+    __table_args__ = (
+        CheckConstraint("current_stage IN ('draft', 'influencer_selection', 'awaiting_lock', 'locked', 'content_submission', 'content_review', 'active', 'completed', 'cancelled')", name='campaign_workflow_state_stage_check'),
+        Index('idx_campaign_workflow_state_stage', 'current_stage'),
+    )
+
+
 class CampaignProposal(Base):
     """Campaign proposals from superadmin to users"""
     __tablename__ = "campaign_proposals"

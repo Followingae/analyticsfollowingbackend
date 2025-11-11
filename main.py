@@ -466,6 +466,10 @@ app.include_router(post_analytics_router, prefix="/api/v1")
 from app.api.campaign_routes import router as campaign_router
 app.include_router(campaign_router, prefix="/api/v1")
 
+# Include Campaign Workflow routes (USER & SUPERADMIN flows)
+from app.api.campaign_workflow_routes import router as campaign_workflow_router
+app.include_router(campaign_workflow_router, prefix="/api/v1")
+
 # Include Campaign Proposal routes
 from app.api.campaign_proposal_routes import router as campaign_proposal_router
 app.include_router(campaign_proposal_router, prefix="/api/v1")
