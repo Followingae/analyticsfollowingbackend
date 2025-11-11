@@ -451,6 +451,10 @@ app.include_router(post_analytics_router, prefix="/api/v1")
 from app.api.campaign_routes import router as campaign_router
 app.include_router(campaign_router, prefix="/api/v1")
 
+# Include Campaign Proposal routes
+from app.api.campaign_proposal_routes import router as campaign_proposal_router
+app.include_router(campaign_proposal_router, prefix="/api/v1")
+
 # Include Transaction Monitoring routes
 from app.api.transaction_monitoring_routes import router as transaction_monitoring_router
 app.include_router(transaction_monitoring_router)

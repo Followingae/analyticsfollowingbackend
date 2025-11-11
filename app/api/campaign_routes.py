@@ -570,6 +570,188 @@ async def get_campaign_audience(
         )
 
 # =============================================================================
+# CAMPAIGN OVERVIEW & ANALYTICS
+# =============================================================================
+
+@router.get("/overview")
+async def get_campaigns_overview(
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get campaigns dashboard overview
+
+    Returns comprehensive dashboard with:
+    - Total campaigns, active campaigns counts
+    - 30-day trend analysis vs previous period
+    - Engagement rate trends
+    - Spend tracking with trends
+    - Recent campaigns (last 5)
+    - Top creators leaderboard
+    """
+    try:
+        overview = await campaign_service.get_campaigns_overview(db, current_user.id)
+
+        return {
+            "success": True,
+            "data": overview,
+            "message": "Campaigns overview retrieved successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error retrieving campaigns overview: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve campaigns overview"
+        )
+
+@router.get("/{campaign_id}/analytics")
+async def get_campaign_analytics(
+    campaign_id: UUID,
+    period: str = Query('all', regex='^(7d|30d|90d|all)$'),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get detailed campaign analytics
+
+    Query Parameters:
+    - period: Time period ('7d', '30d', '90d', 'all', default: 'all')
+
+    Returns:
+    - daily_stats: Array of daily metrics for charting
+    - totals: Total reach, views, impressions, engagement
+    - performance_insights: Best day, peak day, trend, growth_rate
+    """
+    try:
+        analytics = await campaign_service.get_campaign_analytics(
+            db, campaign_id, current_user.id, period
+        )
+
+        if not analytics:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found"
+            )
+
+        return {
+            "success": True,
+            "data": analytics,
+            "message": "Campaign analytics retrieved successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error retrieving campaign analytics: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve campaign analytics"
+        )
+
+# =============================================================================
+# CAMPAIGN STATUS MANAGEMENT
+# =============================================================================
+
+@router.patch("/{campaign_id}/status")
+async def update_campaign_status(
+    campaign_id: UUID,
+    status: str = Query(..., regex='^(draft|active|paused|completed|in_review|archived)$'),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update campaign status
+
+    Query Parameters:
+    - status: New status (draft, active, paused, completed, in_review, archived)
+
+    Valid status transitions:
+    - draft → active, in_review
+    - active → paused, completed, archived
+    - paused → active, archived
+    - in_review → active, draft
+    """
+    try:
+        campaign = await campaign_service.update_campaign_status(
+            db, campaign_id, current_user.id, status
+        )
+
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found"
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "id": str(campaign.id),
+                "status": campaign.status,
+                "updated_at": campaign.updated_at.isoformat()
+            },
+            "message": f"Campaign status updated to {status}"
+        }
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error updating campaign status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update campaign status"
+        )
+
+@router.post("/{campaign_id}/restore")
+async def restore_campaign(
+    campaign_id: UUID,
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Restore archived campaign
+
+    Changes status from 'archived' to 'active' and clears archived_at timestamp.
+    """
+    try:
+        campaign = await campaign_service.restore_campaign(db, campaign_id, current_user.id)
+
+        if not campaign:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Campaign not found"
+            )
+
+        return {
+            "success": True,
+            "data": {
+                "id": str(campaign.id),
+                "status": campaign.status,
+                "restored_at": campaign.updated_at.isoformat()
+            },
+            "message": "Campaign restored successfully"
+        }
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Error restoring campaign: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to restore campaign"
+        )
+
+# =============================================================================
 # CAMPAIGN CLEANUP & MAINTENANCE
 # =============================================================================
 
