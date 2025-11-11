@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from app.services.ai.ai_manager_singleton import ai_manager
 from app.services.ai.comprehensive_ai_manager import comprehensive_ai_manager
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
-# Using Bulletproof Creator Search system with comprehensive analytics
+# Robust creator search service removed - using Simple API endpoints
 from app.database.comprehensive_service import comprehensive_service
 from app.monitoring.network_health_monitor import network_health_monitor
 
@@ -106,37 +106,16 @@ class StartupInitializationService:
     async def _initialize_ai_manager(self):
         """Initialize COMPREHENSIVE AI Manager - ALL 10 MODELS - MANDATORY"""
         try:
-            print("\n" + "=" * 80)
-            print("🤖 LOADING ALL 13 AI MODELS (COMPREHENSIVE ANALYSIS)")
-            print("=" * 80)
             logger.info("Loading ALL 10 AI models (comprehensive analysis)...")
             logger.info("Models: sentiment, language, category, audience_quality, visual_content, audience_insights, trend_detection, advanced_nlp, fraud_detection, behavioral_patterns")
 
             # FIRST: Initialize core AI manager (3 models) for backwards compatibility
-            print("\n📊 Phase 1: Loading Core AI Models (3 models)...")
-            print("  → Sentiment Analysis (cardiffnlp/twitter-roberta-base-sentiment-latest)")
-            print("  → Language Detection (papluca/xlm-roberta-base-language-detection)")
-            print("  → Content Classification (facebook/bart-large-mnli)")
             await ai_manager.mandatory_startup_initialization()
             ai_manager.validate_startup_requirements()
-            print("✅ Core AI Models Loaded Successfully!\n")
 
             # SECOND: Initialize COMPREHENSIVE AI manager (ALL 10 models)
-            print("📊 Phase 2: Loading Advanced AI Models (10 models)...")
             logger.info("Initializing COMPREHENSIVE AI system with ALL 10 models...")
             comprehensive_results = await comprehensive_ai_manager.initialize_all_models()
-
-            # Display each loaded model
-            print("  ✅ Audience Quality Analysis")
-            print("  ✅ Visual Content Analysis")
-            print("  ✅ Audience Insights")
-            print("  ✅ Trend Detection")
-            print("  ✅ Advanced NLP")
-            print("  ✅ Fraud Detection")
-            print("  ✅ Behavioral Patterns")
-            print("  ✅ Content Quality Scoring")
-            print("  ✅ Engagement Analysis")
-            print("  ✅ Profile Authenticity")
 
             # Validate comprehensive system
             total_models = len(comprehensive_results)
@@ -147,8 +126,6 @@ class StartupInitializationService:
                 failed_models = [model for model, success in comprehensive_results.items() if not success]
                 raise Exception(f"Comprehensive AI initialization failed - only {success_rate:.1%} success rate. Failed models: {failed_models}")
 
-            print(f"\n✅ Advanced AI Models Loaded Successfully!")
-            print("=" * 80)
             logger.info(f"COMPREHENSIVE AI STARTUP COMPLETE: {successful_models}/{total_models} models loaded ({success_rate:.1%} success rate)")
 
             # Get system stats
@@ -171,10 +148,6 @@ class StartupInitializationService:
             }
 
             total_models_loaded = len(ai_stats['models_loaded']) + ai_stats.get('comprehensive_models_loaded', 0)
-            print(f"\n🎉 TOTAL: {total_models_loaded} AI Models Loaded and Ready!")
-            print(f"   → {len(ai_stats['models_loaded'])} Core Models")
-            print(f"   → {ai_stats.get('comprehensive_models_loaded', 0)} Advanced Models")
-            print("=" * 80 + "\n")
             logger.info(f"SUCCESS: COMPREHENSIVE AI initialized: {total_models_loaded} total models loaded ({len(ai_stats['models_loaded'])} core + {ai_stats.get('comprehensive_models_loaded', 0)} advanced)")
             
         except Exception as e:
@@ -297,12 +270,11 @@ class StartupInitializationService:
             }
     
     async def _initialize_creator_search(self):
-        """Bulletproof Creator Search System ready - using AI and Database services"""
-        print("🚀 Bulletproof Creator Search System ready - Full analytics pipeline operational")
-        logger.info("Bulletproof Creator Search System ready - using AI and Database services")
-        self.initialization_results["creator_search"] = {
+        """Simple API endpoints use AI and Database services (already initialized)"""
+        logger.info("Simple API endpoints ready - using AI and Database services")
+        self.initialization_results["simple_api"] = {
             "status": "success",
-            "message": "Bulletproof Creator Search System ready with comprehensive AI and analytics"
+            "message": "Simple API endpoints ready with AI and Database services"
         }
     
     async def _initialize_database_services(self):
