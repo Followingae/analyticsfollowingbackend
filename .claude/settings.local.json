@@ -44,7 +44,8 @@
       "Bash(\"/c/Users/user/AppData/Local/Programs/Python/Python312/python.exe\" grant_fai_access.py)",
       "Bash(git log:*)",
       "Bash(dir:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": [],
