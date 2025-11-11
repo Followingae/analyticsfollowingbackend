@@ -590,6 +590,7 @@ async def get_campaigns_overview(
     - Top creators leaderboard
     """
     try:
+        logger.info(f"📊 Getting campaigns overview for user {current_user.email}")
         overview = await campaign_service.get_campaigns_overview(db, current_user.id)
 
         return {
@@ -599,10 +600,10 @@ async def get_campaigns_overview(
         }
 
     except Exception as e:
-        logger.error(f"❌ Error retrieving campaigns overview: {e}")
+        logger.error(f"❌ Error retrieving campaigns overview: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve campaigns overview"
+            detail=f"Failed to retrieve campaigns overview: {str(e)}"
         )
 
 @router.get("/{campaign_id}/analytics")

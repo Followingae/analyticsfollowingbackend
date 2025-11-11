@@ -1121,7 +1121,6 @@ class CampaignService:
             Dictionary with summary stats, recent campaigns, and top creators
         """
         try:
-            from app.database.unified_models import CampaignProposal
             from datetime import datetime, timedelta, timezone
 
             # Calculate previous period (last 30 days vs previous 30 days)
@@ -1233,9 +1232,8 @@ class CampaignService:
             )
             completed_campaigns = result.scalar() or 0
 
-            # Pending proposals count
-            from app.services.campaign_proposals_service import campaign_proposals_service
-            pending_proposals = await campaign_proposals_service.count_pending_proposals(db, user_id)
+            # Pending proposals count (proposals feature removed)
+            pending_proposals = 0
 
             # This month campaigns count
             first_day_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
