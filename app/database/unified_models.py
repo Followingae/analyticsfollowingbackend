@@ -170,8 +170,7 @@ class User(Base):
     user_list_items = relationship("UserListItem", back_populates="user", cascade="all, delete-orphan")
     ai_analysis_jobs = relationship("AIAnalysisJob", back_populates="user", cascade="all, delete-orphan")
     campaigns = relationship("Campaign", back_populates="user", cascade="all, delete-orphan")
-
-    # Removed proposal relationships
+    campaign_proposals = relationship("CampaignProposal", foreign_keys="[CampaignProposal.user_id]", back_populates="user", cascade="all, delete-orphan")
     
     # Constraints
     __table_args__ = (
@@ -642,24 +641,42 @@ class Campaign(Base):
 
     # Campaign details
     name = Column(String(255), nullable=False)
+    description = Column(Text)  # Campaign description
     brand_name = Column(String(255), nullable=False)
     brand_logo_url = Column(Text)  # CDN URL for brand logo
-    status = Column(String(20), nullable=False, default='draft')  # draft, active, completed
+    status = Column(String(20), nullable=False, default='draft')  # draft, active, paused, in_review, completed, archived
+
+    # Budget tracking
+    budget = Column(Numeric(12, 2))  # Total campaign budget
+    spent = Column(Numeric(12, 2), default=0)  # Amount spent so far
+
+    # Campaign dates
+    start_date = Column(DateTime(timezone=True))
+    end_date = Column(DateTime(timezone=True))
+
+    # Metadata
+    tags = Column(ARRAY(String), default=list)  # Campaign tags for organization
+    created_by = Column(String(20), default='user')  # user | superadmin
+    proposal_id = Column(UUID(as_uuid=True), ForeignKey('campaign_proposals.id', ondelete='SET NULL'), nullable=True)  # Link to proposal if created from one
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    archived_at = Column(DateTime(timezone=True))  # When campaign was archived
 
     # Relationships
     user = relationship("User", back_populates="campaigns")
     campaign_posts = relationship("CampaignPost", back_populates="campaign", cascade="all, delete-orphan")
     campaign_creators = relationship("CampaignCreator", back_populates="campaign", cascade="all, delete-orphan")
+    proposal = relationship("CampaignProposal", back_populates="campaigns", foreign_keys=[proposal_id])
 
     __table_args__ = (
-        CheckConstraint("status IN ('draft', 'active', 'completed')", name='campaigns_status_check'),
+        CheckConstraint("status IN ('draft', 'active', 'paused', 'in_review', 'completed', 'archived')", name='campaigns_status_check'),
         Index('idx_campaigns_user_id', 'user_id'),
         Index('idx_campaigns_status', 'status'),
         Index('idx_campaigns_created_at', 'created_at'),
+        Index('idx_campaigns_proposal_id', 'proposal_id'),
+        Index('idx_campaigns_archived_at', 'archived_at'),
     )
 
 
@@ -708,6 +725,88 @@ class CampaignCreator(Base):
         UniqueConstraint('campaign_id', 'profile_id', name='unique_campaign_creator'),
         Index('idx_campaign_creators_campaign_id', 'campaign_id'),
         Index('idx_campaign_creators_profile_id', 'profile_id'),
+    )
+
+
+class CampaignProposal(Base):
+    """Campaign proposals from superadmin to users"""
+    __tablename__ = "campaign_proposals"
+
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    created_by_admin_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+
+    # Proposal details
+    title = Column(String(255), nullable=False)
+    campaign_name = Column(String(255), nullable=False)
+    description = Column(Text)
+    proposal_notes = Column(Text)  # Superadmin notes for the user
+    proposal_type = Column(String(50), default='influencer_list')  # influencer_list | campaign_package
+
+    # Status tracking
+    status = Column(String(20), nullable=False, default='draft')  # draft, sent, in_review, approved, rejected
+
+    # Budget & metrics
+    total_budget = Column(Numeric(12, 2))
+    expected_reach = Column(BigInteger)
+    avg_engagement_rate = Column(Numeric(5, 2))
+    estimated_impressions = Column(BigInteger)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    sent_at = Column(DateTime(timezone=True))  # When sent to user
+    responded_at = Column(DateTime(timezone=True))  # When user responded
+
+    # User response
+    rejection_reason = Column(Text)  # If rejected, why
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id], back_populates="campaign_proposals")
+    created_by_admin = relationship("User", foreign_keys=[created_by_admin_id])
+    proposal_influencers = relationship("ProposalInfluencer", back_populates="proposal", cascade="all, delete-orphan")
+    campaigns = relationship("Campaign", back_populates="proposal")
+
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'sent', 'in_review', 'approved', 'rejected')", name='proposal_status_check'),
+        CheckConstraint("proposal_type IN ('influencer_list', 'campaign_package')", name='proposal_type_check'),
+        Index('idx_proposals_user_id', 'user_id'),
+        Index('idx_proposals_status', 'status'),
+        Index('idx_proposals_created_at', 'created_at'),
+    )
+
+
+class ProposalInfluencer(Base):
+    """Influencers suggested in proposals with user selection tracking"""
+    __tablename__ = "proposal_influencers"
+
+    # Primary identification
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    proposal_id = Column(UUID(as_uuid=True), ForeignKey('campaign_proposals.id', ondelete='CASCADE'), nullable=False, index=True)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+
+    # Superadmin's suggestion
+    estimated_cost = Column(Numeric(12, 2))  # Estimated cost for this influencer
+    suggested_by_admin = Column(Boolean, default=True)
+
+    # User's selection
+    selected_by_user = Column(Boolean, default=False)  # User selected this influencer
+    selection_notes = Column(Text)  # User notes about selection/deselection
+
+    # Timestamps
+    added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    selected_at = Column(DateTime(timezone=True))  # When user selected
+
+    # Relationships
+    proposal = relationship("CampaignProposal", back_populates="proposal_influencers")
+    profile = relationship("Profile")
+
+    __table_args__ = (
+        UniqueConstraint('proposal_id', 'profile_id', name='unique_proposal_influencer'),
+        Index('idx_proposal_influencers_proposal_id', 'proposal_id'),
+        Index('idx_proposal_influencers_profile_id', 'profile_id'),
+        Index('idx_proposal_influencers_selected', 'selected_by_user'),
     )
 
 

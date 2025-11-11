@@ -1101,6 +1101,536 @@ class CampaignService:
             logger.error(f"❌ Failed to cleanup orphaned creators: {e}")
             raise
 
+    # =============================================================================
+    # CAMPAIGN OVERVIEW & DASHBOARD
+    # =============================================================================
+
+    async def get_campaigns_overview(
+        self,
+        db: AsyncSession,
+        user_id: UUID
+    ) -> Dict[str, Any]:
+        """
+        Get comprehensive dashboard overview for user's campaigns
+
+        Args:
+            db: Database session
+            user_id: User ID
+
+        Returns:
+            Dictionary with summary stats, recent campaigns, and top creators
+        """
+        try:
+            from app.database.unified_models import CampaignProposal
+            from datetime import datetime, timedelta, timezone
+
+            # Calculate previous period (last 30 days vs previous 30 days)
+            now = datetime.now(timezone.utc)
+            thirty_days_ago = now - timedelta(days=30)
+            sixty_days_ago = now - timedelta(days=60)
+
+            # Total campaigns count
+            result = await db.execute(
+                select(func.count(Campaign.id))
+                .where(Campaign.user_id == user_id)
+            )
+            total_campaigns = result.scalar() or 0
+
+            # Total unique creators count
+            result = await db.execute(
+                select(func.count(func.distinct(CampaignCreator.profile_id)))
+                .join(Campaign, Campaign.id == CampaignCreator.campaign_id)
+                .where(Campaign.user_id == user_id)
+            )
+            total_creators = result.scalar() or 0
+
+            # Current period stats (last 30 days)
+            current_reach_result = await db.execute(
+                select(func.sum(Post.likes_count + Post.comments_count))
+                .join(CampaignPost, CampaignPost.post_id == Post.id)
+                .join(Campaign, Campaign.id == CampaignPost.campaign_id)
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.created_at >= thirty_days_ago
+                ))
+            )
+            current_reach = current_reach_result.scalar() or 0
+
+            # Previous period stats (30-60 days ago)
+            previous_reach_result = await db.execute(
+                select(func.sum(Post.likes_count + Post.comments_count))
+                .join(CampaignPost, CampaignPost.post_id == Post.id)
+                .join(Campaign, Campaign.id == CampaignPost.campaign_id)
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.created_at >= sixty_days_ago,
+                    Campaign.created_at < thirty_days_ago
+                ))
+            )
+            previous_reach = previous_reach_result.scalar() or 0
+
+            # Calculate trend
+            reach_trend = "stable"
+            reach_change_percent = 0.0
+            if previous_reach > 0:
+                reach_change_percent = ((current_reach - previous_reach) / previous_reach) * 100
+                if reach_change_percent > 5:
+                    reach_trend = "up"
+                elif reach_change_percent < -5:
+                    reach_trend = "down"
+
+            # Average engagement rate (current period)
+            current_engagement_result = await db.execute(
+                select(func.avg(Post.engagement_rate))
+                .join(CampaignPost, CampaignPost.post_id == Post.id)
+                .join(Campaign, Campaign.id == CampaignPost.campaign_id)
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.created_at >= thirty_days_ago
+                ))
+            )
+            current_engagement = current_engagement_result.scalar() or 0.0
+
+            # Average engagement rate (previous period)
+            previous_engagement_result = await db.execute(
+                select(func.avg(Post.engagement_rate))
+                .join(CampaignPost, CampaignPost.post_id == Post.id)
+                .join(Campaign, Campaign.id == CampaignPost.campaign_id)
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.created_at >= sixty_days_ago,
+                    Campaign.created_at < thirty_days_ago
+                ))
+            )
+            previous_engagement = previous_engagement_result.scalar() or 0.0
+
+            # Engagement trend
+            engagement_trend = "stable"
+            engagement_change_percent = 0.0
+            if previous_engagement > 0:
+                engagement_change_percent = ((current_engagement - previous_engagement) / previous_engagement) * 100
+                if engagement_change_percent > 5:
+                    engagement_trend = "up"
+                elif engagement_change_percent < -5:
+                    engagement_trend = "down"
+
+            # Status counts
+            result = await db.execute(
+                select(func.count(Campaign.id))
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.status == 'active'
+                ))
+            )
+            active_campaigns = result.scalar() or 0
+
+            result = await db.execute(
+                select(func.count(Campaign.id))
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.status == 'completed'
+                ))
+            )
+            completed_campaigns = result.scalar() or 0
+
+            # Pending proposals count
+            from app.services.campaign_proposals_service import campaign_proposals_service
+            pending_proposals = await campaign_proposals_service.count_pending_proposals(db, user_id)
+
+            # This month campaigns count
+            first_day_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            result = await db.execute(
+                select(func.count(Campaign.id))
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.created_at >= first_day_of_month
+                ))
+            )
+            this_month_campaigns = result.scalar() or 0
+
+            # Total spend (current vs previous)
+            current_spend_result = await db.execute(
+                select(func.sum(Campaign.spent))
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.created_at >= thirty_days_ago
+                ))
+            )
+            current_spend = float(current_spend_result.scalar() or 0)
+
+            previous_spend_result = await db.execute(
+                select(func.sum(Campaign.spent))
+                .where(and_(
+                    Campaign.user_id == user_id,
+                    Campaign.created_at >= sixty_days_ago,
+                    Campaign.created_at < thirty_days_ago
+                ))
+            )
+            previous_spend = float(previous_spend_result.scalar() or 0)
+
+            # Spend trend
+            spend_trend = "stable"
+            spend_change_percent = 0.0
+            if previous_spend > 0:
+                spend_change_percent = ((current_spend - previous_spend) / previous_spend) * 100
+                if spend_change_percent > 5:
+                    spend_trend = "up"
+                elif spend_change_percent < -5:
+                    spend_trend = "down"
+
+            # Content produced (total posts)
+            result = await db.execute(
+                select(func.count(CampaignPost.id))
+                .join(Campaign, Campaign.id == CampaignPost.campaign_id)
+                .where(Campaign.user_id == user_id)
+            )
+            content_produced = result.scalar() or 0
+
+            # Recent campaigns (last 5)
+            result = await db.execute(
+                select(Campaign)
+                .where(Campaign.user_id == user_id)
+                .order_by(desc(Campaign.created_at))
+                .limit(5)
+            )
+            recent_campaigns = result.scalars().all()
+
+            recent_campaigns_data = []
+            for campaign in recent_campaigns:
+                stats = await self.get_campaign_stats(db, campaign.id, user_id)
+                recent_campaigns_data.append({
+                    "id": str(campaign.id),
+                    "name": campaign.name,
+                    "brand_name": campaign.brand_name,
+                    "brand_logo": campaign.brand_logo_url,
+                    "status": campaign.status,
+                    "engagement_rate": stats.get('engagement_rate', 0.0),
+                    "total_reach": stats.get('total_reach', 0),
+                    "creators_count": stats.get('creators_count', 0),
+                    "created_at": campaign.created_at.isoformat(),
+                    "updated_at": campaign.updated_at.isoformat(),
+                    "progress": self._calculate_progress(campaign, stats),
+                    "budget": str(campaign.budget) if campaign.budget else None,
+                    "deadline": campaign.end_date.isoformat() if campaign.end_date else None
+                })
+
+            # Top creators (by campaign participation)
+            result = await db.execute(
+                select(
+                    Profile,
+                    func.count(CampaignCreator.campaign_id).label('campaigns_count'),
+                    func.sum(Post.likes_count + Post.comments_count).label('total_reach'),
+                    func.avg(Post.engagement_rate).label('avg_engagement')
+                )
+                .join(CampaignCreator, CampaignCreator.profile_id == Profile.id)
+                .join(Campaign, Campaign.id == CampaignCreator.campaign_id)
+                .join(CampaignPost, CampaignPost.campaign_id == Campaign.id)
+                .join(Post, and_(
+                    Post.id == CampaignPost.post_id,
+                    Post.profile_id == Profile.id
+                ))
+                .where(Campaign.user_id == user_id)
+                .group_by(Profile.id)
+                .order_by(desc('campaigns_count'))
+                .limit(5)
+            )
+            top_creators_raw = result.all()
+
+            top_creators_data = []
+            for creator, campaigns_count, total_reach, avg_engagement in top_creators_raw:
+                top_creators_data.append({
+                    "id": str(creator.id),
+                    "name": creator.full_name or creator.username,
+                    "handle": creator.username,
+                    "avatar": creator.profile_pic_url or creator.profile_pic_url_hd,
+                    "campaigns_count": campaigns_count,
+                    "total_reach": int(total_reach or 0),
+                    "avg_engagement": float(avg_engagement or 0.0)
+                })
+
+            return {
+                "summary": {
+                    "totalCampaigns": total_campaigns,
+                    "totalCreators": total_creators,
+                    "totalReach": {
+                        "current": int(current_reach),
+                        "previous": int(previous_reach),
+                        "trend": reach_trend,
+                        "changePercent": round(reach_change_percent, 2)
+                    },
+                    "avgEngagementRate": {
+                        "current": round(current_engagement, 2),
+                        "previous": round(previous_engagement, 2),
+                        "trend": engagement_trend,
+                        "changePercent": round(engagement_change_percent, 2)
+                    },
+                    "activeCampaigns": active_campaigns,
+                    "completedCampaigns": completed_campaigns,
+                    "pendingProposals": pending_proposals,
+                    "thisMonthCampaigns": this_month_campaigns,
+                    "totalSpend": {
+                        "current": current_spend,
+                        "previous": previous_spend,
+                        "trend": spend_trend,
+                        "changePercent": round(spend_change_percent, 2)
+                    },
+                    "contentProduced": content_produced
+                },
+                "recent_campaigns": recent_campaigns_data,
+                "top_creators": top_creators_data
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get campaigns overview: {e}")
+            raise
+
+    def _calculate_progress(self, campaign: Campaign, stats: Dict[str, Any]) -> float:
+        """Calculate campaign progress percentage (0-100)"""
+        if campaign.status == 'completed':
+            return 100.0
+        elif campaign.status == 'draft':
+            return 0.0
+
+        # Simple progress based on posts count vs expected
+        posts_count = stats.get('posts_count', 0)
+        if posts_count == 0:
+            return 0.0
+
+        # Assume progress based on time elapsed + posts added
+        progress = min(posts_count * 10, 100)  # 10% per post, max 100%
+        return float(progress)
+
+    # =============================================================================
+    # CAMPAIGN ANALYTICS
+    # =============================================================================
+
+    async def get_campaign_analytics(
+        self,
+        db: AsyncSession,
+        campaign_id: UUID,
+        user_id: UUID,
+        period: str = 'all'  # 7d, 30d, 90d, all
+    ) -> Dict[str, Any]:
+        """
+        Get detailed analytics for a campaign
+
+        Args:
+            db: Database session
+            campaign_id: Campaign ID
+            user_id: User ID (for authorization)
+            period: Time period (7d, 30d, 90d, all)
+
+        Returns:
+            Dictionary with daily stats, totals, and insights
+        """
+        try:
+            from datetime import datetime, timedelta, timezone
+
+            # Verify ownership
+            campaign = await self.get_campaign(db, campaign_id, user_id)
+            if not campaign:
+                raise ValueError(f"Campaign {campaign_id} not found or unauthorized")
+
+            # Determine date range
+            now = datetime.now(timezone.utc)
+            if period == '7d':
+                start_date = now - timedelta(days=7)
+            elif period == '30d':
+                start_date = now - timedelta(days=30)
+            elif period == '90d':
+                start_date = now - timedelta(days=90)
+            else:  # 'all'
+                start_date = campaign.created_at
+
+            # Get daily stats
+            result = await db.execute(
+                select(
+                    func.date_trunc('day', Post.created_at).label('date'),
+                    func.sum(Post.likes_count + Post.comments_count).label('reach'),
+                    func.sum(Post.likes_count).label('views'),  # Approximation
+                    func.count(Post.id).label('impressions'),
+                    func.sum(Post.likes_count + Post.comments_count).label('engagement'),
+                    func.count(func.distinct(Profile.id)).label('clicks')  # Approximation
+                )
+                .join(CampaignPost, CampaignPost.post_id == Post.id)
+                .join(Profile, Profile.id == Post.profile_id)
+                .where(and_(
+                    CampaignPost.campaign_id == campaign_id,
+                    Post.created_at >= start_date
+                ))
+                .group_by(func.date_trunc('day', Post.created_at))
+                .order_by('date')
+            )
+            daily_stats_raw = result.all()
+
+            daily_stats = []
+            for date, reach, views, impressions, engagement, clicks in daily_stats_raw:
+                daily_stats.append({
+                    "date": date.isoformat() if date else now.isoformat(),
+                    "reach": int(reach or 0),
+                    "views": int(views or 0),
+                    "impressions": int(impressions or 0),
+                    "engagement": int(engagement or 0),
+                    "clicks": int(clicks or 0)
+                })
+
+            # Calculate totals
+            total_reach = sum(day["reach"] for day in daily_stats)
+            total_views = sum(day["views"] for day in daily_stats)
+            total_impressions = sum(day["impressions"] for day in daily_stats)
+            total_engagement = sum(day["engagement"] for day in daily_stats)
+            total_clicks = sum(day["clicks"] for day in daily_stats)
+
+            # Calculate average engagement rate
+            result = await db.execute(
+                select(func.avg(Post.engagement_rate))
+                .join(CampaignPost, CampaignPost.post_id == Post.id)
+                .where(and_(
+                    CampaignPost.campaign_id == campaign_id,
+                    Post.created_at >= start_date
+                ))
+            )
+            avg_engagement_rate = result.scalar() or 0.0
+
+            # Performance insights
+            best_performing_day = None
+            peak_reach_day = None
+            if daily_stats:
+                best_day = max(daily_stats, key=lambda x: x['engagement'])
+                best_performing_day = best_day['date']
+
+                peak_day = max(daily_stats, key=lambda x: x['reach'])
+                peak_reach_day = peak_day['date']
+
+            # Calculate trend
+            trend = "stable"
+            growth_rate = 0.0
+            if len(daily_stats) >= 2:
+                first_half = daily_stats[:len(daily_stats)//2]
+                second_half = daily_stats[len(daily_stats)//2:]
+
+                first_half_avg = sum(day['reach'] for day in first_half) / len(first_half) if first_half else 0
+                second_half_avg = sum(day['reach'] for day in second_half) / len(second_half) if second_half else 0
+
+                if first_half_avg > 0:
+                    growth_rate = ((second_half_avg - first_half_avg) / first_half_avg) * 100
+                    if growth_rate > 10:
+                        trend = "increasing"
+                    elif growth_rate < -10:
+                        trend = "decreasing"
+
+            return {
+                "campaign_id": str(campaign_id),
+                "campaign_name": campaign.name,
+                "period": period,
+                "daily_stats": daily_stats,
+                "totals": {
+                    "total_reach": total_reach,
+                    "total_views": total_views,
+                    "total_impressions": total_impressions,
+                    "total_engagement": total_engagement,
+                    "total_clicks": total_clicks,
+                    "avg_engagement_rate": round(avg_engagement_rate, 2)
+                },
+                "performance_insights": {
+                    "best_performing_day": best_performing_day,
+                    "peak_reach_day": peak_reach_day,
+                    "trend": trend,
+                    "growth_rate": round(growth_rate, 2)
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get campaign analytics: {e}")
+            raise
+
+    # =============================================================================
+    # CAMPAIGN STATUS MANAGEMENT
+    # =============================================================================
+
+    async def update_campaign_status(
+        self,
+        db: AsyncSession,
+        campaign_id: UUID,
+        user_id: UUID,
+        new_status: str
+    ) -> Campaign:
+        """
+        Update campaign status (pause/resume/complete)
+
+        Args:
+            db: Database session
+            campaign_id: Campaign ID
+            user_id: User ID (for authorization)
+            new_status: New status (active, paused, completed)
+
+        Returns:
+            Updated Campaign object
+        """
+        try:
+            campaign = await self.get_campaign(db, campaign_id, user_id)
+            if not campaign:
+                raise ValueError(f"Campaign {campaign_id} not found or unauthorized")
+
+            valid_statuses = ['draft', 'active', 'paused', 'in_review', 'completed', 'archived']
+            if new_status not in valid_statuses:
+                raise ValueError(f"Invalid status: {new_status}")
+
+            campaign.status = new_status
+            await db.commit()
+            await db.refresh(campaign)
+
+            logger.info(f"✅ Updated campaign {campaign_id} status to {new_status}")
+            return campaign
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Failed to update campaign status: {e}")
+            raise
+
+    async def restore_campaign(
+        self,
+        db: AsyncSession,
+        campaign_id: UUID,
+        user_id: UUID
+    ) -> Campaign:
+        """
+        Restore an archived campaign
+
+        Args:
+            db: Database session
+            campaign_id: Campaign ID
+            user_id: User ID (for authorization)
+
+        Returns:
+            Restored Campaign object
+        """
+        try:
+            result = await db.execute(
+                select(Campaign).where(and_(
+                    Campaign.id == campaign_id,
+                    Campaign.user_id == user_id
+                ))
+            )
+            campaign = result.scalar_one_or_none()
+
+            if not campaign:
+                raise ValueError(f"Campaign {campaign_id} not found or unauthorized")
+
+            campaign.status = 'draft'
+            campaign.archived_at = None
+
+            await db.commit()
+            await db.refresh(campaign)
+
+            logger.info(f"✅ Restored campaign {campaign_id}")
+            return campaign
+
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"❌ Failed to restore campaign: {e}")
+            raise
+
 
 # Global service instance
 campaign_service = CampaignService()
