@@ -210,6 +210,21 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add validation error handler to debug 422 errors
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+import logging
+logger = logging.getLogger(__name__)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    logger.error(f"❌ VALIDATION ERROR on {request.url}: {exc.errors()}")
+    logger.error(f"   Body: {exc.body if hasattr(exc, 'body') else 'N/A'}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": exc.body if hasattr(exc, 'body') else None}
+    )
+
 # CORS middleware - Configured for production and development
 import os
 from typing import List

@@ -93,6 +93,39 @@ async def create_campaign(
             detail="Failed to create campaign"
         )
 
+@router.get("/overview")
+async def get_campaigns_overview(
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get campaigns dashboard overview
+
+    Returns comprehensive dashboard with:
+    - Total campaigns, active campaigns counts
+    - 30-day trend analysis vs previous period
+    - Engagement rate trends
+    - Spend tracking with trends
+    - Recent campaigns (last 5)
+    - Top creators leaderboard
+    """
+    try:
+        logger.info(f"📊 Getting campaigns overview for user {current_user.email}")
+        overview = await campaign_service.get_campaigns_overview(db, current_user.id)
+
+        return {
+            "success": True,
+            "data": overview,
+            "message": "Campaigns overview retrieved successfully"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error retrieving campaigns overview: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve campaigns overview: {str(e)}"
+        )
+
 @router.get("/{campaign_id}")
 async def get_campaign(
     campaign_id: UUID,
@@ -572,39 +605,7 @@ async def get_campaign_audience(
 # =============================================================================
 # CAMPAIGN OVERVIEW & ANALYTICS
 # =============================================================================
-
-@router.get("/overview")
-async def get_campaigns_overview(
-    current_user: UserInDB = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Get campaigns dashboard overview
-
-    Returns comprehensive dashboard with:
-    - Total campaigns, active campaigns counts
-    - 30-day trend analysis vs previous period
-    - Engagement rate trends
-    - Spend tracking with trends
-    - Recent campaigns (last 5)
-    - Top creators leaderboard
-    """
-    try:
-        logger.info(f"📊 Getting campaigns overview for user {current_user.email}")
-        overview = await campaign_service.get_campaigns_overview(db, current_user.id)
-
-        return {
-            "success": True,
-            "data": overview,
-            "message": "Campaigns overview retrieved successfully"
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Error retrieving campaigns overview: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve campaigns overview: {str(e)}"
-        )
+# Note: /overview endpoint moved above /{campaign_id} to avoid route conflicts
 
 @router.get("/{campaign_id}/analytics")
 async def get_campaign_analytics(
