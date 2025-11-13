@@ -51,7 +51,8 @@
       "Bash(for file in app/api/campaign_routes.py app/api/campaign_workflow_routes.py app/api/campaign_proposal_routes.py app/api/campaign_routes_ai_insights.py)",
       "Bash(do echo \"=== $file ===\" grep -A1 \"@router\\.\" \"$file\")",
       "Bash(./redis-server.exe:*)",
-      "Bash(pkill:*)"
+      "Bash(pkill:*)",
+      "Bash(git branch:*)"
     ],
     "deny": [],
     "ask": [],
