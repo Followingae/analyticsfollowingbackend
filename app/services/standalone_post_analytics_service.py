@@ -452,11 +452,13 @@ class StandalonePostAnalyticsService:
                 return {"status": "no_content", "analysis": {}}
 
             # Run AI analysis using bulletproof content intelligence
-            ai_results = await bulletproof_content_intelligence.analyze_post_content(
-                caption=caption,
-                hashtags=post_data.get("hashtags", []),
-                mentions=post_data.get("mentions", [])
-            )
+            ai_analysis_data = {
+                "caption": caption,
+                "hashtags": post_data.get("hashtags", []),
+                "mentions": post_data.get("mentions", []),
+                "media_type": post_data.get("type", "image")
+            }
+            ai_results = await bulletproof_content_intelligence.analyze_post_content(ai_analysis_data)
 
             logger.info(f"✅ AI analysis completed successfully")
             return {"status": "success", "analysis": ai_results}
@@ -765,20 +767,14 @@ class StandalonePostAnalyticsService:
 
     async def _trigger_full_creator_analytics(self, username: str, user_id: Optional[UUID]):
         """
-        Trigger FULL Creator Analytics via job queue for proper resource isolation
+        Trigger FULL Creator Analytics with fallback to direct processing
 
-        INDUSTRY STANDARD: Uses job queue instead of direct processing to ensure
-        complete isolation from user-facing requests. The background workers will:
-        - Check if FULL analytics exists in database
-        - Only serve from DB if followers > 0, posts > 0, AI complete
-        - If incomplete, fetch from Apify + CDN + ALL 10 AI models
-        - Store results same as individual creator search
+        RELIABILITY FIRST: Try job queue, but fall back to direct processing
+        if workers aren't available. This ensures profiles get completed regardless
+        of infrastructure state.
         """
         try:
-            # PRACTICAL SOLUTION: Use asyncio task with isolated resources
-            # This achieves discovery without blocking post analytics requests
-
-            # REAL BACKGROUND WORKER: Queue job for external worker processing
+            # TRY: Job queue first (preferred method)
             from app.core.job_queue import job_queue, JobPriority, QueueType
 
             job_id = await job_queue.enqueue_job(
@@ -797,14 +793,18 @@ class StandalonePostAnalyticsService:
 
             logger.info(f"✅ Creator Analytics Queued for Background Processing:")
             logger.info(f"   Username: {username}")
-            logger.info(f"   Job ID: {job_id[:8]}")
-            logger.info(f"   Processing Mode: External Worker")
-            logger.info(f"   Context: Post Analytics Discovery")
+            logger.info(f"   Job ID: {str(job_id)[:8] if job_id else 'None'}")
+
+            # CRITICAL FIX: Also trigger direct processing as backup
+            logger.info(f"🔄 BACKUP: Also triggering direct processing to ensure completion...")
+            asyncio.create_task(self._trigger_creator_analytics_isolated(username, user_id))
 
         except Exception as e:
-                logger.error(f"❌ Creator analytics trigger failed: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
+            logger.warning(f"⚠️ Job queue failed, falling back to direct processing for {username}: {e}")
+
+            # FALLBACK: Direct processing if job queue fails
+            logger.info(f"🔄 FALLBACK: Using direct Creator Analytics processing...")
+            asyncio.create_task(self._trigger_creator_analytics_isolated(username, user_id))
 
     async def _trigger_creator_analytics_isolated(self, username: str, user_id: Optional[UUID]):
         """

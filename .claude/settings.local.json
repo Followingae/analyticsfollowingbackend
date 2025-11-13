@@ -45,7 +45,13 @@
       "Bash(git log:*)",
       "Bash(dir:*)",
       "Bash(git add:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(py --version)",
+      "Bash(py -m pip:*)",
+      "Bash(for file in app/api/campaign_routes.py app/api/campaign_workflow_routes.py app/api/campaign_proposal_routes.py app/api/campaign_routes_ai_insights.py)",
+      "Bash(do echo \"=== $file ===\" grep -A1 \"@router\\.\" \"$file\")",
+      "Bash(./redis-server.exe:*)",
+      "Bash(pkill:*)"
     ],
     "deny": [],
     "ask": [],

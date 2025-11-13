@@ -389,6 +389,26 @@ async def add_post_to_campaign(
             user_id=current_user.id
         )
 
+        # STEP 1.5: CRITICAL FIX - Wait for Creator Analytics to complete for campaign accuracy
+        creator_username = post_analysis.get("profile", {}).get("username")
+        if creator_username:
+            logger.info(f"⏳ Waiting for Creator Analytics to complete for @{creator_username}...")
+
+            # Import Creator Analytics service to ensure profile is complete
+            from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
+
+            # Trigger and WAIT for complete Creator Analytics (synchronous for campaigns)
+            profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
+                username=creator_username,
+                db=db,
+                force_refresh=False  # Use cache if recent
+            )
+
+            if profile and profile.followers_count > 0:
+                logger.info(f"✅ Creator Analytics complete: @{creator_username} - {profile.followers_count:,} followers")
+            else:
+                logger.warning(f"⚠️ Creator Analytics incomplete for @{creator_username}")
+
         # STEP 2: Add post to campaign
         campaign_post = await campaign_service.add_post_to_campaign(
             db=db,

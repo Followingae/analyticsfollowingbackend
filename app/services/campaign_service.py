@@ -461,11 +461,13 @@ class CampaignService:
             if not campaign:
                 return []
 
-            # Get posts with relationships
+            # Get posts with relationships including audience demographics
             result = await db.execute(
                 select(CampaignPost)
                 .where(CampaignPost.campaign_id == campaign_id)
-                .options(selectinload(CampaignPost.post).selectinload(Post.profile))
+                .options(
+                    selectinload(CampaignPost.post).selectinload(Post.profile).selectinload(Profile.audience_demographics)
+                )
                 .order_by(desc(CampaignPost.added_at))
             )
             campaign_posts = result.scalars().all()
@@ -511,43 +513,8 @@ class CampaignService:
                 )
 
 
-                # Extract collaboration data from raw_data (tagged users, mentions, coauthor_producers)
-                collaborators = []
-
-                # Check tagged users (most reliable for collaborations)
-                if post.raw_data and post.raw_data.get('tagged_users'):
-                    for tagged_user in post.raw_data.get('tagged_users', []):
-                        if tagged_user.get('username'):
-                            collaborators.append({
-                                'username': tagged_user.get('username'),
-                                'full_name': tagged_user.get('full_name', ''),
-                                'is_verified': tagged_user.get('is_verified', False),
-                                'collaboration_type': 'tagged_user'
-                            })
-
-                # Also check coauthor_producers for formal Instagram collaborations
-                if post.coauthor_producers and len(post.coauthor_producers) > 0:
-                    for coauthor in post.coauthor_producers:
-                        if isinstance(coauthor, dict) and coauthor.get('username'):
-                            collaborators.append({
-                                'username': coauthor.get('username'),
-                                'full_name': coauthor.get('full_name', ''),
-                                'is_verified': coauthor.get('is_verified', False),
-                                'collaboration_type': 'coauthor_producer'
-                            })
-
-                # Check mentions for brand partnerships  
-                if post.mentions and len(post.mentions) > 0:
-                    for mention in post.mentions:
-                        # Clean mention (@barakatme -> barakatme)
-                        clean_mention = mention.replace('@', '').strip()
-                        if clean_mention and clean_mention not in [c['username'] for c in collaborators]:
-                            collaborators.append({
-                                'username': clean_mention,
-                                'full_name': '',
-                                'is_verified': False,
-                                'collaboration_type': 'mention'
-                            })
+                # Extract collaboration data with COMPLETE AI analytics for each collaborator
+                collaborators = await self._extract_enhanced_collaborators(db, post)
 
                 # Generate correct Instagram URL from shortcode
                 correct_instagram_url = f"https://www.instagram.com/p/{post.shortcode}/" if post.shortcode else cp.instagram_post_url
@@ -573,17 +540,38 @@ class CampaignService:
                     "media_type": post.media_type,
                     "display_url": post.display_url,
 
-                    # AI Analysis
+                    # AI Analysis (Post-Level)
                     "ai_content_category": post.ai_content_category,
                     "ai_sentiment": post.ai_sentiment,
                     "ai_language_code": post.ai_language_code,
+                    "ai_category_confidence": post.ai_category_confidence,
+                    "ai_sentiment_score": post.ai_sentiment_score,
+                    "ai_language_confidence": post.ai_language_confidence,
 
-                    # Creator
+                    # Creator Basic Info
                     "creator_username": profile.username,
                     "creator_full_name": profile.full_name,
                     "creator_followers_count": profile.followers_count,
+                    "creator_following_count": profile.following_count,
+                    "creator_posts_count": profile.posts_count,
                     "creator_profile_pic_url": creator_cdn_profile_url,  # Always use CDN URL to avoid CORS
                     "creator_profile_pic_url_hd": None,  # Don't send Instagram URLs, they cause CORS errors
+                    "creator_biography": profile.biography or "",
+                    "creator_is_verified": profile.is_verified,
+                    "creator_is_business_account": profile.is_business_account,
+                    "creator_detected_country": profile.detected_country,
+
+                    # Creator AI Analysis (Profile-Level)
+                    "creator_ai_primary_content_type": profile.ai_primary_content_type,
+                    "creator_ai_content_distribution": profile.ai_content_distribution or {},
+                    "creator_ai_avg_sentiment_score": profile.ai_avg_sentiment_score,
+                    "creator_ai_language_distribution": profile.ai_language_distribution or {},
+                    "creator_ai_content_quality_score": profile.ai_content_quality_score,
+                    "creator_engagement_rate": profile.engagement_rate,
+                    "creator_influence_score": profile.influence_score,
+
+                    # Creator Audience Demographics (AI-Generated)
+                    "creator_audience_demographics": self._extract_audience_demographics(profile),
 
                     # Collaboration Data - BOTH creators for collaboration posts
                     "collaborators": collaborators,
@@ -597,6 +585,185 @@ class CampaignService:
         except Exception as e:
             logger.error(f"❌ Failed to get campaign posts: {e}")
             raise
+
+    def _extract_audience_demographics(self, profile) -> Dict[str, Any]:
+        """Extract and format audience demographics data for frontend"""
+        try:
+            # Get audience demographics from profile relationship
+            demographics = None
+            if hasattr(profile, 'audience_demographics') and profile.audience_demographics:
+                # Handle both single demographic and list
+                if isinstance(profile.audience_demographics, list):
+                    demographics = profile.audience_demographics[0] if profile.audience_demographics else None
+                else:
+                    demographics = profile.audience_demographics
+
+            if demographics:
+                return {
+                    "gender_distribution": demographics.gender_distribution or {},
+                    "age_distribution": demographics.age_distribution or {},
+                    "location_distribution": demographics.location_distribution or {},
+                    "sample_size": demographics.sample_size,
+                    "confidence_score": demographics.confidence_score,
+                    "analysis_method": demographics.analysis_method,
+                    "last_sampled": demographics.last_sampled.isoformat() if demographics.last_sampled else None
+                }
+            else:
+                # Return default/empty structure for consistency
+                return {
+                    "gender_distribution": {},
+                    "age_distribution": {},
+                    "location_distribution": {},
+                    "sample_size": 0,
+                    "confidence_score": 0.0,
+                    "analysis_method": "pending",
+                    "last_sampled": None,
+                    "note": "Demographics analysis pending or unavailable"
+                }
+
+        except Exception as e:
+            logger.warning(f"Error extracting audience demographics: {e}")
+            return {
+                "gender_distribution": {},
+                "age_distribution": {},
+                "location_distribution": {},
+                "sample_size": 0,
+                "confidence_score": 0.0,
+                "analysis_method": "error",
+                "last_sampled": None,
+                "error": str(e)
+            }
+
+    async def _extract_enhanced_collaborators(self, db: AsyncSession, post) -> List[Dict[str, Any]]:
+        """Extract collaborators with complete AI analytics data"""
+        try:
+            collaborators = []
+            collaborator_usernames = set()
+
+            # Extract usernames from various sources
+            potential_collaborators = []
+
+            # Check tagged users (most reliable for collaborations)
+            if post.raw_data and post.raw_data.get('tagged_users'):
+                for tagged_user in post.raw_data.get('tagged_users', []):
+                    if tagged_user.get('username'):
+                        potential_collaborators.append({
+                            'username': tagged_user.get('username'),
+                            'full_name': tagged_user.get('full_name', ''),
+                            'is_verified': tagged_user.get('is_verified', False),
+                            'collaboration_type': 'tagged_user'
+                        })
+
+            # Also check coauthor_producers for formal Instagram collaborations
+            if post.coauthor_producers and len(post.coauthor_producers) > 0:
+                for coauthor in post.coauthor_producers:
+                    if isinstance(coauthor, dict) and coauthor.get('username'):
+                        potential_collaborators.append({
+                            'username': coauthor.get('username'),
+                            'full_name': coauthor.get('full_name', ''),
+                            'is_verified': coauthor.get('is_verified', False),
+                            'collaboration_type': 'coauthor_producer'
+                        })
+
+            # Check mentions for brand partnerships
+            if post.mentions and len(post.mentions) > 0:
+                for mention in post.mentions:
+                    # Clean mention (@barakatme -> barakatme)
+                    clean_mention = mention.replace('@', '').strip()
+                    if clean_mention and clean_mention not in collaborator_usernames:
+                        potential_collaborators.append({
+                            'username': clean_mention,
+                            'full_name': '',
+                            'is_verified': False,
+                            'collaboration_type': 'mention'
+                        })
+
+            # For each potential collaborator, get their complete profile data
+            for collab_basic in potential_collaborators:
+                username = collab_basic['username'].lower()
+                if username in collaborator_usernames:
+                    continue  # Skip duplicates
+
+                collaborator_usernames.add(username)
+
+                # Get collaborator profile with complete AI data
+                try:
+                    result = await db.execute(
+                        select(Profile)
+                        .where(Profile.username == username)
+                        .options(selectinload(Profile.audience_demographics))
+                    )
+                    collaborator_profile = result.scalar_one_or_none()
+
+                    if collaborator_profile:
+                        # Get CDN profile picture
+                        from app.services.cdn_sync_service import CDNSyncService
+                        cdn_sync = CDNSyncService()
+                        collab_cdn_profile_url = await cdn_sync.get_profile_cdn_url(
+                            db=db,
+                            profile_id=str(collaborator_profile.id),
+                            username=collaborator_profile.username
+                        )
+
+                        # Build enhanced collaborator data with complete AI analytics
+                        enhanced_collaborator = {
+                            # Basic info
+                            'username': collaborator_profile.username,
+                            'full_name': collaborator_profile.full_name or collab_basic['full_name'],
+                            'is_verified': collaborator_profile.is_verified,
+                            'collaboration_type': collab_basic['collaboration_type'],
+
+                            # Profile metrics
+                            'followers_count': collaborator_profile.followers_count or 0,
+                            'following_count': collaborator_profile.following_count or 0,
+                            'posts_count': collaborator_profile.posts_count or 0,
+                            'biography': collaborator_profile.biography or "",
+                            'profile_pic_url': collab_cdn_profile_url,
+                            'is_business_account': collaborator_profile.is_business_account,
+                            'detected_country': collaborator_profile.detected_country,
+
+                            # AI Analysis (same structure as main creator)
+                            'ai_primary_content_type': collaborator_profile.ai_primary_content_type,
+                            'ai_content_distribution': collaborator_profile.ai_content_distribution or {},
+                            'ai_avg_sentiment_score': collaborator_profile.ai_avg_sentiment_score,
+                            'ai_language_distribution': collaborator_profile.ai_language_distribution or {},
+                            'ai_content_quality_score': collaborator_profile.ai_content_quality_score,
+                            'engagement_rate': collaborator_profile.engagement_rate,
+                            'influence_score': collaborator_profile.influence_score,
+
+                            # Audience Demographics
+                            'audience_demographics': self._extract_audience_demographics(collaborator_profile)
+                        }
+
+                        collaborators.append(enhanced_collaborator)
+                    else:
+                        # Profile not found - add basic info only
+                        collaborators.append({
+                            'username': username,
+                            'full_name': collab_basic['full_name'],
+                            'is_verified': collab_basic['is_verified'],
+                            'collaboration_type': collab_basic['collaboration_type'],
+                            'followers_count': 0,
+                            'profile_pic_url': None,
+                            'note': 'Profile not analyzed yet'
+                        })
+
+                except Exception as e:
+                    logger.warning(f"Error getting collaborator data for {username}: {e}")
+                    # Add basic collaborator info if database lookup fails
+                    collaborators.append({
+                        'username': username,
+                        'full_name': collab_basic['full_name'],
+                        'is_verified': collab_basic['is_verified'],
+                        'collaboration_type': collab_basic['collaboration_type'],
+                        'error': str(e)
+                    })
+
+            return collaborators
+
+        except Exception as e:
+            logger.error(f"Error extracting enhanced collaborators: {e}")
+            return []  # Return empty array on error
 
     # =============================================================================
     # CAMPAIGN CREATOR OPERATIONS
@@ -1440,10 +1607,11 @@ class CampaignService:
             else:  # 'all'
                 start_date = campaign.created_at
 
-            # Get daily stats
+            # Get daily stats - Fix GROUP BY clause
+            date_trunc_expr = func.date_trunc('day', Post.created_at)
             result = await db.execute(
                 select(
-                    func.date_trunc('day', Post.created_at).label('date'),
+                    date_trunc_expr.label('date'),
                     func.sum(Post.likes_count + Post.comments_count).label('reach'),
                     func.sum(Post.likes_count).label('views'),  # Approximation
                     func.count(Post.id).label('impressions'),
@@ -1456,8 +1624,8 @@ class CampaignService:
                     CampaignPost.campaign_id == campaign_id,
                     Post.created_at >= start_date
                 ))
-                .group_by(func.date_trunc('day', Post.created_at))
-                .order_by('date')
+                .group_by(date_trunc_expr)
+                .order_by(date_trunc_expr)
             )
             daily_stats_raw = result.all()
 
