@@ -10,6 +10,8 @@ from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel
 import logging
+import asyncio
+from datetime import datetime, timezone
 
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
@@ -41,7 +43,17 @@ class UpdateCampaignRequest(BaseModel):
 
 class AddPostRequest(BaseModel):
     """Request model for adding a post to campaign"""
-    instagram_post_url: str
+    instagram_post_url: Optional[str] = None
+    post_url: Optional[str] = None  # Backward compatibility
+
+    def model_post_init(self, __context):
+        """Ensure one of the URL fields is provided"""
+        if not self.instagram_post_url and not self.post_url:
+            raise ValueError("Either instagram_post_url or post_url must be provided")
+
+        # Normalize to instagram_post_url for internal use
+        if not self.instagram_post_url and self.post_url:
+            self.instagram_post_url = self.post_url
 
 # =============================================================================
 # CAMPAIGN CRUD ENDPOINTS
@@ -366,21 +378,119 @@ async def add_post_to_campaign(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Add Instagram post to campaign
+    Add Instagram post to campaign using dedicated Post Analytics Workers
 
-    This endpoint:
-    1. Runs Post Analytics on the URL (Apify + AI analysis)
-    2. Auto-triggers Creator Analytics if new username detected
-    3. Adds post to campaign
-    4. Auto-populates campaign creators (via database trigger)
-
-    Note: This process takes 5-10 minutes for Post Analytics completion.
+    🚀 ALWAYS ASYNC: Uses background workers to keep backend responsive
+    ✅ Backend stays responsive - users can navigate freely
+    ✅ Returns immediately with job_id for status polling
+    ✅ No timeout issues on long analytics
+    ✅ Available for ALL subscription tiers
 
     Request Body:
-    - instagram_post_url: Instagram post URL (e.g., https://instagram.com/p/ABC123/)
+    - instagram_post_url: Instagram post URL
+
+    Response:
+    - job_id: Use this to poll for status and results
+    - status_url: Endpoint to check job status
+    - result_url: Endpoint to get final results when complete
     """
     try:
-        logger.info(f"🔍 Adding post to campaign {campaign_id}: {request.instagram_post_url}")
+        logger.info(f"🚀 Queueing post analytics for campaign {campaign_id} (background processing)")
+
+        # Queue the job and return immediately
+        from app.core.job_queue import job_queue, JobPriority, QueueType
+
+        job_params = {
+            "campaign_id": str(campaign_id),
+            "instagram_post_url": request.instagram_post_url,
+            "user_id": str(current_user.id),
+            "wait_for_full_analytics": True,
+            "requested_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        # Since POST_ANALYTICS_QUEUE is now open to all tiers, use a simple tier mapping
+        user_role = getattr(current_user, 'role', 'free')
+        user_subscription_tier = getattr(current_user, 'subscription_tier', None)
+        effective_tier = user_subscription_tier or user_role
+
+        # Map to queue tiers (all have access now)
+        tier_mapping = {
+            "free": "free",
+            "standard": "standard",
+            "professional": "standard",
+            "premium": "premium",
+            "brand_premium": "premium",
+            "enterprise": "premium",
+            "admin": "premium",
+            "superadmin": "premium"
+        }
+        user_tier = tier_mapping.get(str(effective_tier).lower(), 'free')
+
+        logger.info(f"🎫 User {current_user.email} tier: {effective_tier} → queue access: {user_tier}")
+
+        enqueue_result = await job_queue.enqueue_job(
+            user_id=str(current_user.id),
+            job_type="post_analytics_campaign",
+            params=job_params,
+            priority=JobPriority.HIGH,
+            queue_type=QueueType.POST_ANALYTICS_QUEUE,
+            user_tier=user_tier
+        )
+
+        # Check if enqueue operation was successful
+        if not enqueue_result.get('success', False):
+            logger.error(f"❌ Failed to queue post analytics job: {enqueue_result}")
+            error_message = enqueue_result.get('message', 'Failed to queue job')
+
+            # Handle quota exceeded error
+            if enqueue_result.get('error') == 'quota_exceeded':
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "error": "quota_exceeded",
+                        "message": error_message,
+                        "retry_after": enqueue_result.get('retry_after', 3600)
+                    }
+                )
+
+            # Handle queue full error
+            elif enqueue_result.get('error') == 'queue_full':
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "error": "queue_full",
+                        "message": error_message,
+                        "retry_after": 30
+                    }
+                )
+
+            # Generic error
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={"error": "enqueue_failed", "message": error_message}
+                )
+
+        # Extract job_id from successful response
+        job_id = enqueue_result['job_id']
+        logger.info(f"✅ Post analytics job {job_id} queued successfully")
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Post analytics job queued for background processing",
+            "status_url": f"/api/v1/jobs/{job_id}/status",
+            "result_url": f"/api/v1/jobs/{job_id}/result",
+            "estimated_time_seconds": 180,
+            "instructions": {
+                "poll_status": "Poll the status_url every 5 seconds to check progress",
+                "get_result": "Once status is 'completed', fetch results from result_url"
+            }
+        }
+
+        # LEGACY: Synchronous mode (deprecated)
+        logger.warning(f"⚠️ Using SYNC mode for campaign {campaign_id} (DEPRECATED - backend will block)")
 
         # STEP 1: Run Post Analytics (includes auto-trigger of Creator Analytics)
         post_analysis = await standalone_post_analytics_service.analyze_post_by_url(
@@ -389,25 +499,103 @@ async def add_post_to_campaign(
             user_id=current_user.id
         )
 
-        # STEP 1.5: CRITICAL FIX - Wait for Creator Analytics to complete for campaign accuracy
+        # STEP 1.5: CRITICAL FIX - Wait for FULL CREATOR ANALYTICS (Apify + CDN + AI) to complete for campaign accuracy
         creator_username = post_analysis.get("profile", {}).get("username")
         if creator_username:
-            logger.info(f"⏳ Waiting for Creator Analytics to complete for @{creator_username}...")
+            logger.info(f"⏳ Starting FULL Creator Analytics pipeline for @{creator_username}...")
 
-            # Import Creator Analytics service to ensure profile is complete
+            # Import Creator Analytics service to trigger complete pipeline
             from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
+            from app.services.unified_background_processor import UnifiedBackgroundProcessor
 
-            # Trigger and WAIT for complete Creator Analytics (synchronous for campaigns)
+            # Trigger Creator Analytics (Apify + Database storage)
             profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
                 username=creator_username,
                 db=db,
                 force_refresh=False  # Use cache if recent
             )
 
+            if not profile or profile.followers_count == 0:
+                logger.warning(f"⚠️ Initial Creator Analytics failed for @{creator_username}, retrying with force refresh...")
+
+                # RETRY with force refresh if initial attempt failed
+                try:
+                    profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
+                        username=creator_username,
+                        db=db,
+                        force_refresh=True  # Force fresh data
+                    )
+                    if profile and profile.followers_count > 0:
+                        logger.info(f"✅ Creator Analytics retry successful for @{creator_username}")
+                    else:
+                        logger.error(f"❌ Creator Analytics retry also failed for @{creator_username}")
+                        # Continue with campaign post addition even if analytics fails
+                except Exception as retry_error:
+                    logger.error(f"❌ Creator Analytics retry exception for @{creator_username}: {retry_error}")
+                    # Continue with campaign post addition even if analytics fails
+
             if profile and profile.followers_count > 0:
-                logger.info(f"✅ Creator Analytics complete: @{creator_username} - {profile.followers_count:,} followers")
+                profile_id = str(profile.id)
+                logger.info(f"📊 Creator Analytics triggered for @{creator_username} - {profile.followers_count:,} followers")
+
+                # NOW WAIT FOR FULL COMPLETION: Apify + CDN + AI (ALL 10 MODELS)
+                logger.info(f"⏳ STARTING OPTION A: Waiting for FULL COMPLETION (CDN + AI) for @{creator_username}...")
+
+                processor = UnifiedBackgroundProcessor()
+                max_wait_time = 300  # 5 minutes timeout
+                check_interval = 5   # Check every 5 seconds
+                elapsed_time = 0
+
+                # CRITICAL: Check initial status before entering loop
+                try:
+                    initial_status = await processor.get_profile_processing_status(profile_id)
+                    logger.info(f"🔍 OPTION A INITIAL STATUS for @{creator_username}:")
+                    logger.info(f"   Overall Complete: {initial_status.get('overall_complete', 'UNKNOWN')}")
+                    logger.info(f"   Current Stage: {initial_status.get('current_stage', 'UNKNOWN')}")
+                    logger.info(f"   Apify Complete: {initial_status.get('completion_summary', {}).get('apify_complete', 'UNKNOWN')}")
+                    logger.info(f"   CDN Complete: {initial_status.get('completion_summary', {}).get('cdn_complete', 'UNKNOWN')}")
+                    logger.info(f"   AI Complete: {initial_status.get('completion_summary', {}).get('ai_complete', 'UNKNOWN')}")
+
+                    if initial_status.get('overall_complete'):
+                        logger.info(f"🎉 @{creator_username} already COMPLETE - skipping wait loop")
+                    else:
+                        logger.info(f"⏳ @{creator_username} NOT complete - entering wait loop...")
+                except Exception as status_error:
+                    logger.error(f"❌ Failed to get initial status for @{creator_username}: {status_error}")
+
+                while elapsed_time < max_wait_time:
+                    try:
+                        # Check comprehensive processing status
+                        processing_status = await processor.get_profile_processing_status(profile_id)
+
+                        if processing_status['overall_complete']:
+                            logger.info(f"🎉 FULL CREATOR ANALYTICS COMPLETE for @{creator_username}!")
+                            logger.info(f"   ✅ Apify: {processing_status['completion_summary']['apify_complete']}")
+                            logger.info(f"   ✅ CDN: {processing_status['completion_summary']['cdn_complete']}")
+                            logger.info(f"   ✅ AI: {processing_status['completion_summary']['ai_complete']}")
+                            break
+                        else:
+                            current_stage = processing_status['current_stage']
+                            logger.info(f"🔄 @{creator_username} processing... Stage: {current_stage} (waiting {elapsed_time}s)")
+
+                            # Sleep and increment counter
+                            await asyncio.sleep(check_interval)
+                            elapsed_time += check_interval
+
+                    except Exception as status_error:
+                        logger.warning(f"⚠️ Status check error for @{creator_username}: {status_error}")
+                        await asyncio.sleep(check_interval)
+                        elapsed_time += check_interval
+
+                if elapsed_time >= max_wait_time:
+                    logger.warning(f"⏰ Timeout waiting for @{creator_username} completion after {max_wait_time}s")
+                    logger.warning(f"   Campaign post will be added with current data")
+                else:
+                    logger.info(f"✅ @{creator_username} FULLY PROCESSED in {elapsed_time}s - ready for campaign!")
             else:
-                logger.warning(f"⚠️ Creator Analytics incomplete for @{creator_username}")
+                logger.warning(f"⚠️ OPTION A SKIPPED for @{creator_username} - profile failed or has 0 followers")
+                logger.warning(f"   Profile exists: {profile is not None}")
+                logger.warning(f"   Followers count: {getattr(profile, 'followers_count', 'N/A') if profile else 'N/A'}")
 
         # STEP 2: Add post to campaign
         campaign_post = await campaign_service.add_post_to_campaign(
@@ -426,12 +614,14 @@ async def add_post_to_campaign(
 
         return {
             "success": True,
+            "mode": "sync",
             "data": {
                 "campaign_post_id": str(campaign_post.id),
                 "post_analysis": post_analysis,
                 "added_at": campaign_post.added_at.isoformat()
             },
-            "message": "Post added to campaign successfully"
+            "message": "Post added to campaign successfully",
+            "deprecation_notice": "⚠️ Synchronous mode is deprecated and will be removed. Please use async_mode=true for non-blocking operations."
         }
 
     except ValueError as e:

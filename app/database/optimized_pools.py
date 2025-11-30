@@ -105,6 +105,8 @@ class SupabaseOptimizedPools:
                     connect_args={
                         # Essential pgbouncer compatibility settings
                         'statement_cache_size': 0,  # Required for pgbouncer transaction pooling
+                        'prepared_statement_cache_size': 0,  # Additional safety for prepared statements
+                        'prepared_statement_name_func': None,  # Disable named prepared statements
                         'server_settings': {
                             'application_name': config['application_name']
                         }

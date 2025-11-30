@@ -18,6 +18,7 @@ from app.scrapers.apify_instagram_client import ApifyInstagramClient, ApifyProfi
 from app.database.unified_models import Post, Profile, AudienceDemographics
 from app.database.post_analytics_models import CampaignPostAnalytics
 from app.database.connection import get_session
+from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
 from app.core.config import settings
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
 
@@ -238,8 +239,8 @@ class StandalonePostAnalyticsService:
                 needs_analytics = await self._check_profile_needs_analytics(db, existing_profile)
 
                 if needs_analytics:
-                    logger.info(f"🔥 Profile {username} exists but incomplete - triggering full analytics")
-                    asyncio.create_task(self._trigger_full_creator_analytics(username, user_id))
+                    logger.info(f"🔥 Profile {username} exists but incomplete - queuing to dedicated worker")
+                    await self._queue_creator_analytics_to_dedicated_worker(username, user_id)
                 else:
                     logger.info(f"✅ Profile {username} has complete analytics - using existing data")
 
@@ -275,9 +276,8 @@ class StandalonePostAnalyticsService:
 
             logger.info(f"✅ Stub profile created for {username} (ID: {profile.id})")
 
-            # 🔥 TRIGGER FULL CREATOR ANALYTICS (non-blocking background task)
-            # IMPORTANT: Don't pass db session - background task creates its own
-            asyncio.create_task(self._trigger_full_creator_analytics(username, user_id))
+            # 🔥 QUEUE CREATOR ANALYTICS to dedicated worker (separate from post workflow)
+            await self._queue_creator_analytics_to_dedicated_worker(username, user_id)
 
             return profile
 
@@ -882,10 +882,8 @@ class StandalonePostAnalyticsService:
                         logger.info(f"🚀 AUTO-CREATING COLLABORATOR PROFILE: {collab_username}")
                         logger.info(f"   This will add their followers to campaign reach calculations")
 
-                        # Trigger full creator analytics (non-blocking background task)
-                        asyncio.create_task(
-                            self._trigger_full_creator_analytics(collab_username, user_id)
-                        )
+                        # Queue collaborator analytics to dedicated DISCOVERY worker (separate from main workflow)
+                        await self._queue_collaborator_analytics_to_dedicated_worker(collab_username, user_id)
 
                         logger.info(f"✅ Triggered creator analytics for collaborator: {collab_username}")
 
@@ -899,6 +897,109 @@ class StandalonePostAnalyticsService:
             logger.error(f"❌ Auto-create collaborator profiles failed: {e}")
             # Don't raise - this is a background enhancement, shouldn't break main flow
 
+
+    async def _queue_creator_analytics_to_dedicated_worker(self, username: str, user_id: Optional[UUID]):
+        """
+        Queue creator analytics to dedicated CREATOR ANALYTICS worker (separate from post workflow)
+
+        This prevents interference between post analytics and creator analytics by using
+        separate worker queues and database connections.
+        """
+        try:
+            from app.core.job_queue import job_queue, JobPriority, QueueType
+
+            job_id = await job_queue.enqueue_job(
+                user_id=str(user_id) if user_id else "system",
+                job_type="creator_analytics_dedicated",
+                params={
+                    "username": username,
+                    "context": "main_creator_search",
+                    "priority": "high"
+                },
+                priority=JobPriority.HIGH,  # High priority for main creator search
+                queue_type=QueueType.CREATOR_ANALYTICS_QUEUE  # Dedicated creator analytics queue
+            )
+
+            logger.info(f"✅ Creator Analytics Queued for Dedicated Worker:")
+            logger.info(f"   Username: {username}")
+            logger.info(f"   Job ID: {job_id}")
+
+            # BACKUP: Also trigger direct processing to ensure completion
+            logger.info(f"🔄 BACKUP: Also triggering direct processing to ensure completion...")
+            await self._trigger_creator_analytics_isolated(username, user_id)
+
+        except Exception as e:
+            logger.error(f"❌ Failed to queue creator analytics for {username}: {e}")
+            # Fallback: Direct processing if queue fails
+            await self._trigger_creator_analytics_isolated(username, user_id)
+
+    async def _queue_collaborator_analytics_to_dedicated_worker(self, username: str, user_id: Optional[UUID]):
+        """
+        Queue collaborator analytics to dedicated DISCOVERY worker (separate from main workflow)
+
+        Collaborators get lower priority and use discovery queue to avoid interfering
+        with main post analytics or creator analytics workflows.
+        """
+        try:
+            from app.core.job_queue import job_queue, JobPriority, QueueType
+
+            job_id = await job_queue.enqueue_job(
+                user_id=str(user_id) if user_id else "discovery",
+                job_type="creator_analytics_collaborator",
+                params={
+                    "username": username,
+                    "context": "collaborator_discovery",
+                    "priority": "low"
+                },
+                priority=JobPriority.LOW,  # Low priority for collaborators
+                queue_type=QueueType.DISCOVERY_QUEUE  # Dedicated discovery queue
+            )
+
+            logger.info(f"✅ Collaborator Analytics Queued for Discovery Worker:")
+            logger.info(f"   Username: {username}")
+            logger.info(f"   Job ID: {job_id}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to queue collaborator analytics for {username}: {e}")
+            logger.warning(f"⚠️ Collaborator {username} will be processed later by discovery system")
+
+    async def _trigger_creator_analytics_isolated(self, username: str, user_id: Optional[UUID]):
+        """
+        Isolated creator analytics processing using separate database session
+
+        This runs in isolation to prevent database conflicts with main post workflow.
+        """
+        logger.info(f"🔧 Starting isolated creator analytics for @{username}")
+
+        try:
+            # Use optimized pools for isolation from main workflow
+            from app.database.optimized_pools import optimized_pools
+
+            # Get isolated database session
+            async with optimized_pools.get_background_session() as isolated_db:
+                profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
+                    username=username,
+                    db=isolated_db,
+                    force_refresh=False
+                )
+
+                if profile:
+                    logger.info(f"✅ Isolated Creator Analytics Complete:")
+                    logger.info(f"   Source: {metadata.get('data_source', 'unknown')}")
+                    try:
+                        logger.info(f"   Followers: {profile.followers_count:,}")
+                        logger.info(f"   Posts: {profile.posts_count:,}")
+                        logger.info(f"   AI Analyzed: {profile.ai_profile_analyzed_at is not None}")
+                    except Exception as attr_error:
+                        logger.warning(f"   Profile attributes not accessible: {attr_error}")
+                        logger.info(f"   Profile ID: {profile.id}")
+                else:
+                    logger.error(f"❌ Isolated creator analytics failed for @{username}")
+
+        except Exception as e:
+            logger.error(f"❌ Isolated creator analytics failed for @{username}: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
 
 # Global service instance
 standalone_post_analytics_service = StandalonePostAnalyticsService()

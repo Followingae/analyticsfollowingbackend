@@ -442,7 +442,7 @@ async def get_user_dashboard(
                     FROM users
                     WHERE supabase_user_id = :user_id
                     LIMIT 1
-                """).execution_options(synchronize_session=False),
+                """).execution_options(prepare=False),
                 {"user_id": current_user.id}
             )
 
@@ -491,7 +491,7 @@ async def get_user_dashboard(
                     JOIN users u ON tm.user_id = u.id
                     WHERE u.supabase_user_id = :user_id
                     LIMIT 1
-                """).execution_options(synchronize_session=False),
+                """).execution_options(prepare=False),
                 {"user_id": current_user.id}
             )
 

@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
         print("Initializing Supabase-optimized connection pools...")
         from app.database.optimized_pools import optimized_pools
         await optimized_pools.initialize()
-        print("✓ Database pools initialized with complete workload isolation")
+        print("Database pools initialized with complete workload isolation")
         print(f"  - User API Pool: {optimized_pools.pool_config['user_api']['pool_size']} connections")
         print(f"  - Background Workers: {optimized_pools.pool_config['background_workers']['pool_size']} connections")
         print(f"  - AI Workers: {optimized_pools.pool_config['ai_workers']['pool_size']} connections")
@@ -112,7 +112,7 @@ async def lifespan(app: FastAPI):
         print("Initializing industry-standard job queue...")
         from app.core.job_queue import job_queue
         await job_queue.initialize()
-        print("✓ Job queue initialized with priority lanes and tenant quotas")
+        print("Job queue initialized with priority lanes and tenant quotas")
         print("  - Critical Queue: 50 jobs max, 3 workers, 30s timeout")
         print("  - High Priority: 200 jobs max, 5 workers, 2min timeout")
         print("  - Normal Priority: 500 jobs max, 8 workers, 5min timeout")
@@ -128,7 +128,7 @@ async def lifespan(app: FastAPI):
         redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
         r = redis.from_url(redis_url)
         r.ping()
-        print("✓ Redis connection successful - Multi-layer caching available")
+        print("Redis connection successful - Multi-layer caching available")
 
         # Test cache performance
         import time
@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
 
         # Start background monitoring
         monitoring_task = asyncio.create_task(start_monitoring_loop())
-        print("✓ System monitoring started with real-time metrics")
+        print("System monitoring started with real-time metrics")
         print("  - Health checks every 30 seconds")
         print("  - Performance metrics collection")
         print("  - Automatic alerting on thresholds")
@@ -158,22 +158,38 @@ async def lifespan(app: FastAPI):
         print(f"WARNING: Failed to start monitoring: {e}")
         print("System will run without monitoring")
 
-    # Initialize background workers (development mode)
+    # Initialize background workers (ALL modes)
     try:
         service_mode = os.getenv('SERVICE_MODE', 'api_only')
 
+        print("Starting background workers...")
+        from app.services.worker_manager import worker_manager
+
         if service_mode == 'api_only':
-            print("✓ API Service Mode - Background workers will run separately")
+            print("API Service Mode - Starting workers as separate processes")
             print("  - Fast handoff pattern enabled")
             print("  - Sub-50ms response time guarantee")
             print("  - Complete resource isolation")
+
+            # Start ALL workers (including Post Analytics Worker)
+            worker_startup_success = worker_manager.start_all_workers()
+
+            if worker_startup_success:
+                print("✅ Background workers started successfully in production mode")
+                print("  - AI Worker: Processing background AI analysis")
+                print("  - CDN Worker: Processing image optimization")
+                print("  - Post Analytics Worker: Processing async post analytics")
+            else:
+                print("⚠️ WARNING: Some background workers failed to start")
+                print("  - Post analytics may be blocking")
+                print("  - Background processing may be limited")
         else:
             print("Starting integrated background workers (development mode)...")
-            from app.services.worker_manager import worker_manager
 
+            # Start workers in integrated mode
             worker_startup_success = worker_manager.start_all_workers()
             if worker_startup_success:
-                print("✓ Background workers started in integrated mode")
+                print("Background workers started in integrated mode")
                 print("WARNING: This mode should not be used in production")
             else:
                 print("WARNING: Some background workers failed to start")
@@ -181,7 +197,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"WARNING: Worker initialization failed: {e}")
         print("Background processing may be limited")
-    
+
+    # START POST ANALYTICS WORKER (In-Process Async Worker)
+    try:
+        print("Starting Post Analytics Worker...")
+        from app.workers.post_analytics_worker import post_analytics_worker
+
+        # Start the worker as a background task in the current event loop
+        asyncio.create_task(post_analytics_worker.start())
+        print("[SUCCESS] Post Analytics Worker started successfully")
+        print("  - Processing async post analytics jobs")
+        print("  - Backend will remain responsive during post processing")
+
+    except Exception as e:
+        print(f"[WARNING] Failed to start Post Analytics Worker: {e}")
+        print("  - Post analytics will be blocking")
+        print("  - Users may experience slower response times")
+
     yield
     # Shutdown
     print("Shutting down Analytics Following Backend...")
@@ -466,6 +498,10 @@ app.include_router(post_analytics_router, prefix="/api/v1")
 from app.api.campaign_routes import router as campaign_router
 app.include_router(campaign_router, prefix="/api/v1")
 
+# Include Async Campaign routes (Non-blocking post analytics)
+from app.api.campaign_routes_async import router as campaign_async_router
+app.include_router(campaign_async_router, prefix="/api/v1/campaigns")
+
 # Include Campaign Workflow routes (USER & SUPERADMIN flows)
 from app.api.campaign_workflow_routes import router as campaign_workflow_router
 app.include_router(campaign_workflow_router, prefix="/api/v1")
@@ -717,8 +753,6 @@ async def _trigger_background_processing_if_needed(profile, username: str, db) -
             logger.info(f"[UNIFIED-TRIGGER] Profile {username} needs unified processing - TRIGGERING NOW")
 
             try:
-                import asyncio
-
                 # Start unified background processing pipeline (non-blocking)
                 processing_task = asyncio.create_task(
                     unified_background_processor.process_profile_complete_pipeline(
@@ -1764,7 +1798,6 @@ async def nuclear_unlocked_profiles(
         supabase_user_id = getattr(current_user, 'supabase_user_id', str(current_user.id))
         
         # Add timeout protection to prevent hanging
-        import asyncio
         profiles_result = await asyncio.wait_for(
             comprehensive_service.get_user_unlocked_profiles(db, supabase_user_id, page, page_size),
             timeout=10.0
@@ -1910,6 +1943,10 @@ app.include_router(superadmin_analytics_router)
 from app.api.worker_monitoring_routes import router as worker_monitoring_router
 app.include_router(worker_monitoring_router)
 
+# Debug Worker Routes (Admin Only) - For debugging background workers
+from app.api.debug_worker_routes import router as debug_worker_router
+app.include_router(debug_worker_router)
+
 # Include CDN Media and Health routes
 from app.api.cdn_media_routes import router as cdn_media_router
 from app.api.cdn_health_routes import router as cdn_health_router
@@ -1931,6 +1968,146 @@ app.include_router(cloudflare_mcp_router)
 @app.get("/")
 async def root():
     return {"message": "Analytics Following Backend API", "status": "running"}
+
+
+@app.get("/cleanup/stuck-jobs")
+async def cleanup_stuck_jobs():
+    """Emergency cleanup of stuck jobs that are blocking the queue"""
+    try:
+        from app.database.optimized_pools import optimized_pools
+        from sqlalchemy import text
+        from datetime import datetime, timezone, timedelta
+
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        async with optimized_pools.get_user_session() as session:
+            # Find stuck jobs
+            result = await session.execute(text("""
+                SELECT COUNT(*) as stuck_count
+                FROM job_queue
+                WHERE status IN ('queued', 'processing')
+                AND created_at < :one_hour_ago
+            """).execution_options(prepare=False), {"one_hour_ago": one_hour_ago})
+
+            stuck_count = result.fetchone().stuck_count
+
+            if stuck_count > 0:
+                # Clean up stuck jobs
+                await session.execute(text("""
+                    UPDATE job_queue
+                    SET
+                        status = 'failed',
+                        completed_at = NOW(),
+                        progress_message = 'Auto-failed: stuck for >1 hour'
+                    WHERE status IN ('queued', 'processing')
+                    AND created_at < :one_hour_ago
+                """).execution_options(prepare=False), {"one_hour_ago": one_hour_ago})
+
+                await session.commit()
+
+                return {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "action": "cleanup_completed",
+                    "stuck_jobs_cleaned": stuck_count,
+                    "message": f"Cleaned up {stuck_count} stuck jobs older than 1 hour"
+                }
+            else:
+                return {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "action": "no_cleanup_needed",
+                    "stuck_jobs_cleaned": 0,
+                    "message": "No stuck jobs found"
+                }
+    except Exception as e:
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": "cleanup_failed",
+            "error": str(e),
+            "message": "Failed to cleanup stuck jobs"
+        }
+
+
+@app.get("/monitor/workers")
+async def monitor_workers():
+    """Quick worker monitoring endpoint - no auth required for debugging"""
+    try:
+        from app.workers.unified_worker import celery_app
+        from app.core.job_queue import job_queue
+        from sqlalchemy import text
+        from datetime import datetime, timezone
+
+        # Check Celery status
+        celery_status = "unknown"
+        active_tasks = []
+        try:
+            celery_inspect = celery_app.control.inspect()
+            if celery_inspect:
+                active_tasks_info = celery_inspect.active()
+                if active_tasks_info:
+                    for worker, tasks in active_tasks_info.items():
+                        active_tasks.extend([{
+                            "worker": worker,
+                            "task_name": task.get("name"),
+                            "task_id": task.get("id")[:8] + "..." if task.get("id") else "unknown",
+                            "args": task.get("args", [])[:2]  # First 2 args only
+                        } for task in tasks])
+                celery_status = "healthy" if active_tasks_info is not None else "disconnected"
+        except Exception as e:
+            celery_status = f"error: {str(e)[:50]}"
+
+        # Check database job queue
+        job_queue_status = "unknown"
+        active_db_jobs = []
+        try:
+            from app.database.optimized_pools import optimized_pools
+            async with optimized_pools.get_user_session() as session:
+                result = await session.execute(text("""
+                    SELECT id, job_type, status, created_at, progress_percent, progress_message
+                    FROM job_queue
+                    WHERE status IN ('queued', 'processing')
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """).execution_options(prepare=False))
+
+                for row in result:
+                    # Convert UUID to string safely
+                    job_id = str(row.id) if row.id else "unknown"
+                    job_id_short = job_id[:8] + "..." if len(job_id) > 8 else job_id
+
+                    active_db_jobs.append({
+                        "id": job_id_short,
+                        "type": row.job_type,
+                        "status": row.status,
+                        "progress": f"{row.progress_percent or 0}%",
+                        "message": row.progress_message or "no message",
+                        "age_seconds": int((datetime.now(timezone.utc) - row.created_at).total_seconds()) if row.created_at else 0
+                    })
+                job_queue_status = "healthy"
+        except Exception as e:
+            job_queue_status = f"error: {str(e)[:50]}"
+
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "celery_workers": {
+                "status": celery_status,
+                "active_tasks": active_tasks,
+                "task_count": len(active_tasks)
+            },
+            "job_queue": {
+                "status": job_queue_status,
+                "active_jobs": active_db_jobs,
+                "job_count": len(active_db_jobs)
+            },
+            "system": "operational",
+            "message": f"Monitoring: {len(active_tasks)} Celery tasks, {len(active_db_jobs)} DB jobs"
+        }
+    except Exception as e:
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": str(e),
+            "system": "error",
+            "message": "Failed to get monitoring data"
+        }
 
 
 
@@ -2069,8 +2246,6 @@ async def database_health_check():
     from app.database.connection import async_engine
     from app.resilience.database_resilience import database_resilience
     from sqlalchemy import text
-    import asyncio
-    
     try:
         if not async_engine:
             return {

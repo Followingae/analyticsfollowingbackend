@@ -148,6 +148,7 @@ class EngagementRateService:
                 .where(Post.profile_id == profile_id)
                 .where(Post.engagement_rate.isnot(None))
                 .where(Post.engagement_rate > 0)
+                .execution_options(prepare=False)
             )
             
             avg_engagement, post_count = result.first()
@@ -184,7 +185,7 @@ class EngagementRateService:
             
             # Update the profile
             await db.execute(
-                text("UPDATE profiles SET engagement_rate = :rate, updated_at = now() WHERE id = :id"),
+                text("UPDATE profiles SET engagement_rate = :rate, updated_at = now() WHERE id = :id").execution_options(prepare=False),
                 {"rate": engagement_rate, "id": profile_id}
             )
             

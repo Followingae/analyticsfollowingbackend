@@ -169,23 +169,26 @@ class ComprehensiveDataService:
             print(f"Calling robust_storage.store_profile_robust...")
             profile, is_new = await store_profile_robust(db, username, raw_data)
             logger.info(f"SUCCESS: Profile {username} stored successfully: {'new' if is_new else 'updated'}")
-            print(f"Profile stored: ID={profile.id}, new={is_new}")
-            
+
+            # CRITICAL: Store profile ID immediately to avoid greenlet issues
+            profile_id = profile.id
+            print(f"Profile stored: ID={profile_id}, new={is_new}")
+
             # Extract user data for post processing
             user_data = self._extract_user_data_comprehensive(raw_data)
-            
+
             if user_data:
                 # Store all posts from profile
-                logger.info(f"Processing posts for profile {profile.id}")
-                print(f"DATABASE: Processing posts for profile {profile.id}")
-                posts_count = await self._store_profile_posts(db, profile.id, user_data)
+                logger.info(f"Processing posts for profile {profile_id}")
+                print(f"DATABASE: Processing posts for profile {profile_id}")
+                posts_count = await self._store_profile_posts(db, profile_id, user_data)
                 print(f"DATABASE: Stored {posts_count} posts")
 
                 # Store related profiles ONLY for user-initiated searches, NOT background analytics
                 if not is_background_discovery:
-                    logger.info(f"Processing related profiles for profile {profile.id}")
+                    logger.info(f"Processing related profiles for profile {profile_id}")
                     print(f"DATABASE: Processing related profiles...")
-                    related_count = await self._store_related_profiles(db, profile.id, user_data, is_background_discovery)
+                    related_count = await self._store_related_profiles(db, profile_id, user_data, is_background_discovery)
                     print(f"DATABASE: Stored {related_count} related profiles")
                 else:
                     logger.info(f"🚫 Skipping related profiles storage for background analytics")
@@ -193,15 +196,15 @@ class ComprehensiveDataService:
                     related_count = 0
 
                 # Store profile images metadata
-                logger.info(f"Processing profile images for profile {profile.id}")
+                logger.info(f"Processing profile images for profile {profile_id}")
                 print(f"DATABASE: Processing profile images metadata...")
-                await self._store_profile_images(db, profile.id, user_data)
+                await self._store_profile_images(db, profile_id, user_data)
                 print(f"DATABASE: Profile images metadata processed")
 
                 # Detect and store creator location
-                logger.info(f"Running location detection for profile {profile.id}")
+                logger.info(f"Running location detection for profile {profile_id}")
                 print(f"DATABASE: Running location detection...")
-                await self._detect_and_store_location(db, profile, user_data, raw_data)
+                await self._detect_and_store_location(db, profile_id, user_data, raw_data, username)
                 print(f"DATABASE: Location detection completed")
 
                 logger.info(f"SUCCESS: Complete profile data stored for {username}")
@@ -1917,7 +1920,7 @@ class ComprehensiveDataService:
             logger.error(f"Error checking team profile access: {e}")
             return None
 
-    async def _detect_and_store_location(self, db: AsyncSession, profile: Profile, user_data: Dict[str, Any], raw_data: Dict[str, Any]):
+    async def _detect_and_store_location(self, db: AsyncSession, profile_id: str, user_data: Dict[str, Any], raw_data: Dict[str, Any], username: str):
         """Detect creator's primary country and store in database"""
         try:
             # Prepare data for location detection
@@ -1944,9 +1947,9 @@ class ComprehensiveDataService:
             profile_data_for_detection["audience_top_countries"] = []
 
             # Run location detection
-            logger.info(f"Starting location detection for {profile.username}")
+            logger.info(f"Starting location detection for {username}")
             location_result = self.location_service.detect_country(profile_data_for_detection)
-            logger.info(f"Location detection completed for {profile.username}: {location_result}")
+            logger.info(f"Location detection completed for {username}: {location_result}")
 
             # Update profile with location data (only detected_country column exists)
             if location_result and location_result.get("country_code"):
@@ -1955,43 +1958,44 @@ class ComprehensiveDataService:
 
                 update_query = (
                     update(Profile)
-                    .where(Profile.id == profile.id)
+                    .where(Profile.id == profile_id)
                     .values(
                         detected_country=country_code
                     )
                 )
 
-                await db.execute(update_query)
+                await db.execute(update_query.execution_options(prepare=False))
                 await db.commit()
 
                 logger.info(
-                    f"✅ Location detected and saved for {profile.username}: "
+                    f"✅ Location detected and saved for {username}: "
                     f"{country_code} (confidence: {confidence:.2f})"
                 )
                 print(
-                    f"✅ LOCATION: {profile.username} -> "
+                    f"✅ LOCATION: {username} -> "
                     f"{country_code} ({confidence:.1%})"
                 )
             else:
-                logger.info(f"No location detected for {profile.username} - location_result: {location_result}")
-                print(f"❌ LOCATION: {profile.username} -> No country detected")
+                logger.info(f"No location detected for {username} - location_result: {location_result}")
+                print(f"❌ LOCATION: {username} -> No country detected")
 
                 # Mark as NULL to indicate no location detected (VARCHAR(2) field)
                 try:
                     await db.execute(
                         update(Profile)
-                        .where(Profile.id == profile.id)
-                        .values(detected_country=None)  # Use NULL instead of 'NONE' for VARCHAR(2) field
+                        .where(Profile.id == profile_id)
+                        .values(detected_country=None)
+                        .execution_options(prepare=False)
                     )
                     await db.commit()
-                    logger.info(f"Set detected_country=NULL for {profile.username} (no location found)")
+                    logger.info(f"Set detected_country=NULL for {username} (no location found)")
                 except Exception as db_error:
                     logger.error(f"Failed to set detected_country=NULL: {db_error}")
 
         except Exception as e:
-            logger.error(f"LOCATION DETECTION FAILED for {profile.username}: {e}")
+            logger.error(f"LOCATION DETECTION FAILED for {username}: {e}")
             logger.error(f"Location detection error details: {type(e).__name__}: {str(e)}")
-            print(f"🚨 LOCATION ERROR: {profile.username} -> {str(e)}")
+            print(f"🚨 LOCATION ERROR: {username} -> {str(e)}")
 
             # Log the full exception for debugging
             import traceback
@@ -2001,11 +2005,12 @@ class ComprehensiveDataService:
             try:
                 await db.execute(
                     update(Profile)
-                    .where(Profile.id == profile.id)
-                    .values(detected_country='XX')  # Use 'XX' instead of 'FAILED' for VARCHAR(2) field
+                    .where(Profile.id == profile_id)
+                    .values(detected_country='XX')
+                    .execution_options(prepare=False)
                 )
                 await db.commit()
-                logger.warning(f"Set detected_country='XX' for {profile.username} due to processing error")
+                logger.warning(f"Set detected_country='XX' for {username} due to processing error")
             except Exception as db_error:
                 logger.error(f"Failed to mark location detection failure in DB: {db_error}")
 

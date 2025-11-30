@@ -78,21 +78,44 @@ class BrandLogoService:
                 if image.format not in self.allowed_formats:
                     return False, None, f"Invalid image format. Allowed: {', '.join(self.allowed_formats)}"
 
-                # Convert to RGB if needed (for WEBP/PNG with transparency)
-                if image.mode not in ('RGB', 'RGBA'):
+                # Preserve transparency for PNG/WEBP, convert others to RGB
+                if image.mode == 'RGBA':
+                    # Keep RGBA for transparent images
+                    pass
+                elif image.mode not in ('RGB', 'RGBA'):
                     image = image.convert('RGB')
 
-                # Resize to standard size while maintaining aspect ratio
-                image.thumbnail(self.target_size, Image.Resampling.LANCZOS)
+                # Resize to exact target size with proper crop (no white borders)
+                # Calculate crop dimensions to maintain aspect ratio
+                img_width, img_height = image.size
+                target_width, target_height = self.target_size
 
-                # Create new image with white background for transparency
+                # Calculate scaling factor to fill the target size completely
+                scale_width = target_width / img_width
+                scale_height = target_height / img_height
+                scale = max(scale_width, scale_height)  # Use larger scale to fill completely
+
+                # Calculate new size after scaling
+                new_width = int(img_width * scale)
+                new_height = int(img_height * scale)
+
+                # Resize image
+                image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+                # Crop to exact target size (center crop)
+                if new_width > target_width or new_height > target_height:
+                    left = (new_width - target_width) // 2
+                    top = (new_height - target_height) // 2
+                    right = left + target_width
+                    bottom = top + target_height
+                    image = image.crop((left, top, right, bottom))
+
+                # Convert RGBA to RGB only for final WebP (preserve transparency in process)
                 if image.mode == 'RGBA':
-                    background = Image.new('RGB', self.target_size, (255, 255, 255))
-                    # Center the image
-                    offset = ((self.target_size[0] - image.size[0]) // 2,
-                             (self.target_size[1] - image.size[1]) // 2)
-                    background.paste(image, offset, mask=image.split()[3] if len(image.split()) > 3 else None)
-                    image = background
+                    # Create RGB image with white background only for WebP conversion
+                    rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                    rgb_image.paste(image, mask=image.split()[3])
+                    image = rgb_image
 
                 # Convert to WEBP for optimal CDN delivery
                 output = io.BytesIO()

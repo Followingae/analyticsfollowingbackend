@@ -211,7 +211,7 @@ class AIJobProcessor:
                 await session.execute(text(f"""
                     UPDATE job_queue SET {set_clause}
                     WHERE id = :job_id
-                """), update_data)
+                """).execution_options(prepare=False), update_data)
 
                 await session.commit()
 
@@ -225,7 +225,7 @@ class AIJobProcessor:
                 result = await session.execute(text("""
                     SELECT id, user_id, job_type, params, status, priority, created_at
                     FROM job_queue WHERE id = :job_id
-                """), {'job_id': job_id})
+                """).execution_options(prepare=False), {'job_id': job_id})
 
                 job_data = result.fetchone()
                 if not job_data:
@@ -328,7 +328,7 @@ async def _process_ai_batch_analysis_async(job_id: str) -> Dict[str, Any]:
                 AND ai_analyzed_at IS NULL
                 ORDER BY created_at DESC
                 LIMIT :batch_size
-            """), {
+            """).execution_options(prepare=False), {
                 'profile_id': profile_id,
                 'batch_size': batch_size
             })
@@ -475,7 +475,7 @@ async def _update_posts_ai_analysis(analysis_results: List[Dict[str, Any]]) -> N
                             ai_language_confidence = :language_confidence,
                             ai_analyzed_at = :analyzed_at
                         WHERE id = :post_id
-                    """), {
+                    """).execution_options(prepare=False), {
                         'category': result.get('ai_content_category'),
                         'category_confidence': result.get('ai_category_confidence'),
                         'sentiment': result.get('ai_sentiment'),

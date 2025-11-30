@@ -46,6 +46,7 @@ class QueueType(Enum):
     AI_QUEUE = "ai_queue"
     DISCOVERY_QUEUE = "discovery_queue"
     BULK_QUEUE = "bulk_queue"
+    POST_ANALYTICS_QUEUE = "post_analytics_queue"
 
 @dataclass
 class JobDefinition:
@@ -131,6 +132,12 @@ class IndustryStandardJobQueue:
                 'max_workers': 2,
                 'timeout_seconds': 1800,
                 'db_pool': 'discovery_workers'
+            },
+            QueueType.POST_ANALYTICS_QUEUE: {
+                'max_depth': 200,
+                'max_workers': 3,
+                'timeout_seconds': 300,
+                'db_pool': 'background_workers'
             }
         }
 
@@ -139,17 +146,17 @@ class IndustryStandardJobQueue:
             'free': {
                 'concurrent_jobs': 2,
                 'daily_limit': 50,
-                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE]
+                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.POST_ANALYTICS_QUEUE]  # Added POST_ANALYTICS_QUEUE for ALL users
             },
             'standard': {
                 'concurrent_jobs': 5,
                 'daily_limit': 500,
-                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE]
+                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE, QueueType.POST_ANALYTICS_QUEUE]
             },
             'premium': {
                 'concurrent_jobs': 10,
                 'daily_limit': 2000,
-                'allowed_queues': [QueueType.CRITICAL_QUEUE, QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE]
+                'allowed_queues': [QueueType.CRITICAL_QUEUE, QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE, QueueType.POST_ANALYTICS_QUEUE]
             },
             'enterprise': {
                 'concurrent_jobs': 20,
@@ -276,7 +283,7 @@ class IndustryStandardJobQueue:
         """
 
         async with optimized_pools.get_user_session() as session:
-            await session.execute(text(schema_sql))
+            await session.execute(text(schema_sql).execution_options(prepare=False))
             await session.commit()
 
         logger.info("Job queue database schema initialized")
@@ -411,7 +418,7 @@ class IndustryStandardJobQueue:
                 FROM job_queue
                 WHERE user_id = :user_id
                 AND status IN ('queued', 'processing')
-            """), {'user_id': user_id})
+            """).execution_options(prepare=False), {'user_id': user_id})
 
             counts = result.fetchone()
 
@@ -446,7 +453,7 @@ class IndustryStandardJobQueue:
                     :id, :user_id, :job_type, :status, :priority, :queue_name,
                     :params, :created_at, :estimated_duration, :idempotency_key, :user_tier
                 )
-            """), {
+            """).execution_options(prepare=False), {
                 'id': job.id,
                 'user_id': job.user_id,
                 'job_type': job.job_type,
@@ -481,10 +488,11 @@ class IndustryStandardJobQueue:
 
             # Map job types to Celery tasks
             task_mapping = {
-                'profile_analysis': 'unified_worker.process_profile_analysis',
-                'profile_analysis_background': 'unified_worker.process_profile_analysis_background',
-                'post_analysis': 'unified_worker.process_post_analysis',
-                'bulk_analysis': 'unified_worker.process_bulk_analysis'
+                'profile_analysis': 'app.workers.unified_worker.process_profile_analysis',
+                'profile_analysis_background': 'app.workers.unified_worker.process_profile_analysis_background',
+                'post_analysis': 'app.workers.unified_worker.process_post_analysis',
+                'post_analytics_campaign': 'app.workers.unified_worker.process_post_analytics_campaign',  # Added for campaign post analytics
+                'bulk_analysis': 'app.workers.unified_worker.process_bulk_analysis'
             }
 
             # Get the appropriate Celery task name
@@ -514,7 +522,8 @@ class IndustryStandardJobQueue:
             QueueType.CDN_QUEUE: 'cdn_processing',
             QueueType.AI_QUEUE: 'normal_priority',
             QueueType.DISCOVERY_QUEUE: 'discovery',
-            QueueType.BULK_QUEUE: 'bulk_processing'
+            QueueType.BULK_QUEUE: 'bulk_processing',
+            QueueType.POST_ANALYTICS_QUEUE: 'post_analytics'
         }
         return celery_queue_mapping.get(queue_type, 'normal_priority')
 
@@ -529,7 +538,7 @@ class IndustryStandardJobQueue:
                     worker_id, user_tier, progress_percent, progress_message
                 FROM job_queue
                 WHERE id = :job_id
-            """), {'job_id': job_id})
+            """).execution_options(prepare=False), {'job_id': job_id})
 
             job_data = result.fetchone()
             if not job_data:
@@ -573,7 +582,7 @@ class IndustryStandardJobQueue:
                 SELECT id, status, created_at
                 FROM job_queue
                 WHERE idempotency_key = :key
-            """), {'key': idempotency_key})
+            """).execution_options(prepare=False), {'key': idempotency_key})
 
             job = result.fetchone()
             if job:
@@ -712,7 +721,7 @@ class IndustryStandardJobQueue:
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'system_health': 'error',
                 'error': str(e),
-                'redis_connected': bool(self.redis_client and self.redis_client.ping())
+                'redis_connected': bool(self.redis_client)
             }
 
 # Global job queue instance

@@ -143,7 +143,7 @@ class JobProcessor:
                 await session.execute(text(f"""
                     UPDATE job_queue SET {set_clause}
                     WHERE id = :job_id
-                """), update_data)
+                """).execution_options(prepare=False), update_data)
 
                 await session.commit()
                 logger.info(f"Updated job {job_id} status to {status.value}")
@@ -158,7 +158,7 @@ class JobProcessor:
                 result = await session.execute(text("""
                     SELECT id, user_id, job_type, params, status, priority, created_at
                     FROM job_queue WHERE id = :job_id
-                """), {'job_id': job_id})
+                """).execution_options(prepare=False), {'job_id': job_id})
 
                 job_data = result.fetchone()
                 if not job_data:
@@ -378,7 +378,7 @@ async def _wait_for_analytics_completion(
                         posts_count,
                         (SELECT COUNT(*) FROM posts WHERE profile_id = p.id AND ai_analyzed_at IS NOT NULL) as ai_posts_count
                     FROM profiles p WHERE p.id = :profile_id
-                """), {'profile_id': profile_id})
+                """).execution_options(prepare=False), {'profile_id': profile_id})
 
                 profile_data = result.fetchone()
 
@@ -521,6 +521,138 @@ async def _process_post_analysis_async(job_id: str) -> Dict[str, Any]:
             pass
 
         raise
+
+# ============================================================================
+# CELERY TASKS - CAMPAIGN POST ANALYTICS
+# ============================================================================
+
+@celery_app.task(bind=True, max_retries=3, default_retry_delay=60)
+def process_post_analytics_campaign(self, job_id: str):
+    """Process post analytics for campaign with background processing"""
+
+    try:
+        logger.info(f"🚀 Starting campaign post analytics job {job_id}")
+
+        # Use async runner for the actual processing
+        asyncio.run(_process_post_analytics_campaign_async(job_id))
+
+        logger.info(f"✅ Campaign post analytics job {job_id} completed successfully")
+        return {
+            'status': 'success',
+            'job_id': job_id,
+            'message': 'Campaign post analytics completed'
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Campaign post analytics job {job_id} failed: {e}")
+
+        # Update job status to failed
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    job_processor.update_job_status(
+                        job_id,
+                        JobStatus.FAILED,
+                        error_details={'error': str(e), 'task_retry': self.request.retries}
+                    )
+                )
+            finally:
+                loop.close()
+        except Exception:
+            pass
+
+        # Retry logic
+        if self.request.retries < self.max_retries:
+            logger.info(f"🔄 Retrying campaign post analytics job {job_id} (attempt {self.request.retries + 1})")
+            raise self.retry(countdown=60)
+
+        raise
+
+
+async def _process_post_analytics_campaign_async(job_id: str):
+    """Async implementation of campaign post analytics processing"""
+
+    # Get job parameters from database
+    async with optimized_pools.get_user_session() as session:
+        result = await session.execute(
+            text("SELECT params FROM job_queue WHERE id = :job_id").execution_options(prepare=False),
+            {"job_id": job_id}
+        )
+        job_row = result.fetchone()
+
+        if not job_row:
+            raise Exception(f"Job {job_id} not found")
+
+        params = json.loads(job_row.params)
+
+        # Extract job parameters
+        campaign_id = params['campaign_id']
+        instagram_post_url = params['instagram_post_url']
+        user_id = params['user_id']
+
+        logger.info(f"📊 Processing post {instagram_post_url} for campaign {campaign_id}")
+
+        # Update job status to processing
+        await job_processor.update_job_status(
+            job_id,
+            JobStatus.PROCESSING,
+            progress_percent=0,
+            progress_message="Processing post analytics"
+        )
+
+        # Step 1: Run post analytics
+        from app.services.standalone_post_analytics_service import standalone_post_analytics_service
+
+        await job_processor.update_job_status(
+            job_id, JobStatus.PROCESSING,
+            progress_percent=30,
+            progress_message="Analyzing Instagram post"
+        )
+
+        async with optimized_pools.get_user_session() as db_session:
+            post_analysis = await standalone_post_analytics_service.analyze_post_by_url(
+                post_url=instagram_post_url,
+                db=db_session,
+                user_id=user_id
+            )
+
+            # Step 2: Add post to campaign
+            from app.services.campaign_service import campaign_service
+
+            await job_processor.update_job_status(
+                job_id, JobStatus.PROCESSING,
+                progress_percent=70,
+                progress_message="Adding post to campaign"
+            )
+
+            campaign_post = await campaign_service.add_post_to_campaign(
+                db=db_session,
+                campaign_id=campaign_id,
+                post_data=post_analysis,
+                user_id=user_id
+            )
+
+            # Update job status to completed
+            result = {
+                "success": True,
+                "campaign_post_id": str(campaign_post.id) if campaign_post else None,
+                "post_url": instagram_post_url,
+                "campaign_id": campaign_id,
+                "completion_time": datetime.now(timezone.utc).isoformat()
+            }
+
+            await job_processor.update_job_status(
+                job_id,
+                JobStatus.COMPLETED,
+                progress_percent=100,
+                progress_message="Post added to campaign successfully",
+                result=result
+            )
+
+            logger.info(f"✅ Post added to campaign {campaign_id} successfully")
+
 
 # ============================================================================
 # CELERY TASKS - BULK ANALYSIS

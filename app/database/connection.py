@@ -164,7 +164,8 @@ async def init_database():
                 execution_options={
                     "compiled_cache": {},
                     "autocommit": False,
-                    "isolation_level": None
+                    "isolation_level": None,
+                    "prepare": False  # NUCLEAR: Disable prepared statements globally
                 },
                 connect_args={
                     "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
@@ -173,7 +174,7 @@ async def init_database():
                     },
                     "statement_cache_size": 0,
                     "prepared_statement_cache_size": 0,
-                    "prepared_statement_name_func": lambda: ""  # Empty string = unnamed statements (pgbouncer compatible)
+                    "prepared_statement_name_func": None  # None = no prepared statements
                 }
             )
             SessionLocal = sessionmaker(
@@ -191,11 +192,16 @@ async def init_database():
         
         # Create SQLAlchemy engines with UNIFIED configuration
         # Handle both postgres:// and postgresql:// formats from Supabase
+        # Add URL parameters to force complete prepared statement disabling
         async_url = settings.DATABASE_URL
         if async_url.startswith("postgres://"):
             async_url = async_url.replace("postgres://", "postgresql+asyncpg://")
         else:
             async_url = async_url.replace("postgresql://", "postgresql+asyncpg://")
+
+        # Add URL parameters to completely disable prepared statements
+        separator = "&" if "?" in async_url else "?"
+        async_url += f"{separator}statement_cache_size=0&prepared_statement_cache_size=0"
 
         # SESSION POOLER COMPATIBLE: Configuration for pgbouncer transaction mode
         # FORCE: Use the most basic connection with zero prepared statements
@@ -210,17 +216,18 @@ async def init_database():
             query_cache_size=0,
             execution_options={
                 "compiled_cache": {},  # No compilation cache
-                "autocommit": False
+                "autocommit": False,
+                "prepare": False  # NUCLEAR: Disable prepared statements globally for ALL queries
             },
             connect_args={
                 "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
                 "server_settings": {
                     "application_name": "analytics_following_no_prepare"
                 },
-                # PGBOUNCER FIX: Disable all statement preparation for transaction pooling mode
+                # COMPREHENSIVE PGBOUNCER FIX: Complete prepared statement disabling
                 "statement_cache_size": 0,
                 "prepared_statement_cache_size": 0,
-                "prepared_statement_name_func": lambda: ""  # Empty string = unnamed statements (pgbouncer compatible)
+                "prepared_statement_name_func": None  # None = no prepared statements at all
             }
         )
         
@@ -272,7 +279,8 @@ async def init_database():
                     execution_options={
                         "compiled_cache": {},
                         "autocommit": False,
-                        "isolation_level": None
+                        "isolation_level": None,
+                        "prepare": False  # NUCLEAR: Disable prepared statements globally
                     },
                     connect_args={
                         "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
@@ -281,7 +289,7 @@ async def init_database():
                         },
                         "statement_cache_size": 0,
                         "prepared_statement_cache_size": 0,
-                        "prepared_statement_name_func": lambda: ""  # Empty string = unnamed statements (pgbouncer compatible)
+                        "prepared_statement_name_func": None  # None = no prepared statements
                     }
                 )
                 SessionLocal = sessionmaker(

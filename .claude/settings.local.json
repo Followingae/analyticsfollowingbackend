@@ -52,7 +52,10 @@
       "Bash(do echo \"=== $file ===\" grep -A1 \"@router\\.\" \"$file\")",
       "Bash(./redis-server.exe:*)",
       "Bash(pkill:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(celery:*)",
+      "Bash(echo $env:VIRTUAL_ENV)",
+      "Bash(netstat:*)"
     ],
     "deny": [],
     "ask": [],

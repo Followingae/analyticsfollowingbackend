@@ -653,7 +653,7 @@ class ProductionSupabaseAuthService:
                         logger.warning(f"Database sync failed during token validation: {db_error}")
                         # Continue authentication even if database sync fails
                     
-                    user_in_db = self._create_user_in_db_from_supabase(user_response.user)
+                    user_in_db = await self._create_user_in_db_from_supabase(user_response.user)
                     
                     # Cache the successful JWT validation in Redis for 1 hour
                     await self._cache_jwt_validation(token_hash, user_in_db, user_response.user)
@@ -681,7 +681,7 @@ class ProductionSupabaseAuthService:
                         logger.warning(f"Database sync failed during session validation: {db_error}")
                         # Continue authentication even if database sync fails
                     
-                    user_in_db = self._create_user_in_db_from_supabase(user_response.user)
+                    user_in_db = await self._create_user_in_db_from_supabase(user_response.user)
                     
                     # Cache the successful JWT validation in Redis
                     await self._cache_jwt_validation(token_hash, user_in_db, user_response.user)
@@ -716,10 +716,10 @@ class ProductionSupabaseAuthService:
                 detail="Authentication failed due to server error"
             )
     
-    def _create_user_in_db_from_supabase(self, user) -> UserInDB:
-        """Helper method to create UserInDB from Supabase user object"""
+    async def _create_user_in_db_from_supabase(self, user) -> UserInDB:
+        """Helper method to create UserInDB from Supabase user object with database lookup"""
         user_metadata = user.user_metadata or {}
-        
+
         # Handle datetime parsing safely
         try:
             if user.created_at:
@@ -734,28 +734,84 @@ class ProductionSupabaseAuthService:
         except (ValueError, TypeError, AttributeError) as e:
             logger.warning(f"Failed to parse created_at in _create_user_in_db_from_supabase: {e}, using current time")
             created_at = datetime.now()
-        
+
+        # CRITICAL FIX: Fetch actual user data from database instead of relying on Supabase metadata
+        database_user_data = await self._fetch_database_user_data(user.id)
+
+        if database_user_data:
+            # Use database values (authoritative source)
+            role_value = database_user_data['role']
+            subscription_tier = database_user_data.get('subscription_tier')
+            user_status = database_user_data.get('status', 'active')
+            full_name = database_user_data.get('full_name') or user_metadata.get("full_name", "")
+            logger.info(f"🔍 Database user data loaded: role={role_value}, subscription_tier={subscription_tier}")
+        else:
+            # Fallback to Supabase metadata if database lookup fails
+            role_value = user_metadata.get("role", "free")
+            subscription_tier = None
+            user_status = "active"
+            full_name = user_metadata.get("full_name", "")
+            logger.warning(f"⚠️ Database lookup failed, using Supabase metadata: role={role_value}")
+
         # Validate role
-        role_value = user_metadata.get("role", "free")
         try:
             user_role = UserRole(role_value)
         except ValueError:
             logger.warning(f"Invalid role '{role_value}' for user {user.id}, defaulting to 'free'")
             user_role = UserRole.FREE
-            
+
+        # Validate status
+        try:
+            user_status_enum = UserStatus(user_status)
+        except ValueError:
+            logger.warning(f"Invalid status '{user_status}' for user {user.id}, defaulting to 'active'")
+            user_status_enum = UserStatus.ACTIVE
+
         user_in_db = UserInDB(
             id=user.id,
             supabase_user_id=user.id,
             email=user.email,
-            full_name=user_metadata.get("full_name", ""),
+            full_name=full_name,
             role=user_role,
-            status=UserStatus.ACTIVE,
+            status=user_status_enum,
             created_at=created_at,
             updated_at=datetime.now(),
             last_login=datetime.now()
         )
-        
+
+        # Add subscription_tier as dynamic attribute for tier detection
+        if subscription_tier:
+            setattr(user_in_db, 'subscription_tier', subscription_tier)
+
         return user_in_db
+
+    async def _fetch_database_user_data(self, supabase_user_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch complete user data from the database"""
+        try:
+            import asyncpg
+            from app.core.settings import settings
+
+            conn = await asyncpg.connect(settings.DATABASE_URL)
+            try:
+                # Fetch complete user data including subscription_tier
+                user_data = await conn.fetchrow("""
+                    SELECT id, email, role, subscription_tier, status, full_name, created_at, updated_at
+                    FROM users
+                    WHERE supabase_user_id = $1
+                """, supabase_user_id)
+
+                if user_data:
+                    return dict(user_data)
+                else:
+                    logger.warning(f"No database user found for Supabase ID: {supabase_user_id}")
+                    return None
+
+            finally:
+                await conn.close()
+
+        except Exception as e:
+            logger.error(f"Failed to fetch database user data for {supabase_user_id}: {e}")
+            return None
     
     async def _cache_jwt_validation(self, token_hash: str, user_in_db: UserInDB, supabase_user) -> None:
         """Cache JWT validation result in Redis for <100ms authentication"""
@@ -771,6 +827,7 @@ class ProductionSupabaseAuthService:
                     'full_name': user_in_db.full_name,
                     'role': user_in_db.role.value,
                     'status': user_in_db.status.value,
+                    'subscription_tier': getattr(user_in_db, 'subscription_tier', None),
                     'created_at': user_in_db.created_at.isoformat() if user_in_db.created_at else None,
                     'last_login': user_in_db.last_login.isoformat() if user_in_db.last_login else None
                 }
@@ -803,7 +860,7 @@ class ProductionSupabaseAuthService:
     
     def _user_response_to_user_in_db(self, user_data: Dict[str, Any]) -> UserInDB:
         """Convert cached user data back to UserInDB object"""
-        return UserInDB(
+        user_in_db = UserInDB(
             id=user_data['id'],
             supabase_user_id=user_data['supabase_user_id'],
             email=user_data['email'],
@@ -814,6 +871,13 @@ class ProductionSupabaseAuthService:
             updated_at=datetime.now(),
             last_login=datetime.fromisoformat(user_data['last_login']) if user_data['last_login'] else datetime.now()
         )
+
+        # Add subscription_tier as dynamic attribute if available in cached data
+        subscription_tier = user_data.get('subscription_tier')
+        if subscription_tier:
+            setattr(user_in_db, 'subscription_tier', subscription_tier)
+
+        return user_in_db
     
     async def _cache_dashboard_stats(self, user_id: str, dashboard_stats) -> None:
         """Cache dashboard statistics in Redis for <500ms subsequent loads"""
