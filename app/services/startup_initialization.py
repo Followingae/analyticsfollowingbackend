@@ -15,7 +15,7 @@ import asyncio
 from typing import Dict, Any
 from datetime import datetime, timezone
 
-from app.services.ai.ai_manager_singleton import ai_manager
+from app.services.ai.ai_manager_wrapper import ai_manager
 from app.services.ai.comprehensive_ai_manager import comprehensive_ai_manager
 from app.services.ai.bulletproof_content_intelligence import bulletproof_content_intelligence
 # Robust creator search service removed - using Simple API endpoints

@@ -121,13 +121,17 @@ class User(Base):
     phone_number = Column(Text)  # NEW: For settings form
     bio = Column(Text)         # NEW: For settings form
     profile_picture_url = Column(Text)  # Profile picture URL
-    role = Column(Text, nullable=False, default='free', index=True)  # free, premium, admin, super_admin
+    # Role is now separate from subscription tier - only user or super_admin
+    role = Column(Text, nullable=False, default='user', index=True)  # user, super_admin
     status = Column(Text, nullable=False, default='active', index=True)  # active, inactive, suspended, pending
-    
-    # Credits and billing
-    credits = Column(Integer, nullable=False, default=10)
-    credits_used_this_month = Column(Integer, nullable=False, default=0)
-    subscription_tier = Column(Text, default='free')  # free, basic, premium, enterprise
+
+    # Subscription and billing
+    subscription_tier = Column(Text, nullable=False, default='free', index=True)  # free, standard, premium
+    billing_type = Column(Text, nullable=False, default='online_payment')  # online_payment (self-enrolled) or admin_managed (admin-created)
+
+    # Credits and usage - managed through credit_wallets table
+    credits = Column(Integer, nullable=False, default=10)  # Legacy field, kept for compatibility
+    credits_used_this_month = Column(Integer, nullable=False, default=0)  # Legacy field
     subscription_expires_at = Column(DateTime(timezone=True))
     stripe_customer_id = Column(Text, unique=True, nullable=True, index=True)  # Stripe customer ID
     
@@ -175,12 +179,15 @@ class User(Base):
     # Constraints
     __table_args__ = (
         CheckConstraint("email ~ '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$'", name='check_email_format'),
-        CheckConstraint("role IN ('free', 'premium', 'admin', 'super_admin')", name='check_role_valid'),
+        CheckConstraint("role IN ('user', 'super_admin')", name='check_role_valid'),
+        CheckConstraint("subscription_tier IN ('free', 'standard', 'premium')", name='check_subscription_tier_valid'),
+        CheckConstraint("billing_type IN ('stripe', 'offline')", name='check_billing_type_valid'),
         CheckConstraint("status IN ('active', 'inactive', 'suspended', 'pending')", name='check_status_valid'),
         CheckConstraint("credits >= 0", name='check_credits_non_negative'),
         Index('idx_users_email_unique', 'email'),
         Index('idx_users_supabase_id', 'supabase_user_id'),
         Index('idx_users_role_status', 'role', 'status'),
+        Index('idx_users_subscription_billing', 'subscription_tier', 'billing_type'),
         Index('idx_users_created_at', 'created_at'),
         Index('idx_users_last_login', 'last_login'),
     )

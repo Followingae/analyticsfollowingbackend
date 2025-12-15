@@ -25,17 +25,29 @@ class UserStatus(str, Enum):
     PENDING = "pending"
 
 
+class BillingType(str, Enum):
+    """Billing type for user accounts"""
+    ADMIN_MANAGED = "admin_managed"  # Admin creates and manages billing
+    ONLINE_PAYMENT = "online_payment"  # User pays directly through Stripe
+
+
 class UserBase(BaseModel):
     """Base user model"""
     email: EmailStr
     full_name: Optional[str] = None
     role: UserRole = UserRole.FREE
     status: UserStatus = UserStatus.ACTIVE
+    billing_type: BillingType = BillingType.ONLINE_PAYMENT
 
 
 class UserCreate(UserBase):
     """User creation model"""
     password: str = Field(..., min_length=8)
+    company: Optional[str] = None
+    job_title: Optional[str] = None
+    phone_number: Optional[str] = None
+    timezone: Optional[str] = None
+    language: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
@@ -44,6 +56,12 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     role: Optional[UserRole] = None
     status: Optional[UserStatus] = None
+    billing_type: Optional[BillingType] = None
+    company: Optional[str] = None
+    job_title: Optional[str] = None
+    phone_number: Optional[str] = None
+    timezone: Optional[str] = None
+    language: Optional[str] = None
 
 
 class UserInDB(UserBase):
@@ -66,7 +84,8 @@ class UserResponse(UserBase):
     created_at: datetime
     last_login: Optional[datetime] = None
     avatar_config: Optional[Dict[str, Any]] = None
-    
+    updated_at: Optional[datetime] = None
+
     # Profile information fields
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -74,10 +93,13 @@ class UserResponse(UserBase):
     job_title: Optional[str] = None
     phone_number: Optional[str] = None
     bio: Optional[str] = None
-    
+
     # Preferences
     timezone: Optional[str] = "UTC"
     language: Optional[str] = "en"
+
+    # Billing and subscription info
+    stripe_customer_id: Optional[str] = None
 
 
 class LoginRequest(BaseModel):

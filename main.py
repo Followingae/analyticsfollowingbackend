@@ -486,9 +486,7 @@ app.include_router(lists_router, prefix="/api/v1")
 from app.api.user_discovery_routes import router as user_discovery_router
 app.include_router(user_discovery_router)
 
-# Include Admin Repair routes (Profile Completeness & Discovery System)
-from app.api.admin_repair_routes import router as admin_repair_router
-app.include_router(admin_repair_router)  # Router already has /api/v1/admin/repair prefix
+# Admin repair routes removed during cleanup
 
 # Include Post Analytics routes
 from app.api.post_analytics_routes import router as post_analytics_router
@@ -515,8 +513,7 @@ from app.api.transaction_monitoring_routes import router as transaction_monitori
 app.include_router(transaction_monitoring_router)
 
 # Include Quick Fix routes for urgent database operations
-from quick_fix_endpoint import router as quick_fix_router
-app.include_router(quick_fix_router, prefix="/api/v1")
+# Quick fix endpoint removed during cleanup
 
 # Include Campaign AI Insights routes
 from app.api.campaign_routes_ai_insights import router as campaign_ai_router
@@ -1929,11 +1926,11 @@ app.include_router(system_health_router)
 # Include Super Admin Dashboard Routes - COMPREHENSIVE ADMIN ACCESS
 from app.api.admin.superadmin_dashboard_routes import router as superadmin_dashboard_router
 from app.api.admin.superadmin_comprehensive_extension import router as superadmin_extension_router
+from app.api.admin.superadmin_user_management import router as superadmin_user_mgmt_router
 app.include_router(superadmin_dashboard_router, prefix="/api")
 app.include_router(superadmin_extension_router, prefix="/api")
-# CDN Sync Repair Routes (Superadmin Only)
-from app.api.v1.admin.cdn_repair import router as cdn_repair_router
-app.include_router(cdn_repair_router, prefix="/api/v1")
+app.include_router(superadmin_user_mgmt_router)  # Already has /api/v1/admin/superadmin prefix
+# CDN repair routes removed during cleanup
 
 # Superadmin Analytics Completeness Routes (Superadmin Only)
 from app.api.superadmin_analytics_routes import router as superadmin_analytics_router
@@ -1943,9 +1940,7 @@ app.include_router(superadmin_analytics_router)
 from app.api.worker_monitoring_routes import router as worker_monitoring_router
 app.include_router(worker_monitoring_router)
 
-# Debug Worker Routes (Admin Only) - For debugging background workers
-from app.api.debug_worker_routes import router as debug_worker_router
-app.include_router(debug_worker_router)
+# Debug worker routes removed during cleanup
 
 # Include CDN Media and Health routes
 from app.api.cdn_media_routes import router as cdn_media_router

@@ -23,8 +23,11 @@ security = HTTPBearer()
 
 # Redis connection for caching permissions and session management
 try:
+    import redis
     redis_client = redis.from_url(settings.REDIS_URL) if hasattr(settings, 'REDIS_URL') else None
-except:
+except ImportError:
+    redis_client = None
+except Exception:
     redis_client = None
 
 class RoleLevel:
@@ -72,10 +75,28 @@ class FeatureAccessError(HTTPException):
 
 class RoleBasedAuthService:
     """Comprehensive role-based authentication and authorization service"""
-    
+
     def __init__(self):
         self.permission_cache_ttl = 300  # 5 minutes
         self.user_cache_ttl = 600  # 10 minutes
+
+    @staticmethod
+    async def get_current_user(
+        credentials: HTTPAuthorizationCredentials = Depends(security),
+        db: AsyncSession = Depends(get_db)
+    ) -> dict:
+        """Simple method to get current user as dict"""
+        from app.middleware.auth_middleware import get_current_user
+
+        # Get user from auth middleware
+        user = await get_current_user(credentials)
+
+        # Convert to dict for compatibility
+        return {
+            "id": user.id,
+            "email": user.email,
+            "role": getattr(user, 'role', 'user'),
+        }
         
     async def get_user_with_permissions(
         self, 

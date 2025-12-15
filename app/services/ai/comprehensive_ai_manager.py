@@ -61,7 +61,7 @@ except ImportError:
     logger.warning("Statistical dependencies not available (scipy, networkx)")
 
 # Existing AI Infrastructure
-from app.services.ai.ai_manager_singleton import ai_manager
+from app.services.ai.ai_manager_wrapper import ai_manager
 from app.services.redis_cache_service import redis_cache
 from app.database.connection import get_session
 from app.database.unified_models import Profile, Post

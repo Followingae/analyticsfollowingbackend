@@ -14,7 +14,7 @@ from sqlalchemy import text, select, update
 from app.database.connection import get_session
 from app.services.ai.comprehensive_ai_manager import comprehensive_ai_manager, AIModelType
 from app.services.ai.comprehensive_ai_models_part2 import AdvancedAIModelImplementations
-from app.services.ai.ai_manager_singleton import ai_manager
+from app.services.ai.ai_manager_wrapper import ai_manager
 from app.services.redis_cache_service import redis_cache
 
 logger = logging.getLogger(__name__)

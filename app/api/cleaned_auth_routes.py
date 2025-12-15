@@ -14,9 +14,9 @@ import logging
 import uuid
 
 from app.models.auth import (
-    UserCreate, UserResponse, LoginRequest, LoginResponse, UserInDB, 
+    UserCreate, UserResponse, LoginRequest, LoginResponse, UserInDB,
     UserDashboardStats, UserSearchHistoryResponse, UserDashboardResponse,
-    TeamInfo, SubscriptionInfo
+    TeamInfo, SubscriptionInfo, BillingType, UserStatus
 )
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
 from app.services.resilient_auth_service import resilient_auth_service
@@ -35,49 +35,142 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 # CORE AUTHENTICATION ENDPOINTS (Production Ready)
 # =============================================================================
 
-@router.post("/register")
+@router.get("/billing-types")
+async def get_billing_types():
+    """
+    Get available billing types for user registration
+
+    Returns available billing management options for new user accounts.
+
+    Returns:
+    - List of billing types with descriptions
+    - Default billing type
+    - Next steps for each type
+    """
+    return {
+        "billing_types": [
+            {
+                "value": BillingType.ONLINE_PAYMENT.value,
+                "label": "Pay Online (Instant Activation)",
+                "description": "Pay directly through Stripe with instant account activation",
+                "default": True,
+                "next_step": "email_confirmation_and_payment",
+                "features": [
+                    "Instant account activation",
+                    "Secure Stripe payment processing",
+                    "Immediate access after payment",
+                    "Self-service billing management"
+                ]
+            },
+            {
+                "value": BillingType.ADMIN_MANAGED.value,
+                "label": "Admin Managed Billing",
+                "description": "Account and billing managed by our team",
+                "default": False,
+                "next_step": "admin_setup",
+                "features": [
+                    "Custom billing arrangements",
+                    "Enterprise account setup",
+                    "Dedicated account management",
+                    "Flexible payment terms"
+                ]
+            }
+        ],
+        "default_billing_type": BillingType.ONLINE_PAYMENT.value,
+        "recommendations": {
+            "individual_users": BillingType.ONLINE_PAYMENT.value,
+            "enterprise_clients": BillingType.ADMIN_MANAGED.value,
+            "custom_arrangements": BillingType.ADMIN_MANAGED.value
+        }
+    }
+
+@router.post("/register", status_code=201)
 async def register_user(user_data: UserCreate, background_tasks: BackgroundTasks):
     """
-    Register a new user account
-    
+    Register a new user account with billing type selection
+
     Creates a new user in both Supabase Auth and our users table.
     Returns user profile information upon successful registration.
-    
+
     - **email**: Valid email address (required)
     - **password**: Minimum 8 characters (required)
     - **full_name**: User's full name (optional)
     - **role**: Account role, defaults to 'free'
-    
+    - **billing_type**: Billing management type - 'admin_managed' for admin billing or 'online_payment' for Stripe (default)
+    - **company**: Company name (optional)
+    - **job_title**: Job title (optional)
+    - **phone_number**: Phone number (optional)
+    - **timezone**: User timezone (defaults to 'UTC')
+    - **language**: User language (defaults to 'en')
+
     New users start with 10 free credits and 'free' tier access.
+    For admin_managed billing, account setup will be completed by admin.
+    For online_payment billing, user can proceed to payment setup.
     """
     try:
         # Ensure auth service is ready (cached after first initialization)
         await auth_service.ensure_initialized()
         
         user = await auth_service.register_user(user_data)
-        
+
+        # Auto-login user after successful registration to get access token
+        try:
+            login_request = LoginRequest(email=user_data.email, password=user_data.password)
+            login_response = await auth_service.login_user(login_request)
+            access_token = login_response.access_token
+            refresh_token = login_response.refresh_token
+            expires_in = login_response.expires_in
+            logger.info(f"Auto-login successful after registration: {user.email}")
+        except Exception as login_error:
+            logger.warning(f"Auto-login failed after registration for {user.email}: {login_error}")
+            # Fall back to no token if login fails
+            access_token = None
+            refresh_token = None
+            expires_in = 0
+
         # TODO: Add welcome email in background tasks when email service is implemented
         # background_tasks.add_task(send_welcome_email, user.email)
-        
+
         logger.info(f"New user registered successfully: {user.email}")
-        
-        # FRONTEND FIX: Return format that matches frontend expectations
-        return {
-            "access_token": None,  # No token until email confirmed
-            "refresh_token": None,
+
+        # FRONTEND FIX: Return format that matches frontend expectations with billing info
+        response_data = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
             "token_type": "bearer",
-            "expires_in": 0,
+            "expires_in": expires_in,
             "user": {
                 "id": user.id,
                 "email": user.email,
                 "full_name": user.full_name,
                 "role": user.role.value,
                 "status": user.status.value,
+                "billing_type": user.billing_type.value,
+                "company": user_data.company,
+                "job_title": user_data.job_title,
+                "phone_number": user_data.phone_number,
+                "timezone": user_data.timezone,
+                "language": user_data.language,
                 "created_at": user.created_at.isoformat() if user.created_at else None
             },
-            "message": "Registration successful. Please check your email to confirm your account before logging in.",
-            "email_confirmation_required": True
+            "email_confirmation_required": False  # Changed to False since we're providing token
         }
+
+        # Add appropriate message and next steps based on billing type
+        if user_data.billing_type == BillingType.ADMIN_MANAGED:
+            response_data.update({
+                "message": "Registration successful. Admin will set up your account and billing. Please check your email to confirm your account.",
+                "next_step": "admin_setup",
+                "admin_setup_required": True
+            })
+        else:
+            response_data.update({
+                "message": "Registration successful. Please check your email to confirm your account, then proceed to payment setup.",
+                "next_step": "email_confirmation_and_payment",
+                "payment_setup_required": True
+            })
+
+        return response_data
         
     except HTTPException:
         raise
@@ -662,10 +755,10 @@ async def list_users_admin(
 ):
     """
     Admin: List all users with pagination
-    
+
     Returns paginated list of all users in the system.
     Requires admin or super_admin role.
-    
+
     Useful for user management and system administration.
     """
     # This would need to be implemented in auth_service
@@ -677,6 +770,72 @@ async def list_users_admin(
         "requested_page": page,
         "requested_page_size": page_size
     })
+
+
+@router.post("/admin/create-managed-user", status_code=201)
+async def create_admin_managed_user(
+    user_data: UserCreate,
+    current_user: UserInDB = Depends(require_admin())
+):
+    """
+    Admin: Create a new admin-managed user account
+
+    Allows admins to create user accounts with admin-managed billing.
+    This endpoint bypasses email confirmation and sets up the account directly.
+
+    - **email**: Valid email address (required)
+    - **password**: Temporary password (user should change on first login)
+    - **full_name**: User's full name (required for admin-created accounts)
+    - **role**: Account role (admin can set any role)
+    - **company**: Company name (recommended for admin-managed accounts)
+    - **job_title**: Job title (optional)
+
+    Admin-created accounts automatically have billing_type set to 'admin_managed'.
+    """
+    try:
+        # Force admin-managed billing type for admin-created accounts
+        user_data.billing_type = BillingType.ADMIN_MANAGED
+        user_data.status = UserStatus.ACTIVE  # Skip pending status for admin-created accounts
+
+        # Ensure auth service is ready
+        await auth_service.ensure_initialized()
+
+        user = await auth_service.register_user(user_data)
+
+        logger.info(f"Admin {current_user.email} created managed user: {user.email}")
+
+        return {
+            "message": "Admin-managed user account created successfully",
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.full_name,
+                "role": user.role.value,
+                "status": user.status.value,
+                "billing_type": user.billing_type.value,
+                "company": user_data.company,
+                "job_title": user_data.job_title,
+                "created_by_admin": current_user.email,
+                "created_at": user.created_at.isoformat() if user.created_at else None
+            },
+            "next_steps": [
+                "Send account details to user",
+                "User should change password on first login",
+                "Set up billing arrangements as needed",
+                "Configure user's subscription tier if needed"
+            ],
+            "admin_setup_complete": True,
+            "email_confirmation_required": False
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin user creation failed by {current_user.email}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create admin-managed user account"
+        )
 
 
 # =============================================================================

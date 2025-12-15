@@ -4,6 +4,6 @@ Provides bulletproof content intelligence and machine learning capabilities for 
 """
 
 from .bulletproof_content_intelligence import bulletproof_content_intelligence
-from .ai_manager_singleton import ai_manager
+from .ai_manager_wrapper import ai_manager
 
 __all__ = ['bulletproof_content_intelligence', 'ai_manager']

@@ -16,7 +16,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.core.config import settings
 from app.models.auth import (
     UserCreate, UserInDB, UserResponse, LoginRequest, LoginResponse,
-    UserRole, UserStatus
+    UserRole, UserStatus, BillingType
 )
 from app.services.redis_cache_service import redis_cache
 
@@ -514,12 +514,29 @@ class ProductionSupabaseAuthService:
                             if role_value not in ["free", "premium", "admin", "super_admin"]:
                                 role_value = "free"
                             
+                            # Map billing type values for backward compatibility
+                            billing_type_value = user_metadata.get("billing_type", "online_payment")
+                            # Map new values to database-compatible values if needed
+                            billing_type_mapping = {
+                                "online_payment": "online_payment",
+                                "admin_managed": "admin_managed",
+                                "stripe": "online_payment",  # Legacy mapping
+                                "offline": "admin_managed"   # Legacy mapping
+                            }
+                            final_billing_type = billing_type_mapping.get(billing_type_value, "online_payment")
+
                             new_user = User(
                                 supabase_user_id=supabase_user.id,  # Link to Supabase
                                 email=supabase_user.email,
                                 full_name=user_metadata.get("full_name", ""),
                                 role=role_value,
                                 status="active",
+                                billing_type=final_billing_type,
+                                company=user_metadata.get("company"),
+                                job_title=user_metadata.get("job_title"),
+                                phone_number=user_metadata.get("phone_number"),
+                                timezone=user_metadata.get("timezone") or "UTC",
+                                language=user_metadata.get("language") or "en",
                                 email_verified=bool(supabase_user.email_confirmed_at),
                                 last_login=current_time,
                                 last_activity=current_time
@@ -569,7 +586,13 @@ class ProductionSupabaseAuthService:
                     "email_redirect_to": None,  # Disable email confirmation
                     "data": {
                         "full_name": user_data.full_name or "",
-                        "role": user_data.role.value
+                        "role": user_data.role.value,
+                        "billing_type": user_data.billing_type.value,
+                        "company": user_data.company,
+                        "job_title": user_data.job_title,
+                        "phone_number": user_data.phone_number,
+                        "timezone": user_data.timezone,
+                        "language": user_data.language
                     }
                 }
             })
