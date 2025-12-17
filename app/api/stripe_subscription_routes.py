@@ -32,10 +32,19 @@ try:
     STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET')
     STRIPE_PUBLISHABLE_KEY = os.getenv('STRIPE_PUBLISHABLE_KEY')
     
-    # Subscription pricing configuration
+    # Subscription pricing configuration with monthly and annual options
     SUBSCRIPTION_PRICE_IDS = {
-        'standard': os.getenv('STRIPE_STANDARD_PRICE_ID', 'price_standard_monthly'),
-        'premium': os.getenv('STRIPE_PREMIUM_PRICE_ID', 'price_premium_monthly')
+        'free': {
+            'monthly': os.getenv('STRIPE_FREE_MONTHLY_PRICE_ID', 'price_1Sf1loAubhSg1bPI00UODTEY')
+        },
+        'standard': {
+            'monthly': os.getenv('STRIPE_STANDARD_MONTHLY_PRICE_ID', 'price_1Sf1lpAubhSg1bPIiTWvBncS'),
+            'annual': os.getenv('STRIPE_STANDARD_ANNUAL_PRICE_ID', 'price_1SfDzAAubhSg1bPIwl0bIgs8')
+        },
+        'premium': {
+            'monthly': os.getenv('STRIPE_PREMIUM_MONTHLY_PRICE_ID', 'price_1Sf1lqAubhSg1bPIJIcqgHu1'),
+            'annual': os.getenv('STRIPE_PREMIUM_ANNUAL_PRICE_ID', 'price_1SfDzLAubhSg1bPIuSB7Tz5R')
+        }
     }
     
     logger.info("Stripe integration initialized")

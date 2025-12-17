@@ -551,6 +551,14 @@ app.include_router(stripe_router, prefix="/api/v1")
 # Include Stripe Webhook routes - Automatic subscription event processing
 app.include_router(stripe_webhook_router)
 
+# Include Stripe Checkout routes - Monthly/Annual billing support
+try:
+    from app.api.stripe_checkout_routes import router as stripe_checkout_router
+    app.include_router(stripe_checkout_router, prefix="/api/v1")
+    logger.info("✅ Stripe Checkout routes registered (monthly/annual billing)")
+except ImportError as e:
+    logger.warning(f"⚠️ Stripe Checkout routes not available: {e}")
+
 # Billing routes (new Stripe integration)
 try:
     from app.api.billing_routes import router as billing_router

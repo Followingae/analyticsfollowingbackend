@@ -128,19 +128,25 @@ async def handle_payment_success_webhook(
     payload = await request.body()
     sig_header = request.headers.get('Stripe-Signature') or request.headers.get('stripe-signature')
 
-    # Use the webhook secret from Stripe CLI for local testing
-    webhook_secret = "whsec_be0e205f55922e79f88de02c9eae0b32eb943ea28f9f42844b4ccc63e25dd148"
+    # Get webhook secret from environment
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
     try:
-        # Properly verify webhook signature
-        if sig_header:
+        # Handle webhook based on environment
+        if webhook_secret and sig_header:
+            # Production mode - verify signature
             event = stripe.Webhook.construct_event(
                 payload, sig_header, webhook_secret
             )
             logger.info(f"Webhook signature verified successfully")
+        elif os.getenv("DEBUG", "true").lower() == "true":
+            # Development mode - parse without verification
+            import json
+            logger.warning("DEBUG MODE: Skipping webhook signature verification")
+            event = json.loads(payload)
         else:
-            logger.error("No Stripe signature header found")
-            raise HTTPException(status_code=400, detail="No signature header")
+            logger.error("No webhook secret configured and not in debug mode")
+            raise HTTPException(status_code=400, detail="Webhook configuration error")
 
         logger.info(f"Received webhook event: {event.get('type')}")
 

@@ -19,25 +19,47 @@ logger = logging.getLogger(__name__)
 # Initialize Stripe
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
-# Product/Price mapping from Stripe dashboard
+# Product/Price mapping from Stripe dashboard with monthly and annual options
 STRIPE_PRODUCTS = {
     "free": {
         "name": "Analytics Following Starter",
-        "price_id": os.getenv("STRIPE_FREE_PRICE_ID", "price_starter_monthly"),
-        "amount": 0,  # Free tier still requires card
+        "monthly": {
+            "price_id": os.getenv("STRIPE_FREE_MONTHLY_PRICE_ID", "price_1Sf1loAubhSg1bPI00UODTEY"),
+            "amount": 0,
+            "interval": "month"
+        },
         "credits": 125
     },
     "standard": {
         "name": "Analytics Following Professional",
-        "price_id": os.getenv("STRIPE_STANDARD_PRICE_ID", "price_professional_monthly"),
-        "amount": 199,
+        "monthly": {
+            "price_id": os.getenv("STRIPE_STANDARD_MONTHLY_PRICE_ID", "price_1Sf1lpAubhSg1bPIiTWvBncS"),
+            "amount": 199,
+            "interval": "month"
+        },
+        "annual": {
+            "price_id": os.getenv("STRIPE_STANDARD_ANNUAL_PRICE_ID", "price_1SfDzAAubhSg1bPIwl0bIgs8"),
+            "amount": 1908,  # $159/month when paid annually
+            "interval": "year",
+            "savings": 480  # Save $480/year
+        },
         "credits": 500
     },
     "premium": {
         "name": "Analytics Following Enterprise",
-        "price_id": os.getenv("STRIPE_PREMIUM_PRICE_ID", "price_enterprise_monthly"),
-        "amount": 499,
-        "credits": 2000
+        "monthly": {
+            "price_id": os.getenv("STRIPE_PREMIUM_MONTHLY_PRICE_ID", "price_1Sf1lqAubhSg1bPIJIcqgHu1"),
+            "amount": 499,
+            "interval": "month"
+        },
+        "annual": {
+            "price_id": os.getenv("STRIPE_PREMIUM_ANNUAL_PRICE_ID", "price_1SfDzLAubhSg1bPIuSB7Tz5R"),
+            "amount": 4788,  # $399/month when paid annually
+            "interval": "year",
+            "savings": 1200  # Save $1,200/year
+        },
+        "credits": 2000,
+        "topup_discount": 0.20  # 20% discount on credit topups
     }
 }
 
@@ -76,7 +98,8 @@ class StripeBillingService:
         success_url: str,
         cancel_url: str,
         user_id: str,
-        subscription_tier: str
+        subscription_tier: str,
+        billing_interval: str = "monthly"  # "monthly" or "annual"
     ) -> Dict[str, Any]:
         """Create embedded checkout session for subscription"""
         try:
