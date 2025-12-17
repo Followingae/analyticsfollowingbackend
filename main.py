@@ -551,6 +551,38 @@ app.include_router(stripe_router, prefix="/api/v1")
 # Include Stripe Webhook routes - Automatic subscription event processing
 app.include_router(stripe_webhook_router)
 
+# Billing routes (new Stripe integration)
+try:
+    from app.api.billing_routes import router as billing_router
+    app.include_router(billing_router)
+    logger.info("✅ Billing routes registered")
+except ImportError as e:
+    logger.warning(f"⚠️ Billing routes not available: {e}")
+
+# Admin billing management routes
+try:
+    from app.api.admin_billing_routes import router as admin_billing_router
+    app.include_router(admin_billing_router)
+    logger.info("✅ Admin billing routes registered")
+except ImportError as e:
+    logger.warning(f"⚠️ Admin billing routes not available: {e}")
+
+# Billing V3 routes (fixed webhook handling)
+try:
+    from app.api.billing_routes_v3 import router as billing_v3_router
+    app.include_router(billing_v3_router)
+    logger.info("✅ Billing V3 routes registered (fixed webhook handling)")
+except ImportError as e:
+    logger.warning(f"⚠️ Billing V3 routes not available: {e}")
+
+# Billing V2 routes (payment-first registration flow) - keeping for backward compatibility
+try:
+    from app.api.billing_routes_v2 import router as billing_v2_router
+    app.include_router(billing_v2_router)
+    logger.info("✅ Billing V2 routes registered (payment-first flow)")
+except ImportError as e:
+    logger.warning(f"⚠️ Billing V2 routes not available: {e}")
+
 # DISABLED: Simple Creator Search routes - Replaced by bulletproof compatibility endpoints below
 # from app.api.simple_creator_search_routes import router as simple_creator_router
 # app.include_router(simple_creator_router)  # REMOVED - Using bulletproof endpoints instead

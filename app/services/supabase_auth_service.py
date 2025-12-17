@@ -269,17 +269,16 @@ class ProductionSupabaseAuthService:
             # Use connection pool for fast database access with timeout
             async with asyncio.timeout(60.0):  # 60 second timeout (industry standard)
                 async with async_engine.connect() as conn:  # ENTERPRISE: Use connect() for read operations (faster)
-                    # OPTIMIZED: Enterprise-grade login query with performance hints
-                    # PGBOUNCER FIX: Use execution_options(synchronize_session=False) for transaction pooling mode
+                    # PGBOUNCER COMPATIBLE: Simple query without execution_options
                     result = await conn.execute(
                         text("""
                             SELECT id, email, full_name, role, status, created_at, last_login,
-                                   profile_picture_url, "user.first_name" as first_name, "user.last_name" as last_name,
-                                   company, job_title, phone_number, bio, timezone, language, updated_at
+                                   profile_picture_url, company, job_title, phone_number,
+                                   timezone, language, updated_at, subscription_tier, billing_type
                             FROM users
                             WHERE supabase_user_id = :user_id
                             LIMIT 1
-                        """).execution_options(synchronize_session=False),
+                        """),
                         {"user_id": supabase_user.id}
                     )
                 
@@ -297,15 +296,12 @@ class ProductionSupabaseAuthService:
                         created_at=user_row.created_at or datetime.now(timezone.utc),
                         last_login=datetime.now(),
                         profile_picture_url=user_row.profile_picture_url,
-                        first_name=user_row.first_name,
-                        last_name=user_row.last_name,
                         company=user_row.company,
                         job_title=user_row.job_title,
                         phone_number=user_row.phone_number,
-                        bio=user_row.bio,
                         timezone=user_row.timezone or "UTC",
                         language=user_row.language or "en",
-                        updated_at=user_row.updated_at
+                        billing_type=user_row.billing_type or "online_payment"
                     )
                 else:
                     logger.warning(f"LOGIN-FRESH: User not found in database, using Supabase data for {supabase_user.email}")
@@ -321,33 +317,23 @@ class ProductionSupabaseAuthService:
                         logger.warning(f"Failed to parse created_at: {e}, using current time")
                         created_at = datetime.now(timezone.utc)
                     
-                    # Parse avatar_config from JSON string to dict
-                    avatar_config = None
-                    try:
-                        import json
-                        avatar_config = json.loads(db_user.avatar_config) if db_user.avatar_config else None
-                    except (json.JSONDecodeError, TypeError):
-                        avatar_config = None
-                    
+                    # User not in database yet - use Supabase metadata
                     user_response = UserResponse(
                         id=supabase_user.id,
                         email=supabase_user.email,
-                        full_name=db_user.full_name or user_metadata.get("full_name", ""),  # Prioritize database
+                        full_name=user_metadata.get("full_name", ""),
                         role=user_role,
                         status=UserStatus.ACTIVE,
                         created_at=created_at,
                         last_login=datetime.now(),
-                        avatar_config=avatar_config,
-                        # CONSISTENT SCHEMA: Add all profile fields
-                        first_name=getattr(db_user, 'first_name', None),
-                        last_name=getattr(db_user, 'last_name', None),
-                        company=getattr(db_user, 'company', None),  # THIS ENSURES CONSISTENT COMPANY
-                        job_title=getattr(db_user, 'job_title', None),
-                        phone_number=getattr(db_user, 'phone_number', None),
-                        bio=getattr(db_user, 'bio', None),
-                        timezone=getattr(db_user, 'timezone', 'UTC'),
-                        language=getattr(db_user, 'language', 'en'),
-                        updated_at=getattr(db_user, 'updated_at', None)
+                        profile_picture_url=None,
+                        # Use metadata from Supabase registration
+                        company=user_metadata.get('company'),
+                        job_title=user_metadata.get('job_title'),
+                        phone_number=user_metadata.get('phone_number'),
+                        timezone=user_metadata.get('timezone', 'UTC'),
+                        language=user_metadata.get('language', 'en'),
+                        billing_type=user_metadata.get('billing_type', 'online_payment')
                     )
                     
                     # DEBUG LOGGING: Track user data being returned
@@ -446,29 +432,32 @@ class ProductionSupabaseAuthService:
             
             from app.database.connection import SessionLocal
             from app.database.unified_models import User
-            from sqlalchemy import select, update
+            from sqlalchemy import select, update, text
             import uuid
             from datetime import timezone
-            
+
             if not SessionLocal:
                 logger.warning("SYNC: Database not available for user sync")
                 return
-            
-            # Use UTC timezone properly  
+
+            # Use UTC timezone properly
             current_time = datetime.now(timezone.utc)
             logger.info(f"SYNC: Using UTC time: {current_time}")
-            
+
             # ENTERPRISE: Aggressive retry logic for high-scale platform
             max_retries = 2  # Faster failure detection for enterprise responsiveness
             retry_delay = 0.5  # Reduced delay for speed
-            
+
             for attempt in range(max_retries):
                 try:
                     async with SessionLocal() as db:
-                        # ENTERPRISE: Optimize for fast login performance
-                        from sqlalchemy import text
-                        # PGBOUNCER FIX: Use execution_options(synchronize_session=False) for transaction pooling mode
-                        await db.execute(text("SET statement_timeout = '45s'").execution_options(synchronize_session=False))  # Increased timeout for stability
+                        # PGBOUNCER FIX: Avoid prepared statements that conflict with pgbouncer
+                        # Use simple text execution without execution_options for compatibility
+                        try:
+                            await db.execute(text("SET statement_timeout = '45s'"))
+                        except Exception as timeout_error:
+                            logger.warning(f"Could not set statement timeout: {timeout_error}")
+                            # Continue without timeout setting - non-critical
                         
                         # ENFORCE: Check if user exists by Supabase ID ONLY (never create duplicates)
                         logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id} (attempt {attempt + 1})")
@@ -510,9 +499,23 @@ class ProductionSupabaseAuthService:
                             logger.info(f"SYNC: Creating new user for: {supabase_user.email}")
                             
                             # Validate role before creating
-                            role_value = user_metadata.get("role", "free")
-                            if role_value not in ["free", "premium", "admin", "super_admin"]:
-                                role_value = "free"
+                            user_role_input = user_metadata.get("role", "free")
+
+                            # Map frontend role to database role + subscription_tier
+                            # FIXED: Use the actual subscription tier as the role!
+                            role_mapping = {
+                                "free": {"role": "free", "subscription_tier": "free"},
+                                "premium": {"role": "premium", "subscription_tier": "premium"},
+                                "standard": {"role": "standard", "subscription_tier": "standard"},
+                                "admin": {"role": "admin", "subscription_tier": "premium"},
+                                "super_admin": {"role": "super_admin", "subscription_tier": "premium"},
+                                "superadmin": {"role": "super_admin", "subscription_tier": "premium"},
+                                "user": {"role": "free", "subscription_tier": "free"}  # Legacy fallback
+                            }
+
+                            role_config = role_mapping.get(user_role_input, role_mapping["free"])
+                            role_value = role_config["role"]
+                            subscription_tier = role_config["subscription_tier"]
                             
                             # Map billing type values for backward compatibility
                             billing_type_value = user_metadata.get("billing_type", "online_payment")
@@ -525,12 +528,16 @@ class ProductionSupabaseAuthService:
                             }
                             final_billing_type = billing_type_mapping.get(billing_type_value, "online_payment")
 
+                            # Set status based on billing type
+                            user_status = "active" if final_billing_type == "online_payment" else "pending"
+
                             new_user = User(
                                 supabase_user_id=supabase_user.id,  # Link to Supabase
                                 email=supabase_user.email,
                                 full_name=user_metadata.get("full_name", ""),
                                 role=role_value,
-                                status="active",
+                                subscription_tier=subscription_tier,
+                                status=user_status,  # Pending for admin_managed, active for online_payment
                                 billing_type=final_billing_type,
                                 company=user_metadata.get("company"),
                                 job_title=user_metadata.get("job_title"),
@@ -549,12 +556,25 @@ class ProductionSupabaseAuthService:
                         logger.info(f"SYNC: Database commit successful for: {supabase_user.email}")
                         break  # Success - exit retry loop
                         
-                except (TimeoutError, ConnectionError, Exception) as db_error:
+                except Exception as db_error:
+                    # Handle specific pgbouncer errors
+                    error_str = str(db_error).lower()
+                    if "duplicatepreparedstatement" in error_str.replace(" ", "") or "prepared statement" in error_str:
+                        logger.warning(f"PGBOUNCER: Prepared statement conflict detected: {db_error}")
+                        # Skip retry for pgbouncer prepared statement conflicts - these won't resolve
+                        logger.info(f"SYNC: Skipping database sync for {supabase_user.email} due to pgbouncer incompatibility")
+                        break  # Exit retry loop
+
+                    # Rollback if possible
                     if hasattr(db, 'rollback'):
-                        await db.rollback()
-                    
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
+
                     if attempt < max_retries - 1:
-                        logger.warning(f"SYNC: Database timeout/error (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                        logger.warning(f"SYNC: Database error (attempt {attempt + 1}/{max_retries}), retrying in {retry_delay}s...")
+                        logger.warning(f"SYNC: Error type: {type(db_error).__name__}: {db_error}")
                         await asyncio.sleep(retry_delay)
                         retry_delay *= 2  # Exponential backoff
                     else:

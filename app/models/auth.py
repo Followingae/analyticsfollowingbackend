@@ -9,8 +9,10 @@ from enum import Enum
 
 class UserRole(str, Enum):
     """User roles for role-based access control"""
+    USER = "user"  # Standard user role stored in database
     FREE = "free"
-    PREMIUM = "premium" 
+    STANDARD = "standard"
+    PREMIUM = "premium"
     BRAND_PREMIUM = "brand_premium"
     ADMIN = "admin"
     SUPERADMIN = "superadmin"
@@ -83,6 +85,7 @@ class UserResponse(UserBase):
     id: str
     created_at: datetime
     last_login: Optional[datetime] = None
+    profile_picture_url: Optional[str] = None
     avatar_config: Optional[Dict[str, Any]] = None
     updated_at: Optional[datetime] = None
 
@@ -98,7 +101,7 @@ class UserResponse(UserBase):
     timezone: Optional[str] = "UTC"
     language: Optional[str] = "en"
 
-    # Billing and subscription info
+    # Billing and subscription info (inherited billing_type from UserBase)
     stripe_customer_id: Optional[str] = None
 
 

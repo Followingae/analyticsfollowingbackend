@@ -66,12 +66,17 @@ class Settings(BaseSettings):
     CORS_PROXY_API_KEY: str = os.getenv("CORS_PROXY_API_KEY", "b416e4ec")
     ENABLE_CORS_PROXY: bool = os.getenv("ENABLE_CORS_PROXY", "true").lower() == "true"
 
+    # Stripe Configuration
+    STRIPE_SECRET_KEY: str = os.getenv("STRIPE_SECRET_KEY", "")
+    STRIPE_PUBLISHABLE_KEY: str = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
+    STRIPE_WEBHOOK_SECRET: str = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
     # Legacy SmartProxy Configuration (DEPRECATED - NOT USED)
     # These are kept only to prevent AttributeError during migration
     SMARTPROXY_USERNAME: str = os.getenv("SMARTPROXY_USERNAME", "")
     SMARTPROXY_PASSWORD: str = os.getenv("SMARTPROXY_PASSWORD", "")
     SMARTPROXY_BASE_URL: str = os.getenv("SMARTPROXY_BASE_URL", "")
-    
+
     class Config:
         case_sensitive = True
 
