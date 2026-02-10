@@ -300,24 +300,24 @@ class BrandAccessControlService:
             return {
                 "allowed": False,
                 "reason": "Credit wallet is locked",
-                "current_balance": wallet.balance,
+                "current_balance": wallet.current_balance,
                 "required": required_credits
             }
         
-        if wallet.balance < required_credits:
+        if wallet.current_balance < required_credits:
             return {
                 "allowed": False,
                 "reason": "Insufficient credits",
-                "current_balance": wallet.balance,
+                "current_balance": wallet.current_balance,
                 "required": required_credits,
-                "needed": required_credits - wallet.balance
+                "needed": required_credits - wallet.current_balance
             }
         
         return {
             "allowed": True,
             "current_balance": wallet.balance,
             "required": required_credits,
-            "remaining_after": wallet.balance - required_credits
+            "remaining_after": wallet.current_balance - required_credits
         }
     
     async def spend_credits(
@@ -340,15 +340,15 @@ class BrandAccessControlService:
             wallet_result = await db.execute(wallet_query)
             wallet = wallet_result.scalar()
             
-            if not wallet or wallet.balance < amount:
+            if not wallet or wallet.current_balance < amount:
                 return {
                     "success": False,
                     "reason": "Insufficient credits or wallet not found"
                 }
             
             # Update wallet balance
-            old_balance = wallet.balance
-            wallet.balance -= amount
+            old_balance = wallet.current_balance
+            wallet.current_balance -= amount
             wallet.total_spent_this_cycle += amount
             
             # Create transaction record
@@ -368,7 +368,7 @@ class BrandAccessControlService:
             return {
                 "success": True,
                 "old_balance": old_balance,
-                "new_balance": wallet.balance,
+                "new_balance": wallet.current_balance,
                 "amount_spent": amount,
                 "transaction_id": str(transaction.id)
             }

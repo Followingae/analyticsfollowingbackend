@@ -114,7 +114,7 @@ class CreditWalletService:
     async def get_wallet(self, user_id: UUID) -> Optional[CreditWallet]:
         """Get user's credit wallet with caching"""
         cache_key = f"{self.cache_prefix}:wallet:{user_id}"
-        
+
         # Try cache first - use direct Redis for wallet cache
         try:
             if cache_manager.initialized:
@@ -126,16 +126,94 @@ class CreditWalletService:
                     pass
         except Exception as cache_error:
             logger.debug(f"Cache miss for wallet {user_id}: {cache_error}")
-        
+
         try:
-            async with get_session() as session:
-                result = await session.execute(
-                    select(CreditWallet)
-                    .options(selectinload(CreditWallet.package))
-                    .where(CreditWallet.user_id == user_id)
-                )
-                wallet = result.scalar_one_or_none()
-                
+            # Create a fresh session to avoid transaction issues
+            from app.database.connection import SessionLocal
+
+            if SessionLocal is None:
+                logger.error("SessionLocal is None - database not initialized")
+                return None
+
+            async with SessionLocal() as session:
+                # Ensure clean transaction state
+                try:
+                    if session.in_transaction():
+                        await session.rollback()
+                        logger.debug("Credit wallet: Rolled back existing transaction")
+                except Exception as rollback_error:
+                    logger.debug(f"Credit wallet: Rollback check (non-critical): {rollback_error}")
+
+                # Use raw SQL query to avoid PGBouncer dialect issues
+                raw_query = text("""
+                    SELECT cw.id, cw.user_id, cw.package_id, cw.current_balance,
+                           cw.total_earned_this_cycle, cw.total_purchased_this_cycle,
+                           cw.total_spent_this_cycle, cw.lifetime_earned, cw.lifetime_spent,
+                           cw.current_billing_cycle_start, cw.current_billing_cycle_end,
+                           cw.next_reset_date, cw.next_credit_refresh_date,
+                           cw.rollover_months_allowed, cw.subscription_status,
+                           cw.subscription_active, cw.auto_refresh_enabled,
+                           cw.is_locked, cw.test_mode, cw.created_at, cw.updated_at,
+                           cp.name as package_name, cp.monthly_credits
+                    FROM credit_wallets cw
+                    LEFT JOIN credit_packages cp ON cw.package_id = cp.id
+                    WHERE cw.user_id = :user_id
+                """)
+
+                # Ensure user_id is properly formatted
+                user_id_str = str(user_id) if user_id else None
+                if not user_id_str:
+                    logger.error(f"Invalid user_id provided: {user_id}")
+                    return None
+
+                result = await session.execute(raw_query, {"user_id": user_id_str})
+                row = result.fetchone()
+
+                if row:
+                    # Create a proper wallet object using a class to ensure attributes work
+                    class WalletData:
+                        """Simple data container for wallet information"""
+                        pass
+
+                    wallet = WalletData()
+                    wallet.id = row.id
+                    wallet.user_id = row.user_id
+                    wallet.package_id = row.package_id
+                    wallet.current_balance = row.current_balance
+                    wallet.total_earned_this_cycle = row.total_earned_this_cycle or 0
+                    wallet.total_purchased_this_cycle = row.total_purchased_this_cycle or 0
+                    wallet.total_spent_this_cycle = row.total_spent_this_cycle or 0
+                    wallet.lifetime_earned = row.lifetime_earned or 0
+                    wallet.lifetime_spent = row.lifetime_spent or 0
+                    wallet.current_billing_cycle_start = row.current_billing_cycle_start
+                    wallet.current_billing_cycle_end = row.current_billing_cycle_end
+                    wallet.next_reset_date = row.next_reset_date
+                    wallet.next_credit_refresh_date = row.next_credit_refresh_date
+                    wallet.rollover_months_allowed = row.rollover_months_allowed or 0
+                    wallet.subscription_status = row.subscription_status or 'active'
+                    wallet.subscription_active = row.subscription_active if row.subscription_active is not None else True
+                    wallet.auto_refresh_enabled = row.auto_refresh_enabled if row.auto_refresh_enabled is not None else True
+                    wallet.is_locked = row.is_locked if row.is_locked is not None else False
+                    wallet.test_mode = row.test_mode if row.test_mode is not None else False
+                    wallet.created_at = row.created_at
+                    wallet.updated_at = row.updated_at
+
+                    # Add package info if available
+                    if row.package_id and row.package_name:
+                        class PackageData:
+                            """Simple data container for package information"""
+                            pass
+
+                        package = PackageData()
+                        package.id = row.package_id
+                        package.name = row.package_name
+                        package.monthly_credits = row.monthly_credits or 0
+                        wallet.package = package
+                    else:
+                        wallet.package = None
+                else:
+                    wallet = None
+
                 if wallet:
                     # Cache the wallet - use direct Redis 
                     try:
@@ -665,20 +743,34 @@ class CreditWalletService:
                 try:
                     # Get current balance from wallet
                     wallet = await self.get_wallet(user_id)
+
+                    # Type safety check
+                    if wallet is not None and not hasattr(wallet, 'current_balance'):
+                        logger.error(f"Invalid wallet object returned for user {user_id}: type={type(wallet)}, value={wallet}")
+                        wallet = None
+
                     current_balance = wallet.current_balance if wallet else 0
 
-                    # Safe tuple access with defaults for missing values
+                    # The database function returns different columns now:
+                    # total_plan_credits, lifetime_credits_earned, lifetime_credits_spent, current_month_earned, current_month_spent
                     row_values = list(row) if row else []
-                    while len(row_values) < 6:  # Ensure we have at least 6 values
-                        row_values.append(0 if len(row_values) < 5 else "Unknown")
+                    while len(row_values) < 5:  # Ensure we have at least 5 values
+                        row_values.append(0)
+
+                    # Get package information from wallet
+                    package_name = "Free"
+                    monthly_allowance = 0
+                    if wallet and hasattr(wallet, 'package') and wallet.package:
+                        package_name = wallet.package.name if hasattr(wallet.package, 'name') else "Free"
+                        monthly_allowance = wallet.package.monthly_credits if hasattr(wallet.package, 'monthly_credits') else 0
 
                     total_plan_credits = TotalPlanCredits(
-                        total_plan_credits=row_values[0] or 0,  # total_plan_credits
-                        package_credits=row_values[1] or 0,     # package_credits
-                        purchased_credits=row_values[2] or 0,   # purchased_credits
-                        bonus_credits=row_values[3] or 0,       # bonus_credits
-                        monthly_allowance=row_values[4] or 0,   # monthly_allowance
-                        package_name=row_values[5] or "Unknown", # package_name
+                        total_plan_credits=row_values[0] or 0,     # total_plan_credits
+                        package_credits=monthly_allowance,         # Use monthly allowance from package
+                        purchased_credits=row_values[1] or 0,      # lifetime_credits_earned
+                        bonus_credits=0,                           # Not tracked in new function
+                        monthly_allowance=monthly_allowance,       # From package
+                        package_name=package_name,                 # From wallet package
                         current_balance=current_balance
                     )
 
@@ -686,8 +778,14 @@ class CreditWalletService:
                     logger.error(f"Tuple index error in get_total_plan_credits for user {user_id}: {e}")
                     logger.error(f"Row data: {row}")
                     # Return safe default values
-                    wallet = await self.get_wallet(user_id)
-                    current_balance = wallet.current_balance if wallet else 0
+                    wallet_fallback = await self.get_wallet(user_id)
+
+                    # Type safety check
+                    if wallet_fallback is not None and not hasattr(wallet_fallback, 'current_balance'):
+                        logger.error(f"Invalid wallet object in error handler for user {user_id}: type={type(wallet_fallback)}, value={wallet_fallback}")
+                        wallet_fallback = None
+
+                    current_balance = wallet_fallback.current_balance if wallet_fallback else 0
 
                     total_plan_credits = TotalPlanCredits(
                         total_plan_credits=current_balance,

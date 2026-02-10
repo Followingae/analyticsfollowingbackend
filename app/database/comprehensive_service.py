@@ -63,23 +63,33 @@ class ComprehensiveDataService:
         """Retry database operations with health checks"""
         for attempt in range(max_retries + 1):
             try:
+                # Always ensure clean transaction state before operation
+                try:
+                    if db.in_transaction():
+                        await db.rollback()
+                        logger.debug(f"Rolled back transaction before attempt {attempt + 1}")
+                except Exception as rollback_error:
+                    logger.debug(f"Rollback check error (non-critical): {rollback_error}")
+
                 if attempt > 0:
                     # Check health before retry
                     if not await self.check_db_health(db):
                         logger.warning(f"Database unhealthy on retry attempt {attempt}")
-                        # Try to recover by rolling back any invalid transaction
-                        try:
-                            if db.in_transaction():
-                                await db.rollback()
-                                logger.debug("Rolled back invalid transaction")
-                            await asyncio.sleep(0.1)  # Brief pause for recovery
-                        except Exception as rollback_error:
-                            logger.warning(f"Error during rollback recovery: {rollback_error}")
-                            pass
-                
+                        await asyncio.sleep(0.5)  # Give database time to recover
+
                 return await operation()
-                
+
             except Exception as e:
+                # Check for transaction abort error
+                error_msg = str(e).lower()
+                if "current transaction is aborted" in error_msg or "infailedsqltransaction" in error_msg:
+                    logger.warning(f"Transaction aborted on attempt {attempt + 1}, will retry with fresh transaction")
+                    # Force rollback for next attempt
+                    try:
+                        await db.rollback()
+                    except:
+                        pass
+
                 if attempt == max_retries:
                     logger.error(f"Database operation failed after {max_retries + 1} attempts: {e}")
                     raise
@@ -1409,34 +1419,54 @@ class ComprehensiveDataService:
 
             # Query user_profile_access table - this is the correct 30-day access system
             current_time = datetime.now(timezone.utc)
-            access_query = select(UserProfileAccess, Profile).join(
-                Profile, UserProfileAccess.profile_id == Profile.id
-            ).where(
-                UserProfileAccess.user_id == public_user_id,  # Use mapped public user ID
-                UserProfileAccess.expires_at > current_time  # Only active access
-            ).order_by(UserProfileAccess.granted_at.desc()).offset(offset).limit(page_size)
 
-            combined_query = access_query
-            
+            # PGBOUNCER FIX: Use raw SQL query to avoid ORM issues
+            raw_query = text("""
+                SELECT
+                    upa.id as access_id,
+                    upa.user_id,
+                    upa.profile_id,
+                    upa.granted_at,
+                    upa.expires_at,
+                    upa.access_type,
+                    upa.credits_spent,
+                    p.*
+                FROM user_profile_access upa
+                JOIN profiles p ON upa.profile_id = p.id
+                WHERE upa.user_id = :user_id
+                    AND upa.expires_at > :current_time
+                ORDER BY upa.granted_at DESC
+                OFFSET :offset
+                LIMIT :limit
+            """)
+
             # Execute queries with retry and timeout protection
             async def execute_queries():
                 # Use asyncio.wait_for to add timeout protection
-                result = await asyncio.wait_for(db.execute(combined_query), timeout=30.0)
+                result = await asyncio.wait_for(
+                    db_session.execute(raw_query, {
+                        "user_id": public_user_id,
+                        "current_time": current_time,
+                        "offset": offset,
+                        "limit": page_size
+                    }),
+                    timeout=30.0
+                )
                 profiles_data = result.all()
-                
+
                 # Count total accessible profiles for this user (active access only)
                 count_query = select(func.count(UserProfileAccess.id)).where(
                     UserProfileAccess.user_id == public_user_id,  # Use mapped public user ID
                     UserProfileAccess.expires_at > current_time
                 )
-                
-                count_result = await asyncio.wait_for(db.execute(count_query), timeout=30.0)
+
+                count_result = await asyncio.wait_for(db_session.execute(count_query), timeout=30.0)
                 total_count = count_result.scalar() or 0
-                
+
                 return profiles_data, total_count
-            
+
             try:
-                profiles_data, total_count = await self.retry_db_operation(execute_queries, db)
+                profiles_data, total_count = await self.retry_db_operation(execute_queries, db_session)
                 
             except asyncio.TimeoutError:
                 logger.error(f"Database query timeout for user {user_id}")
@@ -1447,47 +1477,47 @@ class ComprehensiveDataService:
             
             # Format response
             profiles = []
-            
+
             for row in profiles_data:
-                # The query returns (UserProfileAccess, Profile) tuples
-                access_record, profile = row
+                # The raw SQL query returns a single row with all columns
+                row_dict = dict(row._mapping)
 
                 # Calculate remaining days
-                expires_at = access_record.expires_at
+                expires_at = row_dict.get('expires_at')
                 days_remaining = None
                 if expires_at:
                     days_remaining = max(0, (expires_at - current_time).days)
 
                 profile_data = {
-                    "username": profile.username,
-                    "full_name": profile.full_name or "",
-                    "profile_pic_url": profile.profile_pic_url or "",
-                    "profile_pic_url_hd": profile.profile_pic_url_hd or "",
-                    "cdn_avatar_url": profile.cdn_avatar_url or "",  # CDN processed profile picture URL
+                    "username": row_dict.get('username', ''),
+                    "full_name": row_dict.get('full_name', ''),
+                    "profile_pic_url": row_dict.get('profile_pic_url', ''),
+                    "profile_pic_url_hd": row_dict.get('profile_pic_url_hd', ''),
+                    "cdn_avatar_url": row_dict.get('cdn_avatar_url', ''),  # CDN processed profile picture URL
                     # Pre-proxied URLs for frontend consistency
-                    "proxied_profile_pic_url": profile.profile_pic_url or "",  # External proxy service handles these
-                    "proxied_profile_pic_url_hd": profile.profile_pic_url_hd or "",  # External proxy service handles these
-                    "followers_count": profile.followers_count or 0,
-                    "posts_count": profile.posts_count or 0,
-                    "is_verified": profile.is_verified or False,
-                    "is_private": profile.is_private or False,
-                    "engagement_rate": float(profile.engagement_rate or 0),
-                    "influence_score": float(profile.influence_score or 0),
+                    "proxied_profile_pic_url": row_dict.get('profile_pic_url', ''),  # External proxy service handles these
+                    "proxied_profile_pic_url_hd": row_dict.get('profile_pic_url_hd', ''),  # External proxy service handles these
+                    "followers_count": row_dict.get('followers_count', 0),
+                    "posts_count": row_dict.get('posts_count', 0),
+                    "is_verified": row_dict.get('is_verified', False),
+                    "is_private": row_dict.get('is_private', False),
+                    "engagement_rate": float(row_dict.get('engagement_rate', 0)),
+                    "influence_score": float(row_dict.get('influence_score', 0)),
 
                     # Access information from UserProfileAccess record (30-day system)
-                    "access_granted_at": access_record.granted_at.isoformat() if access_record.granted_at else None,
+                    "access_granted_at": row_dict['granted_at'].isoformat() if row_dict.get('granted_at') else None,
                     "access_expires_at": expires_at.isoformat() if expires_at else None,
                     "days_remaining": days_remaining,
-                    "profile_id": str(profile.id),
-                    "credits_spent": 25,  # Standard cost for 30-day access
+                    "profile_id": str(row_dict.get('profile_id', '')),
+                    "credits_spent": row_dict.get('credits_spent', 25),  # Standard cost for 30-day access
 
                     # Add AI analysis data if available
                     "ai_analysis": {
-                        "primary_content_type": profile.ai_primary_content_type,
-                        "avg_sentiment_score": profile.ai_avg_sentiment_score,
-                        "content_distribution": profile.ai_content_distribution,
-                        "language_distribution": profile.ai_language_distribution,
-                        "content_quality_score": profile.ai_content_quality_score
+                        "primary_content_type": row_dict.get('ai_primary_content_type'),
+                        "avg_sentiment_score": row_dict.get('ai_avg_sentiment_score'),
+                        "content_distribution": row_dict.get('ai_content_distribution'),
+                        "language_distribution": row_dict.get('ai_language_distribution'),
+                        "content_quality_score": row_dict.get('ai_content_quality_score')
                     }
                 }
                 profiles.append(profile_data)

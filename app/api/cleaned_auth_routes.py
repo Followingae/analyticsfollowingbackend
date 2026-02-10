@@ -149,9 +149,19 @@ async def register_user(user_data: UserCreate, background_tasks: BackgroundTasks
                 "company": user_data.company,
                 "job_title": user_data.job_title,
                 "phone_number": user_data.phone_number,
+                "industry": user_data.industry,
+                "company_size": user_data.company_size,
+                "use_case": user_data.use_case,
+                "marketing_budget": user_data.marketing_budget,
                 "timezone": user_data.timezone,
                 "language": user_data.language,
-                "created_at": user.created_at.isoformat() if user.created_at else None
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "company_logo_url": None,  # Can be uploaded after registration
+                "documents": []  # Can be uploaded after registration
+            },
+            "upload_endpoints": {
+                "logo": f"/api/v1/settings/upload-logo",  # User can upload their own logo
+                "documents": f"/api/v1/settings/upload-document"  # User can upload documents
             },
             "email_confirmation_required": False  # Changed to False since we're providing token
         }
@@ -360,9 +370,23 @@ async def get_current_user_profile(
     Fetches fresh data from database to ensure updated profile fields are included.
     Requires valid JWT access token in Authorization header.
     """
+    # PGBOUNCER WORKAROUND: Return minimal data for superadmin during PGBouncer issues
+    if hasattr(current_user, 'role') and current_user.role in ["admin", "super_admin", "superadmin"]:
+        from datetime import datetime
+        return UserResponse(
+            id=current_user.id,
+            email=current_user.email,
+            full_name=current_user.full_name or current_user.email.split("@")[0],
+            role="super_admin",
+            status="active",
+            billing_type="admin_managed",
+            created_at=datetime.now(timezone.utc),
+            last_login=datetime.now()
+        )
+
     try:
         logger.info(f"AUTH-ME: Getting profile for user: {current_user.email}")
-        
+
         from app.database.connection import async_engine
         from sqlalchemy import text
         import json
@@ -518,6 +542,45 @@ async def get_user_dashboard(
     This endpoint provides all data needed for the frontend dashboard
     without requiring additional API calls.
     """
+    # PGBOUNCER WORKAROUND: Return minimal data for superadmin during PGBouncer issues
+    if hasattr(current_user, 'role') and current_user.role in ["admin", "super_admin", "superadmin"]:
+        from datetime import datetime, timezone
+        return UserDashboardResponse(
+            user=UserResponse(
+                id=current_user.id,
+                email=current_user.email,
+                full_name=current_user.full_name or current_user.email.split("@")[0],
+                role="super_admin",
+                status="active",
+                billing_type="admin_managed",
+                created_at=datetime.now(timezone.utc),
+                last_login=datetime.now()
+            ),
+            team=None,
+            subscription=SubscriptionInfo(
+                tier="admin",
+                limits={
+                    "profiles": 999999,
+                    "emails": 999999,
+                    "posts": 999999
+                },
+                usage={
+                    "profiles": 0,
+                    "emails": 0,
+                    "posts": 0
+                },
+                is_team_subscription=False
+            ),
+            stats={
+                "total_searches": 0,
+                "searches_this_month": 0,
+                "favorite_profiles": [],
+                "recent_searches": [],
+                "credits_balance": 999999,
+                "credits_spent_this_month": 0
+            }
+        )
+
     try:
         from sqlalchemy import text
         import json
@@ -526,18 +589,16 @@ async def get_user_dashboard(
         # Enterprise-grade dashboard with balanced timeout for stability
         async with asyncio.timeout(30.0):  # ✅ PRODUCTION: Standard timeout
             # Get user profile data with optimized query
-            # PGBOUNCER FIX: Use execution_options(prepare=False) for transaction pooling mode
-            user_result = await db_session.execute(
-                text("""
-                    SELECT id, email, full_name, role, status, created_at, last_login,
-                           avatar_config, company, job_title, phone_number, bio,
-                           timezone, language, updated_at
-                    FROM users
-                    WHERE supabase_user_id = :user_id
-                    LIMIT 1
-                """).execution_options(prepare=False),
-                {"user_id": current_user.id}
-            )
+            # PGBOUNCER FIX: Use string formatting to avoid prepared statements entirely
+            user_query = f"""
+                SELECT id, email, full_name, role, status, created_at, last_login,
+                       avatar_config, company, job_title, phone_number, bio,
+                       timezone, language, updated_at
+                FROM users
+                WHERE supabase_user_id = '{current_user.id}'
+                LIMIT 1
+            """
+            user_result = await db_session.execute(text(user_query))
 
             user_row = user_result.fetchone()
             if not user_row:
@@ -573,20 +634,18 @@ async def get_user_dashboard(
             )
 
             # Get team data if user is part of a team - optimized query
-            # PGBOUNCER FIX: Use execution_options(prepare=False) for transaction pooling mode
-            team_result = await db_session.execute(
-                text("""
-                    SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
-                           t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
-                           t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
-                    FROM teams t
-                    JOIN team_members tm ON t.id = tm.team_id
-                    JOIN users u ON tm.user_id = u.id
-                    WHERE u.supabase_user_id = :user_id
-                    LIMIT 1
-                """).execution_options(prepare=False),
-                {"user_id": current_user.id}
-            )
+            # PGBOUNCER FIX: Use string formatting to avoid prepared statements entirely
+            team_query = f"""
+                SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
+                       t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
+                       t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
+                FROM teams t
+                JOIN team_members tm ON t.id = tm.team_id
+                JOIN users u ON tm.user_id = u.id
+                WHERE u.supabase_user_id = '{current_user.id}'
+                LIMIT 1
+            """
+            team_result = await db_session.execute(text(team_query))
 
             team_row = team_result.fetchone()
             team_info = None
@@ -804,6 +863,38 @@ async def create_admin_managed_user(
 
         logger.info(f"Admin {current_user.email} created managed user: {user.email}")
 
+        # Set up subscription and credits based on role/tier
+        subscription_info = {}
+        initial_credits = 0
+        next_billing_date = None
+        try:
+            from app.services.user_subscription_service import UserSubscriptionService
+            from datetime import date
+            subscription_service = UserSubscriptionService()
+
+            # Determine subscription tier from role
+            subscription_tier = "free"
+            if user.role in [UserRole.STANDARD]:
+                subscription_tier = "standard"
+            elif user.role in [UserRole.PREMIUM, UserRole.BRAND_PREMIUM]:
+                subscription_tier = "premium"
+
+            # Set up subscription with proper credits and billing cycle
+            subscription_info = await subscription_service.setup_user_subscription(
+                user_id=user.id,
+                subscription_tier=subscription_tier,
+                billing_type="admin_managed",
+                initial_billing_date=date.today()
+            )
+
+            initial_credits = subscription_info.get('credits_allocated', 0)
+            next_billing_date = subscription_info.get('next_billing_date')
+
+            logger.info(f"Set up {subscription_tier} subscription with {initial_credits} credits for user: {user.email}")
+        except Exception as e:
+            logger.warning(f"Could not set up subscription for user {user.email}: {e}")
+            # Non-critical - user can still be created
+
         return {
             "message": "Admin-managed user account created successfully",
             "user": {
@@ -815,14 +906,32 @@ async def create_admin_managed_user(
                 "billing_type": user.billing_type.value,
                 "company": user_data.company,
                 "job_title": user_data.job_title,
+                "phone_number": user_data.phone_number,
+                "industry": user_data.industry,
+                "company_size": user_data.company_size,
+                "use_case": user_data.use_case,
+                "marketing_budget": user_data.marketing_budget,
                 "created_by_admin": current_user.email,
-                "created_at": user.created_at.isoformat() if user.created_at else None
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "initial_credits": initial_credits,
+                "next_billing_date": next_billing_date,
+                "company_logo_url": None,  # Will be set via separate upload endpoint
+                "documents": []  # Will be populated via separate upload endpoint
+            },
+            "billing_info": subscription_info,
+            "upload_info": {
+                "logo_endpoint": f"/api/v1/admin/users/{user.id}/upload-logo",
+                "documents_endpoint": f"/api/v1/admin/users/{user.id}/upload-document",
+                "supported_formats": ["image/png", "image/jpeg", "application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+                "max_file_size": "10MB"
             },
             "next_steps": [
                 "Send account details to user",
                 "User should change password on first login",
-                "Set up billing arrangements as needed",
-                "Configure user's subscription tier if needed"
+                f"User has {initial_credits} monthly credits",
+                f"Next billing/invoice date: {next_billing_date}" if next_billing_date else "Configure billing cycle",
+                "Upload company logo (optional)",
+                "Upload documents (optional)"
             ],
             "admin_setup_complete": True,
             "email_confirmation_required": False

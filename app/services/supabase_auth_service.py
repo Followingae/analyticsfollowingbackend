@@ -286,6 +286,16 @@ class ProductionSupabaseAuthService:
                 
                 if user_row:
                     logger.info(f"LOGIN-FRESH: Found fresh user data in database for {supabase_user.email}")
+
+                    # Handle billing_type - superadmin doesn't need billing validation
+                    billing_type_value = "admin_managed"  # Default for admins
+                    if user_row.role not in ["admin", "super_admin", "superadmin"]:
+                        # Only validate billing_type for regular users
+                        if user_row.billing_type in ["admin_managed", "online_payment"]:
+                            billing_type_value = user_row.billing_type
+                        else:
+                            billing_type_value = "online_payment"  # Default for users
+
                     # Return fresh data from database
                     return UserResponse(
                         id=supabase_user.id,  # Use Supabase ID for consistency
@@ -301,7 +311,7 @@ class ProductionSupabaseAuthService:
                         phone_number=user_row.phone_number,
                         timezone=user_row.timezone or "UTC",
                         language=user_row.language or "en",
-                        billing_type=user_row.billing_type or "online_payment"
+                        billing_type=billing_type_value
                     )
                 else:
                     logger.warning(f"LOGIN-FRESH: User not found in database, using Supabase data for {supabase_user.email}")
@@ -461,38 +471,67 @@ class ProductionSupabaseAuthService:
                         
                         # ENFORCE: Check if user exists by Supabase ID ONLY (never create duplicates)
                         logger.info(f"SYNC: Looking for user with Supabase ID: {supabase_user.id} (attempt {attempt + 1})")
-                        result = await db.execute(select(User).where(User.supabase_user_id == supabase_user.id))
-                        existing_user = result.scalar_one_or_none()
-                        
+                        # PGBOUNCER FIX: Use raw SQL to avoid prepared statement conflicts
+                        raw_query = text("""
+                            SELECT * FROM users WHERE supabase_user_id = :supabase_id
+                        """)
+                        result = await db.execute(raw_query, {"supabase_id": supabase_user.id})
+                        row = result.first()
+                        existing_user = dict(row._mapping) if row else None
+
                         if not existing_user:
                             # CRITICAL: Check by email and UPDATE their supabase_user_id if they exist
                             logger.info(f"SYNC: User not found by Supabase ID, checking by email: {supabase_user.email}")
-                            result = await db.execute(select(User).where(User.email == supabase_user.email))
-                            existing_user = result.scalar_one_or_none()
-                            
-                            if existing_user and not existing_user.supabase_user_id:
+                            # PGBOUNCER FIX: Use raw SQL to avoid prepared statement conflicts
+                            raw_query = text("""
+                                SELECT * FROM users WHERE email = :email
+                            """)
+                            result = await db.execute(raw_query, {"email": supabase_user.email})
+                            row = result.first()
+                            existing_user = dict(row._mapping) if row else None
+
+                            # Debug logging to understand the type
+                            if existing_user:
+                                logger.info(f"SYNC: Found user by email - Type: {type(existing_user)}, Has id: {hasattr(existing_user, 'id')}")
+
+                            if existing_user and not existing_user.get('supabase_user_id'):
                                 # Fix orphaned user: link to Supabase Auth ID
                                 logger.warning(f"SYNC: FIXING ORPHANED USER - Linking {supabase_user.email} to Supabase ID {supabase_user.id}")
-                                await db.execute(
-                                    update(User)
-                                    .where(User.id == existing_user.id)
-                                    .values(supabase_user_id=supabase_user.id)
-                                )
-                                existing_user.supabase_user_id = supabase_user.id  # Update local object
-                        
+
+                                user_id = existing_user['id']
+
+                                # PGBOUNCER FIX: Use raw SQL for update
+                                update_query = text("""
+                                    UPDATE users SET supabase_user_id = :supabase_id
+                                    WHERE id = :user_id
+                                """)
+                                await db.execute(update_query, {
+                                    "supabase_id": supabase_user.id,
+                                    "user_id": user_id
+                                })
+                                existing_user['supabase_user_id'] = supabase_user.id  # Update local dict
+
                         if existing_user:
                             # Update existing user's last login and Supabase ID
-                            logger.info(f"SYNC: Updating existing user ID: {existing_user.id}")
-                            await db.execute(
-                                update(User)
-                                .where(User.id == existing_user.id)
-                                .values(
-                                    supabase_user_id=supabase_user.id,
-                                    last_login=current_time,
-                                    last_activity=current_time,
-                                    email_verified=bool(supabase_user.email_confirmed_at)
-                                )
-                            )
+                            user_id = existing_user['id']
+
+                            logger.info(f"SYNC: Updating existing user ID: {user_id}")
+                            # PGBOUNCER FIX: Use raw SQL for update
+                            update_query = text("""
+                                UPDATE users SET
+                                    supabase_user_id = :supabase_id,
+                                    last_login = :last_login,
+                                    last_activity = :last_activity,
+                                    email_verified = :email_verified
+                                WHERE id = :user_id
+                            """)
+                            await db.execute(update_query, {
+                                "supabase_id": supabase_user.id,
+                                "last_login": current_time,
+                                "last_activity": current_time,
+                                "email_verified": bool(supabase_user.email_confirmed_at),
+                                "user_id": user_id
+                            })
                             logger.info(f"SYNC: Successfully updated existing user: {supabase_user.email}")
                         else:
                             # Create new user in database - only required fields
@@ -507,7 +546,6 @@ class ProductionSupabaseAuthService:
                                 "free": {"role": "free", "subscription_tier": "free"},
                                 "premium": {"role": "premium", "subscription_tier": "premium"},
                                 "standard": {"role": "standard", "subscription_tier": "standard"},
-                                "admin": {"role": "admin", "subscription_tier": "premium"},
                                 "super_admin": {"role": "super_admin", "subscription_tier": "premium"},
                                 "superadmin": {"role": "super_admin", "subscription_tier": "premium"},
                                 "user": {"role": "free", "subscription_tier": "free"}  # Legacy fallback
@@ -528,8 +566,11 @@ class ProductionSupabaseAuthService:
                             }
                             final_billing_type = billing_type_mapping.get(billing_type_value, "online_payment")
 
-                            # Set status based on billing type
-                            user_status = "active" if final_billing_type == "online_payment" else "pending"
+                            # Set status based on billing type and creation context
+                            # Admin-created accounts should be active immediately
+                            # Check if this is an admin-created account by looking for admin metadata
+                            is_admin_created = user_metadata.get("created_by_admin") or final_billing_type == "admin_managed"
+                            user_status = "active" if (final_billing_type == "online_payment" or is_admin_created) else "pending"
 
                             new_user = User(
                                 supabase_user_id=supabase_user.id,  # Link to Supabase
@@ -796,9 +837,16 @@ class ProductionSupabaseAuthService:
             full_name = user_metadata.get("full_name", "")
             logger.warning(f"⚠️ Database lookup failed, using Supabase metadata: role={role_value}")
 
-        # Validate role
+        # Validate role - handle database string values
         try:
-            user_role = UserRole(role_value)
+            # Map database role strings to enum values
+            if role_value == "super_admin":
+                user_role = UserRole.SUPER_ADMIN
+            elif role_value == "superadmin":
+                user_role = UserRole.SUPERADMIN
+            else:
+                # All other values (free, standard, premium) are subscription tiers for brand accounts
+                user_role = UserRole(role_value)
         except ValueError:
             logger.warning(f"Invalid role '{role_value}' for user {user.id}, defaulting to 'free'")
             user_role = UserRole.FREE
@@ -832,7 +880,7 @@ class ProductionSupabaseAuthService:
         """Fetch complete user data from the database"""
         try:
             import asyncpg
-            from app.core.settings import settings
+            from app.core.config import settings
 
             conn = await asyncpg.connect(settings.DATABASE_URL)
             try:

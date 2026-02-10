@@ -210,24 +210,45 @@ def require_roles(allowed_roles: List[UserRole]):
     Usage: Depends(require_roles([UserRole.ADMIN, UserRole.PREMIUM]))
     """
     async def role_checker(current_user: UserInDB = Depends(get_current_active_user)) -> UserInDB:
-        if UserRole(current_user.role) not in allowed_roles:
+        # Debug logging for superadmin issues
+        user_role_str = current_user.role
+        logger.info(f"ROLE CHECK: User {current_user.email} has role: '{user_role_str}'")
+        logger.info(f"ROLE CHECK: Allowed roles: {[role.value for role in allowed_roles]}")
+
+        try:
+            # Convert role string to enum
+            user_role_enum = UserRole(user_role_str)
+            logger.info(f"ROLE CHECK: Converted to enum: {user_role_enum}")
+        except ValueError as e:
+            logger.error(f"ROLE CHECK: Failed to convert role '{user_role_str}' to UserRole enum: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Invalid user role: '{user_role_str}'"
+            )
+
+        if user_role_enum not in allowed_roles:
+            logger.warning(f"ROLE CHECK: Access denied - role '{user_role_enum.value}' not in {[r.value for r in allowed_roles]}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Access denied. Required roles: {[role.value for role in allowed_roles]}"
             )
+
+        logger.info(f"ROLE CHECK: Access granted for {current_user.email} with role {user_role_enum.value}")
         return current_user
-    
+
     return role_checker
 
 
 def require_premium():
     """Dependency to require premium or admin access"""
-    return require_roles([UserRole.PREMIUM, UserRole.ADMIN])
+    # Premium brand accounts and superadmins have premium access
+    return require_roles([UserRole.PREMIUM, UserRole.SUPERADMIN, UserRole.SUPER_ADMIN])
 
 
 def require_admin():
     """Dependency to require admin access"""
-    return require_roles([UserRole.ADMIN, UserRole.SUPERADMIN, UserRole.SUPER_ADMIN])
+    # Only superadmin roles have admin access - no "admin" role exists
+    return require_roles([UserRole.SUPERADMIN, UserRole.SUPER_ADMIN])
 
 
 async def verify_api_key(request: Request) -> bool:
@@ -251,7 +272,8 @@ class RateLimitMiddleware:
         self.rate_limits = {
             UserRole.FREE: {"requests_per_hour": 100, "searches_per_day": 10},
             UserRole.PREMIUM: {"requests_per_hour": 1000, "searches_per_day": 1000},
-            UserRole.ADMIN: {"requests_per_hour": 10000, "searches_per_day": 10000}
+            UserRole.SUPERADMIN: {"requests_per_hour": 10000, "searches_per_day": 10000},
+            UserRole.SUPER_ADMIN: {"requests_per_hour": 10000, "searches_per_day": 10000}
         }
     
     async def check_rate_limit(self, user: UserInDB, endpoint_type: str = "general") -> bool:

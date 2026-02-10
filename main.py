@@ -31,6 +31,12 @@ from app.middleware.frontend_headers import FrontendHeadersMiddleware
 from app.database import init_database, close_database, create_tables
 from app.database.comprehensive_service import comprehensive_service
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
+
+# Import HRM models to ensure they are registered with SQLAlchemy metadata
+from app.models.hrm import (
+    HRMEmployee, HRMAttendanceRaw, HRMAttendanceProcessed,
+    HRMTimesheet, HRMPayroll, HRMLeave, HRMLeaveBalance, HRMHoliday
+)
 # Cache cleanup moved to Redis cache manager
 # Removed automatic AI refresh scheduler - using manual refresh only
 
@@ -251,10 +257,25 @@ logger = logging.getLogger(__name__)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
     logger.error(f"❌ VALIDATION ERROR on {request.url}: {exc.errors()}")
-    logger.error(f"   Body: {exc.body if hasattr(exc, 'body') else 'N/A'}")
+
+    # Handle body logging - FormData can't be serialized to JSON
+    body_str = "N/A"
+    if hasattr(exc, 'body'):
+        if hasattr(exc.body, '__class__') and exc.body.__class__.__name__ == 'FormData':
+            body_str = f"FormData (file upload)"
+        else:
+            body_str = str(exc.body)
+
+    logger.error(f"   Body: {body_str}")
+
+    # Don't include body in response if it's FormData
+    response_body = None
+    if hasattr(exc, 'body') and hasattr(exc.body, '__class__') and exc.body.__class__.__name__ != 'FormData':
+        response_body = exc.body
+
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors(), "body": exc.body if hasattr(exc, 'body') else None}
+        content={"detail": exc.errors(), "body": response_body}
     )
 
 # CORS middleware - Configured for production and development
@@ -559,37 +580,21 @@ try:
 except ImportError as e:
     logger.warning(f"⚠️ Stripe Checkout routes not available: {e}")
 
-# Billing routes (new Stripe integration)
+# Main Billing routes (consolidated v3 with password validation)
 try:
     from app.api.billing_routes import router as billing_router
-    app.include_router(billing_router)
-    logger.info("✅ Billing routes registered")
+    app.include_router(billing_router, prefix="/api/v1/billing")
+    logger.info("✅ Billing routes registered (signup + subscription management)")
 except ImportError as e:
     logger.warning(f"⚠️ Billing routes not available: {e}")
 
-# Admin billing management routes
+# Admin billing management routes (for admin-managed accounts)
 try:
     from app.api.admin_billing_routes import router as admin_billing_router
     app.include_router(admin_billing_router)
-    logger.info("✅ Admin billing routes registered")
+    logger.info("✅ Admin billing routes registered (for admin-managed accounts)")
 except ImportError as e:
     logger.warning(f"⚠️ Admin billing routes not available: {e}")
-
-# Billing V3 routes (fixed webhook handling)
-try:
-    from app.api.billing_routes_v3 import router as billing_v3_router
-    app.include_router(billing_v3_router)
-    logger.info("✅ Billing V3 routes registered (fixed webhook handling)")
-except ImportError as e:
-    logger.warning(f"⚠️ Billing V3 routes not available: {e}")
-
-# Billing V2 routes (payment-first registration flow) - keeping for backward compatibility
-try:
-    from app.api.billing_routes_v2 import router as billing_v2_router
-    app.include_router(billing_v2_router)
-    logger.info("✅ Billing V2 routes registered (payment-first flow)")
-except ImportError as e:
-    logger.warning(f"⚠️ Billing V2 routes not available: {e}")
 
 # DISABLED: Simple Creator Search routes - Replaced by bulletproof compatibility endpoints below
 # from app.api.simple_creator_search_routes import router as simple_creator_router
@@ -1953,41 +1958,44 @@ async def bulletproof_get_profile(
         bulletproof_logger.error(f"BULLETPROOF: Get profile failed for {username}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get profile: {str(e)}")
 
-# System status and recovery routes
-from app.api.system_status_routes import router as system_status_router  
-app.include_router(system_status_router, prefix="/api/v1")
+# Streamlined Superadmin Routes - Core functionality only
+from app.api.admin.superadmin_routes import router as superadmin_router
+app.include_router(superadmin_router, prefix="/api/v1/admin")
 
-# System health monitoring routes
-from app.api.system_health_routes import router as system_health_router
-app.include_router(system_health_router)
-
-# Removed all proposal-related routes
-
-# Include Super Admin Dashboard Routes - COMPREHENSIVE ADMIN ACCESS
+# Comprehensive Dashboard Routes - Full dashboard functionality
 from app.api.admin.superadmin_dashboard_routes import router as superadmin_dashboard_router
-from app.api.admin.superadmin_comprehensive_extension import router as superadmin_extension_router
-from app.api.admin.superadmin_user_management import router as superadmin_user_mgmt_router
 app.include_router(superadmin_dashboard_router, prefix="/api")
-app.include_router(superadmin_extension_router, prefix="/api")
-app.include_router(superadmin_user_mgmt_router)  # Already has /api/v1/admin/superadmin prefix
-# CDN repair routes removed during cleanup
 
-# Superadmin Analytics Completeness Routes (Superadmin Only)
-from app.api.superadmin_analytics_routes import router as superadmin_analytics_router
-app.include_router(superadmin_analytics_router)
+# User Documents and Logo Upload Routes (Admin)
+from app.api.admin.user_documents_routes import router as user_documents_router
+app.include_router(user_documents_router, prefix="/api/v1/admin")
 
-# Worker Monitoring Routes (Admin Only)
-from app.api.worker_monitoring_routes import router as worker_monitoring_router
-app.include_router(worker_monitoring_router)
+# User Settings Routes (Users manage their own profile/documents)
+from app.api.user_settings_routes import router as user_settings_router
+app.include_router(user_settings_router, prefix="/api/v1/settings")
+
+# Comprehensive User Management Routes
+from app.api.admin.user_management_routes import router as user_management_router
+app.include_router(user_management_router, prefix="/api/v1")
+
+# Simple User Routes (bypass PGBouncer issues)
+from app.api.admin.simple_user_routes import router as simple_user_router
+app.include_router(simple_user_router, prefix="/api/v1")
 
 # Debug worker routes removed during cleanup
 
-# Include CDN Media and Health routes
+# Include CDN Media routes
 from app.api.cdn_media_routes import router as cdn_media_router
-from app.api.cdn_health_routes import router as cdn_health_router
 from app.api.cdn_monitoring_routes import router as cdn_monitoring_router
 app.include_router(cdn_media_router, prefix="/api/v1")
-app.include_router(cdn_health_router, prefix="/api/v1")
+
+# HRM Routes (Human Resource Management - Superadmin only)
+try:
+    from app.api.hrm_routes import router as hrm_router
+    app.include_router(hrm_router, prefix="/api/v1/hrm")
+    logger.info("✅ HRM routes registered successfully")
+except ImportError as e:
+    logger.warning(f"⚠️ HRM routes not available: {e}")
 app.include_router(cdn_monitoring_router)
 
 # Include Cloudflare MCP Integration routes

@@ -50,6 +50,11 @@ class UserCreate(UserBase):
     phone_number: Optional[str] = None
     timezone: Optional[str] = None
     language: Optional[str] = None
+    # New personalization fields
+    industry: Optional[str] = None  # Fashion & Beauty, Technology, etc.
+    company_size: Optional[str] = None  # solo, small, growing, large
+    use_case: Optional[str] = None  # Primary use case
+    marketing_budget: Optional[str] = None  # Budget range
 
 
 class UserUpdate(BaseModel):
@@ -64,18 +69,24 @@ class UserUpdate(BaseModel):
     phone_number: Optional[str] = None
     timezone: Optional[str] = None
     language: Optional[str] = None
+    # New personalization fields
+    industry: Optional[str] = None
+    company_size: Optional[str] = None
+    use_case: Optional[str] = None
+    marketing_budget: Optional[str] = None
 
 
 class UserInDB(UserBase):
     """User model as stored in database"""
     id: str
     supabase_user_id: str
+    subscription_tier: Optional[str] = "free"
     created_at: datetime
     updated_at: datetime
     last_login: Optional[datetime] = None
     profile_picture_url: Optional[str] = None
     preferences: Optional[Dict[str, Any]] = {}
-    
+
     class Config:
         from_attributes = True
 

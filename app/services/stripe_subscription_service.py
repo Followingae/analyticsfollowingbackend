@@ -27,11 +27,11 @@ class StripeSubscriptionService:
         if not self.stripe_secret_key:
             raise ValueError("STRIPE_SECRET_KEY environment variable is required")
 
-        # Price IDs from environment
+        # Price IDs from environment (using monthly subscription prices)
         self.price_ids = {
-            'free': os.getenv('STRIPE_FREE_PRICE_ID'),
-            'standard': os.getenv('STRIPE_STANDARD_PRICE_ID'),
-            'premium': os.getenv('STRIPE_PREMIUM_PRICE_ID')
+            'free': os.getenv('STRIPE_FREE_MONTHLY_PRICE_ID'),
+            'standard': os.getenv('STRIPE_STANDARD_MONTHLY_PRICE_ID'),
+            'premium': os.getenv('STRIPE_PREMIUM_MONTHLY_PRICE_ID')
         }
 
         self.topup_price_ids = {

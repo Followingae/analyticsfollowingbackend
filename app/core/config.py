@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     REDIS_URL: Optional[str] = os.getenv("REDIS_URL", None)
     
     # Database Configuration
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+    # PERMANENT FIX: Use direct connection to bypass PGBouncer entirely
+    DATABASE_URL: str = os.getenv("DIRECT_DATABASE_URL", os.getenv("DATABASE_URL", ""))
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")

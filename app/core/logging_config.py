@@ -25,12 +25,12 @@ def setup_logging():
             )
         ]
     )
-    
+
     # Set specific log levels for different modules
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("uvicorn").setLevel(logging.INFO)
     logging.getLogger("fastapi").setLevel(logging.INFO)
-    
+
     # Application loggers
     logging.getLogger("app.scrapers").setLevel(logging.INFO)
     logging.getLogger("app.api").setLevel(logging.WARNING)

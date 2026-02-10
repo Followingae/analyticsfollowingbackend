@@ -1,5 +1,9 @@
 import asyncio
 from typing import AsyncGenerator
+
+# ABSOLUTE FIX: Apply the monkey-patch BEFORE importing SQLAlchemy
+from .pgbouncer_absolute_fix import apply_absolute_pgbouncer_fix
+
 # Enterprise-grade SQLAlchemy async with connection pooling
 from sqlalchemy import create_engine, MetaData, text, pool
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -10,6 +14,10 @@ import logging
 
 from app.core.config import settings
 from .unified_models import Base
+from .pgbouncer_fix import create_pgbouncer_engine, PGBouncerSession
+from .pgbouncer_session import create_pgbouncer_safe_session_factory
+from .pgbouncer_dialect import create_pgbouncer_engine_with_custom_dialect
+from .pgbouncer_ultimate_fix import create_ultimate_pgbouncer_engine, create_ultimate_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -156,35 +164,11 @@ async def init_database():
             # Industry standard configuration for network unavailable mode
             async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-            async_engine = create_async_engine(
-                async_url,
-                poolclass=NullPool,  # FORCE: No connection pooling
-                echo=False,
-                query_cache_size=0,
-                execution_options={
-                    "compiled_cache": {},
-                    "autocommit": False,
-                    "isolation_level": None,
-                    "prepare": False  # NUCLEAR: Disable prepared statements globally
-                },
-                connect_args={
-                    "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                    "server_settings": {
-                        "application_name": "analytics_following_resilient"
-                    },
-                    "statement_cache_size": 0,
-                    "prepared_statement_cache_size": 0,
-                    "prepared_statement_name_func": None  # None = no prepared statements
-                }
-            )
-            SessionLocal = sessionmaker(
-                bind=async_engine,
-                class_=AsyncSession,
-                expire_on_commit=DatabaseConfig.SESSION_EXPIRE_ON_COMMIT,
-                autoflush=DatabaseConfig.SESSION_AUTOFLUSH,
-                autocommit=DatabaseConfig.SESSION_AUTOCOMMIT
-            )
-            logger.info("SUCCESS: Database initialized in resilient mode (network unavailable)")
+            # ULTIMATE: Use ULTIMATE PGBouncer engine in network unavailable mode too
+            async_engine = create_ultimate_pgbouncer_engine(settings.DATABASE_URL)
+            logger.info("ULTIMATE GLOBAL FIX: Using ULTIMATE PGBouncer engine in resilient mode")
+            SessionLocal = create_ultimate_session_factory(async_engine)
+            logger.info("SUCCESS: Database initialized in resilient mode with ULTIMATE ZERO prepared statements!")
             return
         
         logger.info("NETWORK: Network available - proceeding with full database initialization")
@@ -199,46 +183,20 @@ async def init_database():
         else:
             async_url = async_url.replace("postgresql://", "postgresql+asyncpg://")
 
-        # Add URL parameters to completely disable prepared statements
-        separator = "&" if "?" in async_url else "?"
-        async_url += f"{separator}statement_cache_size=0&prepared_statement_cache_size=0"
+        # DO NOT add URL parameters - they don't work with asyncpg through SQLAlchemy
+        # async_url parameters are ignored - must use connect_args
 
         # SESSION POOLER COMPATIBLE: Configuration for pgbouncer transaction mode
         # FORCE: Use the most basic connection with zero prepared statements
         from urllib.parse import urlparse, parse_qs
 
-        # FORCE: No prepared statements at all - use text() with no caching
-        async_engine = create_async_engine(
-            async_url,
-            poolclass=NullPool,  # FORCE: No connection pooling
-            echo=False,
-            # CRITICAL: Disable ALL caching and compilation
-            query_cache_size=0,
-            execution_options={
-                "compiled_cache": {},  # No compilation cache
-                "autocommit": False,
-                "prepare": False  # NUCLEAR: Disable prepared statements globally for ALL queries
-            },
-            connect_args={
-                "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                "server_settings": {
-                    "application_name": "analytics_following_no_prepare"
-                },
-                # COMPREHENSIVE PGBOUNCER FIX: Complete prepared statement disabling
-                "statement_cache_size": 0,
-                "prepared_statement_cache_size": 0,
-                "prepared_statement_name_func": None  # None = no prepared statements at all
-            }
-        )
-        
-        # Create session factory with unified configuration
-        SessionLocal = sessionmaker(
-            bind=async_engine,
-            class_=AsyncSession,
-            expire_on_commit=DatabaseConfig.SESSION_EXPIRE_ON_COMMIT,
-            autoflush=DatabaseConfig.SESSION_AUTOFLUSH,
-            autocommit=DatabaseConfig.SESSION_AUTOCOMMIT
-        )
+        # ULTIMATE GLOBAL PGBOUNCER FIX: Use the ULTIMATE engine with ZERO prepared statements
+        async_engine = create_ultimate_pgbouncer_engine(settings.DATABASE_URL)
+        logger.info("ULTIMATE GLOBAL FIX: Using ULTIMATE PGBouncer engine - ZERO prepared statements GLOBALLY!")
+
+        # Create session factory with ULTIMATE PGBouncer-safe session class
+        SessionLocal = create_ultimate_session_factory(async_engine)
+        logger.info("ULTIMATE GLOBAL FIX: ALL database operations will use ZERO prepared statements!")
         
         # Skip connection test for Session Pooler - pgbouncer doesn't support prepared statements
         logger.info("SKIPPING: Database connection test (Session Pooler/pgbouncer compatibility)")
@@ -271,35 +229,11 @@ async def init_database():
             try:
                 async_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-                async_engine = create_async_engine(
-                    async_url,
-                    poolclass=NullPool,  # FORCE: No connection pooling
-                    echo=False,
-                    query_cache_size=0,
-                    execution_options={
-                        "compiled_cache": {},
-                        "autocommit": False,
-                        "isolation_level": None,
-                        "prepare": False  # NUCLEAR: Disable prepared statements globally
-                    },
-                    connect_args={
-                        "command_timeout": DatabaseConfig.ASYNCPG_COMMAND_TIMEOUT,
-                        "server_settings": {
-                            "application_name": "analytics_following_emergency"
-                        },
-                        "statement_cache_size": 0,
-                        "prepared_statement_cache_size": 0,
-                        "prepared_statement_name_func": None  # None = no prepared statements
-                    }
-                )
-                SessionLocal = sessionmaker(
-                    bind=async_engine,
-                    class_=AsyncSession,
-                    expire_on_commit=DatabaseConfig.SESSION_EXPIRE_ON_COMMIT,
-                    autoflush=DatabaseConfig.SESSION_AUTOFLUSH,
-                    autocommit=DatabaseConfig.SESSION_AUTOCOMMIT
-                )
-                logger.info("SUCCESS: Database initialized in EMERGENCY RESILIENT MODE")
+                # ULTIMATE: Use ULTIMATE PGBouncer engine in emergency mode
+                async_engine = create_ultimate_pgbouncer_engine(settings.DATABASE_URL)
+                logger.info("ULTIMATE GLOBAL FIX: Using ULTIMATE PGBouncer engine in emergency mode")
+                SessionLocal = create_ultimate_session_factory(async_engine)
+                logger.info("SUCCESS: Database initialized in EMERGENCY MODE with ULTIMATE ZERO prepared statements!")
                 return
             except Exception as resilient_error:
                 logger.error(f"CRITICAL: Even resilient database initialization failed: {resilient_error}")
@@ -389,12 +323,21 @@ async def get_db():
     
     session = None
     try:
-        # Create async session directly from SessionLocal
+        # Create async session - already PGBouncer-safe from factory
         session = SessionLocal()
-        
+        logger.debug("PGBOUNCER: Using PGBouncer-safe session from factory")
+
+        # CRITICAL FIX: Always ensure clean transaction state
+        try:
+            if session.in_transaction():
+                await session.rollback()
+                logger.debug("PGBOUNCER: Rolled back existing transaction for clean state")
+        except Exception as rollback_error:
+            logger.debug(f"PGBOUNCER: Initial rollback check (non-critical): {rollback_error}")
+
         # Skip health check to avoid transaction conflicts - rely on pool_pre_ping instead
         database_resilience.record_success()
-        
+
         # CRITICAL FIX: Proper session yield with timeout protection and enhanced error handling
         try:
             # Validate session is healthy before yielding
