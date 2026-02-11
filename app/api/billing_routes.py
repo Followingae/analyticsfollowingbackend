@@ -343,7 +343,7 @@ async def handle_payment_success_webhook(
                         next_reset = next_month.replace(day=1)
 
                         wallet = CreditWallet(
-                            user_id=created_user.supabase_user_id,  # Use Supabase ID
+                            user_id=created_user.supabase_user_id or created_user.id,  # Use Supabase ID if available
                             current_balance=initial_credits,
                             lifetime_earned=initial_credits,
                             lifetime_spent=0,
@@ -541,7 +541,7 @@ async def verify_checkout_session(
                         next_reset = next_month.replace(day=1)
 
                         wallet = CreditWallet(
-                            user_id=created_user.supabase_user_id,
+                            user_id=created_user.supabase_user_id or created_user.id,  # Use supabase_user_id if available
                             current_balance=initial_credits,
                             lifetime_earned=initial_credits,
                             lifetime_spent=0,
@@ -722,7 +722,7 @@ async def register_free_tier(request: dict, db: AsyncSession = Depends(get_db)):
             next_reset = next_month.replace(day=1)
 
             wallet = CreditWallet(
-                user_id=created_user.supabase_user_id,
+                user_id=created_user.supabase_user_id or created_user.id,  # Use supabase_user_id if available
                 current_balance=100,
                 lifetime_earned=100,
                 lifetime_spent=0,

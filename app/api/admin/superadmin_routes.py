@@ -1013,6 +1013,26 @@ async def reset_user_password(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class SetPasswordRequest(BaseModel):
+    """Request model for setting user password"""
+    password: str = Field(..., min_length=8, description="New password for the user")
+
+
+@router.post("/users/{user_id}/set-password")
+async def set_user_password(
+    user_id: UUID,
+    request: SetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(require_admin())
+):
+    """Set a user's password (admin action) - alias for reset-password
+
+    This endpoint is an alias for reset-password to maintain compatibility
+    with frontend expectations.
+    """
+    return await reset_user_password(user_id, request.password, db, current_user)
+
+
 @router.post("/users/{user_id}/send-password-reset")
 async def send_password_reset_email(
     user_id: UUID,
