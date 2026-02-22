@@ -63,16 +63,23 @@ def get_async_engine():
     if engine is None:
         database_url = get_database_url()
         # Convert to async URL if needed
-        if not database_url.startswith('postgresql+asyncpg'):
+        if database_url.startswith('postgres://'):
+            database_url = database_url.replace('postgres://', 'postgresql+asyncpg://')
+        elif not database_url.startswith('postgresql+asyncpg'):
             database_url = database_url.replace('postgresql://', 'postgresql+asyncpg://')
-        
+
         engine = create_async_engine(
             database_url,
             echo=False,
             pool_size=5,
             max_overflow=10,
             pool_pre_ping=True,
+            connect_args={
+                "statement_cache_size": 0,  # Prevent named prepared statements
+                "command_timeout": 30,
+            },
         )
+        engine.dialect.supports_statement_cache = False
     return engine
 
 def get_async_session_factory():

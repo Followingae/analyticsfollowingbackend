@@ -46,6 +46,85 @@ class CheckoutSessionResponse(BaseModel):
 # Stripe configuration
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
+
+async def _ensure_team_and_wallet(
+    db: AsyncSession,
+    *,
+    member_user_id,
+    full_name: str,
+    email: str,
+    plan: str,
+):
+    """
+    Ensure a user has a team_member record and credit_wallet.
+    Creates them if missing. Idempotent — safe to call multiple times.
+
+    Accepts plain values (not ORM objects) to avoid SQLAlchemy greenlet/lazy-load issues.
+    """
+    from app.database.unified_models import Team, TeamMember, CreditWallet
+    import uuid as uuid_lib
+    from datetime import date, timedelta
+
+    # Normalise to UUID
+    if not isinstance(member_user_id, uuid_lib.UUID):
+        member_user_id = uuid_lib.UUID(str(member_user_id))
+
+    # Check if team_member already exists
+    tm_result = await db.execute(
+        select(TeamMember).where(TeamMember.user_id == member_user_id)
+    )
+    existing_member = tm_result.scalar_one_or_none()
+
+    if not existing_member:
+        team = Team(
+            id=uuid_lib.uuid4(),
+            name=f"{full_name or email.split('@')[0]}'s Team",
+            subscription_tier=plan,
+            max_team_members=5 if plan == 'premium' else 2,
+            monthly_profile_limit=2000 if plan == 'premium' else 500 if plan == 'standard' else 5,
+            monthly_email_limit=800 if plan == 'premium' else 250 if plan == 'standard' else 0,
+            monthly_posts_limit=300 if plan == 'premium' else 125 if plan == 'standard' else 0
+        )
+        db.add(team)
+
+        team_member = TeamMember(
+            id=uuid_lib.uuid4(),
+            team_id=team.id,
+            user_id=member_user_id,
+            role='owner',
+            status='active'
+        )
+        db.add(team_member)
+        logger.info(f"Created team + team_member for user {email}")
+
+    # Check if credit_wallet already exists
+    cw_result = await db.execute(
+        select(CreditWallet).where(CreditWallet.user_id == member_user_id)
+    )
+    existing_wallet = cw_result.scalar_one_or_none()
+
+    if not existing_wallet:
+        initial_credits = 5000 if plan == 'premium' else 2000 if plan == 'standard' else 100
+        today = date.today()
+        next_month = today.replace(day=1) + timedelta(days=32)
+        next_reset = next_month.replace(day=1)
+
+        wallet = CreditWallet(
+            user_id=member_user_id,
+            current_balance=initial_credits,
+            lifetime_earned=initial_credits,
+            lifetime_spent=0,
+            total_earned_this_cycle=initial_credits,
+            total_spent_this_cycle=0,
+            current_billing_cycle_start=today,
+            next_reset_date=next_reset,
+        )
+        db.add(wallet)
+        logger.info(f"Created credit_wallet for user {email} with {initial_credits} credits")
+
+    return True
+
+
 @router.post("/pre-registration-checkout", response_model=CheckoutSessionResponse)
 async def create_pre_registration_checkout(
     request: PreRegistrationCheckoutRequest,
@@ -247,18 +326,43 @@ async def handle_payment_success_webhook(
             existing_user = result.scalar_one_or_none()
 
             if existing_user:
-                # User exists, just update Stripe info
-                logger.info(f"User {email} already exists, updating Stripe information")
+                # User exists, update Stripe info AND ensure team/wallet exist
+                logger.info(f"User {email} already exists, updating Stripe info and ensuring team/wallet")
+                plan = metadata.get('plan', 'standard')
 
                 await db.execute(
                     update(User)
                     .where(User.email == email)
                     .values(
-                        subscription_tier=metadata.get('plan', 'standard'),
+                        subscription_tier=plan,
                         status='active'
                     )
                 )
-                await db.commit()
+
+                # Ensure team + wallet exist (fixes case where user was created by /auth/register without provisioning)
+                # Extract plain values to avoid greenlet/lazy-load errors
+                import uuid as _uuid
+                _supa_id = existing_user.supabase_user_id
+                _member_uid = _uuid.UUID(str(_supa_id)) if _supa_id else existing_user.id
+                _full_name = existing_user.full_name or ''
+                _email = existing_user.email or email
+
+                try:
+                    await _ensure_team_and_wallet(
+                        db,
+                        member_user_id=_member_uid,
+                        full_name=_full_name,
+                        email=_email,
+                        plan=plan,
+                    )
+                    await db.commit()
+                    logger.info(f"Team/wallet ensured for existing user {email}")
+                except Exception as e:
+                    logger.error(f"Failed to ensure team/wallet for {email}: {e}")
+                    try:
+                        await db.rollback()
+                    except Exception as rb_err:
+                        logger.warning(f"Rollback error: {rb_err}")
 
             else:
                 # Create new user
@@ -305,63 +409,27 @@ async def handle_payment_success_webhook(
                     created_user = result.scalar_one_or_none()
 
                     if created_user:
-                        # Create team for the user
-                        from app.database.unified_models import Team, TeamMember
-                        import uuid
-
-                        team = Team(
-                            id=uuid.uuid4(),
-                            name=f"{full_name}'s Team",
-                            subscription_tier=plan,
-                            max_team_members=5 if plan == 'premium' else 2,
-                            monthly_profile_limit=2000 if plan == 'premium' else 500 if plan == 'standard' else 5,
-                            monthly_email_limit=800 if plan == 'premium' else 250 if plan == 'standard' else 0,
-                            monthly_posts_limit=300 if plan == 'premium' else 125 if plan == 'standard' else 0
+                        _supa_id2 = created_user.supabase_user_id
+                        import uuid as _uuid2
+                        _member_uid2 = _uuid2.UUID(str(_supa_id2)) if _supa_id2 else created_user.id
+                        await _ensure_team_and_wallet(
+                            db,
+                            member_user_id=_member_uid2,
+                            full_name=created_user.full_name or full_name,
+                            email=created_user.email or email,
+                            plan=plan,
                         )
-                        db.add(team)
-
-                        # Add user as team owner
-                        team_member = TeamMember(
-                            id=uuid.uuid4(),
-                            team_id=team.id,
-                            user_id=created_user.id,
-                            role='owner',
-                            status='active'
-                        )
-                        db.add(team_member)
-
-                        # Create credit wallet with ALL required fields
-                        from app.database.unified_models import CreditWallet
-                        from datetime import date, timedelta
-
-                        # Determine initial credits based on plan
-                        initial_credits = 5000 if plan == 'premium' else 2000 if plan == 'standard' else 100
-
-                        # Calculate billing cycle dates
-                        today = date.today()
-                        next_month = today.replace(day=1) + timedelta(days=32)
-                        next_reset = next_month.replace(day=1)
-
-                        wallet = CreditWallet(
-                            user_id=created_user.supabase_user_id or created_user.id,  # Use Supabase ID if available
-                            current_balance=initial_credits,
-                            lifetime_earned=initial_credits,
-                            lifetime_spent=0,
-                            total_earned_this_cycle=initial_credits,
-                            total_spent_this_cycle=0,
-                            current_billing_cycle_start=today,
-                            next_reset_date=next_reset,
-                            # All other required fields have defaults in DB
-                        )
-                        db.add(wallet)
-
-                        logger.info(f"Created team and wallet for {email}")
 
                     await db.commit()
+                    logger.info(f"Created team and wallet for {email}")
 
                 except Exception as e:
                     logger.error(f"Failed to create user {email}: {e}")
-                    # Don't fail the webhook - log and continue
+                    # CRITICAL: Rollback to prevent partial commits (orphaned teams)
+                    try:
+                        await db.rollback()
+                    except Exception as rb_err:
+                        logger.warning(f"Rollback error: {rb_err}")
 
             logger.info(f"Successfully processed payment for {email}")
 
@@ -416,30 +484,58 @@ async def verify_checkout_session(
             user = result.scalar_one_or_none()
 
             if user and user.status == 'active':
+                # Extract ALL plain values from the ORM object immediately,
+                # before any other async call can disrupt the greenlet context.
+                import uuid as _uuid_vs
+                _user_id = user.id
+                _user_email = user.email or email
+                _user_full_name = user.full_name or ''
+                _user_role = user.role
+                _user_supa_id = user.supabase_user_id
+                _user_sub_tier = user.subscription_tier
+                plan = metadata.get('plan', _user_sub_tier or 'standard')
+                _member_uid_vs = _uuid_vs.UUID(str(_user_supa_id)) if _user_supa_id else _user_id
+
+                # Ensure team + wallet exist
+                try:
+                    await _ensure_team_and_wallet(
+                        db,
+                        member_user_id=_member_uid_vs,
+                        full_name=_user_full_name,
+                        email=_user_email,
+                        plan=plan,
+                    )
+                    await db.commit()
+                    logger.info(f"Team/wallet ensured for user {email} in verify-session")
+                except Exception as e:
+                    logger.error(f"Failed to ensure team/wallet in verify-session for {email}: {e}")
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+
                 # Generate authentication tokens for automatic login
-                # Get the password from metadata (temporary approach)
                 password = metadata.get('password', 'Following0925_25')
 
                 try:
-                    # Authenticate the user to get tokens
                     from app.models.auth import LoginRequest
-                    login_request = LoginRequest(email=email, password=password)
+                    login_request = LoginRequest(email=_user_email, password=password)
                     auth_response = await supabase_auth_service.login_user(login_request)
 
                     if auth_response and auth_response.access_token:
                         return {
                             "status": "complete",
                             "message": "Account created successfully",
-                            "email": email,
+                            "email": _user_email,
                             "can_login": True,
                             "access_token": auth_response.access_token,
                             "refresh_token": auth_response.refresh_token,
                             "user": {
-                                "id": str(user.id),
-                                "email": user.email,
-                                "full_name": user.full_name,
-                                "role": user.role,
-                                "subscription_tier": user.subscription_tier
+                                "id": str(_user_id),
+                                "email": _user_email,
+                                "full_name": _user_full_name,
+                                "role": _user_role,
+                                "subscription_tier": plan
                             }
                         }
                 except Exception as e:
@@ -449,7 +545,7 @@ async def verify_checkout_session(
                 return {
                     "status": "complete",
                     "message": "Account created successfully",
-                    "email": email,
+                    "email": _user_email,
                     "can_login": True
                 }
             elif not user and session.payment_status == 'paid':
@@ -506,79 +602,45 @@ async def verify_checkout_session(
                             )
                         )
 
-                        # Create team for the user
-                        from app.database.unified_models import Team, TeamMember
-                        import uuid
+                        # Extract plain values before any further async calls
+                        import uuid as _uuid_vs2
+                        _cu_id = created_user.id
+                        _cu_email = created_user.email or email
+                        _cu_full_name = created_user.full_name or full_name
+                        _cu_role = created_user.role
+                        _cu_supa_id = created_user.supabase_user_id
+                        _cu_member_uid = _uuid_vs2.UUID(str(_cu_supa_id)) if _cu_supa_id else _cu_id
 
-                        team = Team(
-                            id=uuid.uuid4(),
-                            name=f"{full_name}'s Team",
-                            subscription_tier=plan,
-                            max_team_members=5 if plan == 'premium' else 2,
-                            monthly_profile_limit=2000 if plan == 'premium' else 500,
-                            monthly_email_limit=800 if plan == 'premium' else 250,
-                            monthly_posts_limit=300 if plan == 'premium' else 125
+                        # Create team + wallet using shared helper
+                        await _ensure_team_and_wallet(
+                            db,
+                            member_user_id=_cu_member_uid,
+                            full_name=_cu_full_name,
+                            email=_cu_email,
+                            plan=plan,
                         )
-                        db.add(team)
-
-                        # Add user as team owner
-                        team_member = TeamMember(
-                            id=uuid.uuid4(),
-                            team_id=team.id,
-                            user_id=created_user.id,
-                            role='owner',
-                            status='active'
-                        )
-                        db.add(team_member)
-
-                        # Create credit wallet
-                        from app.database.unified_models import CreditWallet
-                        from datetime import date, timedelta
-
-                        initial_credits = 5000 if plan == 'premium' else 2000
-                        today = date.today()
-                        next_month = today.replace(day=1) + timedelta(days=32)
-                        next_reset = next_month.replace(day=1)
-
-                        wallet = CreditWallet(
-                            user_id=created_user.supabase_user_id or created_user.id,  # Use supabase_user_id if available
-                            current_balance=initial_credits,
-                            lifetime_earned=initial_credits,
-                            lifetime_spent=0,
-                            total_earned_this_cycle=initial_credits,
-                            total_spent_this_cycle=0,
-                            billing_cycle_start=today,
-                            billing_cycle_end=next_reset,
-                            stripe_customer_id=session.customer,
-                            stripe_subscription_id=session.subscription,
-                            package_id=None,
-                            last_credit_reset=today,
-                            next_credit_reset=next_reset
-                        )
-                        db.add(wallet)
-
                         await db.commit()
                         logger.info(f"Created team and wallet for user {email}")
 
                         # Try to auto-login
                         try:
                             from app.models.auth import LoginRequest
-                            login_request = LoginRequest(email=email, password=password)
-                            auth_response = await supabase_auth_service.login(login_request)
+                            login_request = LoginRequest(email=_cu_email, password=password)
+                            auth_response = await supabase_auth_service.login_user(login_request)
 
                             if auth_response and auth_response.access_token:
                                 return {
                                     "status": "complete",
                                     "message": "Account created successfully",
-                                    "email": email,
+                                    "email": _cu_email,
                                     "can_login": True,
-                                    "access_token": auth_response['access_token'],
-                                    "refresh_token": auth_response.get('refresh_token'),
+                                    "access_token": auth_response.access_token,
+                                    "refresh_token": auth_response.refresh_token,
                                     "user": {
-                                        "id": str(created_user.id),
-                                        "email": created_user.email,
-                                        "full_name": created_user.full_name,
-                                        "role": created_user.role,
+                                        "id": str(_cu_id),
+                                        "email": _cu_email,
+                                        "full_name": _cu_full_name,
+                                        "role": _cu_role,
                                         "subscription_tier": plan
                                     }
                                 }
@@ -589,12 +651,17 @@ async def verify_checkout_session(
                         return {
                             "status": "complete",
                             "message": "Account created successfully",
-                            "email": email,
+                            "email": _cu_email,
                             "can_login": True
                         }
 
                 except Exception as e:
                     logger.error(f"Failed to create user in verify-session: {e}")
+                    # CRITICAL: Rollback to prevent partial commits (orphaned teams)
+                    try:
+                        await db.rollback()
+                    except Exception as rb_err:
+                        logger.warning(f"Rollback error in verify-session: {rb_err}")
                     return {
                         "status": "error",
                         "message": "Failed to create account. Please contact support.",
@@ -693,46 +760,18 @@ async def register_free_tier(request: dict, db: AsyncSession = Depends(get_db)):
             )
             created_user = result.scalar_one_or_none()
 
-        # Create team and related records
+        # Create team and related records using shared helper
         if created_user:
-            team_id = uuid.uuid4()
-            team = Team(
-                id=team_id,
-                name=f"{request['full_name']}'s Team",
-                subscription_tier='free',
-                max_team_members=1,
-                monthly_profile_limit=5,
-                monthly_email_limit=0,
-                monthly_posts_limit=0
+            import uuid as _uuid_ft
+            _ft_supa_id = created_user.supabase_user_id
+            _ft_member_uid = _uuid_ft.UUID(str(_ft_supa_id)) if _ft_supa_id else created_user.id
+            await _ensure_team_and_wallet(
+                db,
+                member_user_id=_ft_member_uid,
+                full_name=created_user.full_name or request.get('full_name', ''),
+                email=created_user.email or request['email'],
+                plan='free',
             )
-            db.add(team)
-            await db.flush()
-
-            team_member = TeamMember(
-                id=uuid.uuid4(),
-                team_id=team_id,
-                user_id=created_user.id,
-                role='owner',
-                status='active'
-            )
-            db.add(team_member)
-
-            today = date.today()
-            next_month = today.replace(day=1) + timedelta(days=32)
-            next_reset = next_month.replace(day=1)
-
-            wallet = CreditWallet(
-                user_id=created_user.supabase_user_id or created_user.id,  # Use supabase_user_id if available
-                current_balance=100,
-                lifetime_earned=100,
-                lifetime_spent=0,
-                total_earned_this_cycle=100,
-                total_spent_this_cycle=0,
-                current_billing_cycle_start=today,
-                next_reset_date=next_reset,
-            )
-            db.add(wallet)
-
             await db.commit()
             logger.info(f"Created free tier user: {request['email']}")
 

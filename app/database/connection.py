@@ -8,15 +8,12 @@ from .pgbouncer_absolute_fix import apply_absolute_pgbouncer_fix
 from sqlalchemy import create_engine, MetaData, text, pool
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import QueuePool, NullPool
+from sqlalchemy.pool import QueuePool
 from supabase import create_client, Client
 import logging
 
 from app.core.config import settings
 from .unified_models import Base
-from .pgbouncer_fix import create_pgbouncer_engine, PGBouncerSession
-from .pgbouncer_session import create_pgbouncer_safe_session_factory
-from .pgbouncer_dialect import create_pgbouncer_engine_with_custom_dialect
 from .pgbouncer_ultimate_fix import create_ultimate_pgbouncer_engine, create_ultimate_session_factory
 
 logger = logging.getLogger(__name__)
@@ -326,14 +323,6 @@ async def get_db():
         # Create async session - already PGBouncer-safe from factory
         session = SessionLocal()
         logger.debug("PGBOUNCER: Using PGBouncer-safe session from factory")
-
-        # CRITICAL FIX: Always ensure clean transaction state
-        try:
-            if session.in_transaction():
-                await session.rollback()
-                logger.debug("PGBOUNCER: Rolled back existing transaction for clean state")
-        except Exception as rollback_error:
-            logger.debug(f"PGBOUNCER: Initial rollback check (non-critical): {rollback_error}")
 
         # Skip health check to avoid transaction conflicts - rely on pool_pre_ping instead
         database_resilience.record_success()

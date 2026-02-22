@@ -19,8 +19,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import the PGBouncer-safe engine creator
-from app.database.pgbouncer_fix import create_pgbouncer_engine
+# Import the engine creator
+from app.database.pgbouncer_absolute_fix import apply_absolute_pgbouncer_fix
+from app.database.pgbouncer_ultimate_fix import create_ultimate_pgbouncer_engine
 
 
 async def create_hrm_tables():
@@ -33,8 +34,8 @@ async def create_hrm_tables():
         if not DATABASE_URL:
             raise ValueError("DATABASE_URL not found in environment variables")
 
-        # Use the PGBouncer-safe engine
-        engine = create_pgbouncer_engine(DATABASE_URL)
+        # Use the safe engine
+        engine = create_ultimate_pgbouncer_engine(DATABASE_URL)
 
         async with engine.begin() as conn:
             # Create only HRM tables
