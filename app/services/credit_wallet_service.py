@@ -169,6 +169,7 @@ class CreditWalletService:
                 result = await session.execute(raw_query, {"user_id": user_id_str})
                 row = result.fetchone()
 
+                logger.info(f"[DIAG] get_wallet: user_id={user_id_str}, row_found={row is not None}")
                 if row:
                     # Create a proper wallet object using a class to ensure attributes work
                     class WalletData:
@@ -257,9 +258,10 @@ class CreditWalletService:
             logger.debug(f"Cache miss for wallet balance {user_id}: {cache_error}")
         
         wallet = await self.get_wallet(user_id)
+        logger.info(f"[DIAG] get_wallet_balance: user_id={user_id}, wallet_found={wallet is not None}, balance={wallet.current_balance if wallet else 'N/A'}")
         if not wallet:
             return CreditBalance(balance=0, is_locked=True, next_reset_date=date.today())
-        
+
         balance_data = {
             "balance": wallet.current_balance,
             "is_locked": wallet.is_locked,
@@ -459,14 +461,34 @@ class CreditWalletService:
                 
                 # Clear cache
                 await self._clear_user_cache(user_id)
-                
+
                 logger.info(f"Spent {amount} credits for user {user_id}, new balance: {transaction.balance_after}")
+
+                # Low balance warning (threshold: 50 credits)
+                if transaction.balance_after is not None and transaction.balance_after <= 50:
+                    try:
+                        from app.services.notification_service import NotificationService
+                        from sqlalchemy import text as sa_text
+                        email_result = await session.execute(
+                            sa_text("SELECT email FROM auth.users WHERE id = CAST(:uid AS uuid)"),
+                            {"uid": str(user_id)},
+                        )
+                        email_row = email_result.fetchone()
+                        if email_row:
+                            await NotificationService.notify_low_balance(
+                                session, user_id=user_id,
+                                user_email=email_row[0],
+                                current_balance=transaction.balance_after,
+                            )
+                    except Exception as notify_err:
+                        logger.warning(f"Failed to send low balance notification: {notify_err}")
+
                 return transaction
-                
+
         except Exception as e:
             logger.error(f"Error spending credits for user {user_id}: {e}")
             raise
-    
+
     async def spend_credits_atomic(
         self,
         db,  # Existing database session

@@ -513,6 +513,10 @@ app.include_router(user_discovery_router)
 from app.api.post_analytics_routes import router as post_analytics_router
 app.include_router(post_analytics_router, prefix="/api/v1")
 
+# Include Campaign Proposal routes (MUST be before campaign_routes to avoid /{campaign_id} catching "proposals")
+from app.api.campaign_proposal_routes import router as campaign_proposal_router
+app.include_router(campaign_proposal_router, prefix="/api/v1")
+
 # Include Campaign routes
 from app.api.campaign_routes import router as campaign_router
 app.include_router(campaign_router, prefix="/api/v1")
@@ -524,10 +528,6 @@ app.include_router(campaign_async_router, prefix="/api/v1/campaigns")
 # Include Campaign Workflow routes (USER & SUPERADMIN flows)
 from app.api.campaign_workflow_routes import router as campaign_workflow_router
 app.include_router(campaign_workflow_router, prefix="/api/v1")
-
-# Include Campaign Proposal routes
-from app.api.campaign_proposal_routes import router as campaign_proposal_router
-app.include_router(campaign_proposal_router, prefix="/api/v1")
 
 # Include Transaction Monitoring routes
 from app.api.transaction_monitoring_routes import router as transaction_monitoring_router
@@ -1716,6 +1716,18 @@ async def bulletproof_creator_search(
                 "industry_standard_workflow": "complete_processing_before_response"
             })
 
+            # Notify user that analytics are ready
+            try:
+                from app.services.notification_service import NotificationService
+                await NotificationService.notify_analytics_completed(
+                    db,
+                    user_id=current_user.id,
+                    user_email=current_user.email,
+                    username=username,
+                )
+            except Exception as notify_err:
+                logger.warning(f"Failed to send analytics completion notification: {notify_err}")
+
             # Return sanitized JSON response to prevent numpy serialization errors
             return safe_json_response(response_data)
         
@@ -2001,6 +2013,19 @@ app.include_router(cdn_monitoring_router)
 # Include Cloudflare MCP Integration routes
 from app.api.cloudflare_mcp_routes import router as cloudflare_mcp_router
 app.include_router(cloudflare_mcp_router)
+
+# Influencer Master Database (IMD) Routes
+from app.api.admin.influencer_database_routes import router as influencer_db_router
+app.include_router(influencer_db_router, prefix="/api/v1/admin")
+
+from app.api.admin.influencer_shares_routes import router as influencer_shares_router
+app.include_router(influencer_shares_router, prefix="/api/v1/admin")
+
+from app.api.influencer_shared_routes import router as influencer_shared_router
+app.include_router(influencer_shared_router, prefix="/api/v1")
+
+from app.api.notification_routes import router as notification_router
+app.include_router(notification_router, prefix="/api/v1")
 
 # REMOVED: Duplicate credit router with wrong prefix - causing API documentation duplication
 # Frontend should use /api/v1/credits/* endpoints (single inclusion above)

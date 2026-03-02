@@ -105,7 +105,8 @@ async def get_team_context(
     """
     try:
         logger.info(f"Team auth check for user: {current_user.email} (role: {getattr(current_user, 'role', 'UNKNOWN')})")
-        
+        logger.info(f"[DIAG] get_team_context: current_user.id={current_user.id}, current_user.supabase_user_id={getattr(current_user, 'supabase_user_id', 'NOT_SET')}, type(id)={type(current_user.id).__name__}")
+
         # ADMIN BYPASS: Super admins get unlimited access without team restrictions
         if hasattr(current_user, 'role') and current_user.role == 'super_admin':
             logger.info(f"Admin user {current_user.email} bypassing team restrictions")
@@ -158,7 +159,8 @@ async def get_team_context(
                 supabase_user_id = UUID(user_record)
             
             logger.info(f"Using resolved Supabase ID {supabase_user_id} for team lookup for {current_user.email}")
-        
+
+        logger.info(f"[DIAG] get_team_context: final supabase_user_id for query={supabase_user_id}")
         # Get user's team membership using Supabase User ID
         team_member_query = select(
             TeamMember.team_id,
@@ -186,7 +188,9 @@ async def get_team_context(
         
         result = await db.execute(team_member_query)
         team_data = result.first()
-        
+
+        logger.info(f"[DIAG] get_team_context: team_members query result={'FOUND team_id=' + str(team_data.team_id) if team_data else 'NO ROWS'} for supabase_user_id={supabase_user_id}")
+
         if not team_data:
             logger.error(f"User {current_user.email} with Supabase ID {supabase_user_id} has no team membership")
             raise TeamAuthenticationError("User is not a member of any active team")
@@ -227,6 +231,7 @@ async def get_team_context(
     except TeamAuthenticationError:
         raise
     except Exception as e:
+        logger.error(f"[DIAG] get_team_context EXCEPTION: user_id={current_user.id}, error_type={type(e).__name__}, error={e}")
         logger.error(f"Error getting team context for user {current_user.id}: {e}")
         raise TeamAuthenticationError(f"Failed to load team context: {str(e)}")
 

@@ -150,6 +150,27 @@ class CampaignProposalsService:
             await db.commit()
             await db.refresh(proposal)
 
+            # Send notification to user
+            try:
+                from app.services.notification_service import NotificationService
+                from sqlalchemy import text as sa_text
+                email_result = await db.execute(
+                    sa_text("SELECT email FROM auth.users WHERE id = CAST(:uid AS uuid)"),
+                    {"uid": str(proposal.user_id)},
+                )
+                email_row = email_result.fetchone()
+                if email_row:
+                    await NotificationService.notify_proposal_received(
+                        db,
+                        user_id=proposal.user_id,
+                        user_email=email_row[0],
+                        proposal_id=proposal.id,
+                        proposal_title=proposal.title,
+                        campaign_name=proposal.campaign_name,
+                    )
+            except Exception as notify_err:
+                logger.warning(f"Failed to send proposal notification: {notify_err}")
+
             logger.info(f"✅ Sent proposal {proposal_id} to user {proposal.user_id}")
             return proposal
 
@@ -381,6 +402,21 @@ class CampaignProposalsService:
             await db.commit()
             await db.refresh(campaign)
 
+            # Notify admin who created the proposal
+            try:
+                from app.services.notification_service import NotificationService
+                if proposal.created_by_admin_id:
+                    await NotificationService.notify_proposal_approved(
+                        db,
+                        proposal_id=proposal_id,
+                        proposal_title=proposal.title,
+                        campaign_name=proposal.campaign_name,
+                        admin_id=proposal.created_by_admin_id,
+                        selected_count=len(selected_profile_ids),
+                    )
+            except Exception as notify_err:
+                logger.warning(f"Failed to send proposal approval notification: {notify_err}")
+
             logger.info(f"✅ Approved proposal {proposal_id} and created campaign {campaign.id}")
             return campaign
 
@@ -426,6 +462,21 @@ class CampaignProposalsService:
 
             await db.commit()
             await db.refresh(proposal)
+
+            # Notify admin who created the proposal
+            try:
+                from app.services.notification_service import NotificationService
+                if proposal.created_by_admin_id:
+                    await NotificationService.notify_proposal_rejected(
+                        db,
+                        proposal_id=proposal_id,
+                        proposal_title=proposal.title,
+                        campaign_name=proposal.campaign_name,
+                        admin_id=proposal.created_by_admin_id,
+                        reason=reason,
+                    )
+            except Exception as notify_err:
+                logger.warning(f"Failed to send proposal rejection notification: {notify_err}")
 
             logger.info(f"✅ Rejected proposal {proposal_id}")
             return proposal

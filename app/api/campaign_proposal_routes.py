@@ -16,7 +16,7 @@ from app.database.connection import get_db
 from app.services.campaign_proposals_service import campaign_proposals_service
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/campaigns/proposals", tags=["Campaign Proposals"])
+router = APIRouter(tags=["Campaign Proposals"])
 
 # =============================================================================
 # REQUEST/RESPONSE MODELS
@@ -39,7 +39,7 @@ class RejectProposalRequest(BaseModel):
 # USER PROPOSAL ENDPOINTS
 # =============================================================================
 
-@router.get("/")
+@router.get("/campaigns/proposals")
 async def list_proposals(
     status_filter: Optional[str] = Query(None, regex='^(draft|sent|in_review|approved|rejected)$'),
     limit: int = Query(50, ge=1, le=100),
@@ -114,7 +114,7 @@ async def list_proposals(
             detail="Failed to list proposals"
         )
 
-@router.get("/{proposal_id}")
+@router.get("/campaigns/proposals/{proposal_id}")
 async def get_proposal_details(
     proposal_id: UUID,
     current_user: UserInDB = Depends(get_current_active_user),
@@ -189,7 +189,7 @@ async def get_proposal_details(
             detail="Failed to retrieve proposal details"
         )
 
-@router.put("/{proposal_id}/influencers")
+@router.put("/campaigns/proposals/{proposal_id}/influencers")
 async def update_influencer_selection(
     proposal_id: UUID,
     request: InfluencerSelectionRequest,
@@ -236,7 +236,7 @@ async def update_influencer_selection(
             detail="Failed to update influencer selection"
         )
 
-@router.post("/{proposal_id}/approve")
+@router.post("/campaigns/proposals/{proposal_id}/approve")
 async def approve_proposal(
     proposal_id: UUID,
     request: ApproveProposalRequest,
@@ -290,7 +290,7 @@ async def approve_proposal(
             detail="Failed to approve proposal"
         )
 
-@router.post("/{proposal_id}/reject")
+@router.post("/campaigns/proposals/{proposal_id}/reject")
 async def reject_proposal(
     proposal_id: UUID,
     request: RejectProposalRequest,
@@ -338,10 +338,57 @@ async def reject_proposal(
         )
 
 # =============================================================================
+# PRICING SYNC (Endpoint 17 - Influencer Master Database)
+# =============================================================================
+
+@router.post("/campaigns/proposals/pricing/influencers")
+async def sync_influencer_pricing(
+    pricing_data: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: UserInDB = Depends(get_current_active_user),
+):
+    """
+    Sync pricing to influencer_database table from proposal context.
+    Requires admin. Expects {influencer_id: UUID, ...pricing fields}.
+    """
+    from app.middleware.auth_middleware import require_admin
+    from app.services.influencer_database_service import InfluencerDatabaseService
+
+    # Verify admin
+    admin_check = require_admin()
+    await admin_check(current_user)
+
+    influencer_id = pricing_data.pop("influencer_id", None)
+    if not influencer_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="influencer_id is required"
+        )
+
+    try:
+        result = await InfluencerDatabaseService.sync_pricing(
+            db, UUID(str(influencer_id)), pricing_data
+        )
+        return {
+            "success": True,
+            "data": {"influencer": result},
+            "message": "Pricing synced to influencer database"
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error syncing pricing: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to sync pricing"
+        )
+
+
+# =============================================================================
 # HEALTH CHECK
 # =============================================================================
 
-@router.get("/health/check")
+@router.get("/campaigns/proposals/health/check")
 async def proposal_health():
     """Campaign proposals module health check"""
     return {

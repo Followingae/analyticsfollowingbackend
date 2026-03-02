@@ -184,6 +184,8 @@ class ProductionSupabaseAuthService:
             session = auth_response.session
             
             logger.info(f"SUCCESS: Supabase authentication successful for user ID: {user.id}")
+            logger.info(f"[DIAG] login_user: supabase user.id={user.id}, email={user.email}")
+            logger.info(f"[DIAG] login_user: session exists={session is not None}, access_token_prefix={session.access_token[:20] if session and session.access_token else 'NONE'}...")
             
             # Get user metadata
             user_metadata = user.user_metadata or {}
@@ -228,6 +230,7 @@ class ProductionSupabaseAuthService:
                 user=user_response
             )
             
+            logger.info(f"[DIAG] login_user: user_response.id={user_response.id}, role={user_response.role}, status={user_response.status}")
             logger.info(f"COMPLETE: Login successful for {login_data.email}")
             return response
             
@@ -666,7 +669,8 @@ class ProductionSupabaseAuthService:
             
             user = auth_response.user
             user_metadata = user.user_metadata or {}
-            
+            logger.info(f"[DIAG] register_user: supabase user.id={user.id}, email={user.email}")
+
             # Sync to database - forced sync during registration
             await self._ensure_user_in_database(user, user_metadata)
             
@@ -696,6 +700,7 @@ class ProductionSupabaseAuthService:
                 last_login=None
             )
             
+            logger.info(f"[DIAG] register_user: user_response.id={user_response.id}, role={user_response.role}")
             logger.info(f"SUCCESS: User registration successful: {user_data.email}")
             return user_response
             
@@ -874,6 +879,7 @@ class ProductionSupabaseAuthService:
         if subscription_tier:
             setattr(user_in_db, 'subscription_tier', subscription_tier)
 
+        logger.info(f"[DIAG] _create_user_in_db_from_supabase: UserInDB.id={user_in_db.id}, supabase_user_id={user_in_db.supabase_user_id}, role={user_in_db.role}, status={user_in_db.status}")
         return user_in_db
 
     async def _fetch_database_user_data(self, supabase_user_id: str) -> Optional[Dict[str, Any]]:

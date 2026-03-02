@@ -2061,3 +2061,166 @@ class MonthlyUsageTracking(Base):
         Index('idx_monthly_usage_team_month', 'team_id', 'billing_month'),
         Index('idx_monthly_usage_user_month', 'user_id', 'billing_month'),
     )
+
+
+# =============================================================================
+# INFLUENCER MASTER DATABASE (IMD) TABLES
+# =============================================================================
+
+class InfluencerDatabase(Base):
+    """
+    Superadmin-managed influencer CRM database.
+    Stores Instagram profile data + cost/sell pricing for influencer management.
+    """
+    __tablename__ = 'influencer_database'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+
+    # Instagram profile data
+    username = Column(String(255), nullable=False, unique=True)
+    full_name = Column(Text)
+    biography = Column(Text)
+    profile_image_url = Column(Text)
+    is_verified = Column(Boolean, default=False)
+    is_private = Column(Boolean, default=False)
+
+    # Metrics
+    followers_count = Column(BigInteger, default=0)
+    following_count = Column(BigInteger, default=0)
+    posts_count = Column(BigInteger, default=0)
+    engagement_rate = Column(Numeric(8, 4), default=0)
+    avg_likes = Column(BigInteger, default=0)
+    avg_comments = Column(BigInteger, default=0)
+    avg_views = Column(BigInteger, default=0)
+
+    # CRM metadata
+    status = Column(String(50), default='active')
+    tier = Column(String(50))
+    categories = Column(ARRAY(Text), default=[])
+    tags = Column(ARRAY(Text), default=[])
+    internal_notes = Column(Text)
+
+    # Cost pricing (what we pay the influencer) - stored in USD cents
+    cost_post_usd_cents = Column(Integer)
+    cost_story_usd_cents = Column(Integer)
+    cost_reel_usd_cents = Column(Integer)
+    cost_carousel_usd_cents = Column(Integer)
+    cost_video_usd_cents = Column(Integer)
+    cost_bundle_usd_cents = Column(Integer)
+    cost_monthly_usd_cents = Column(Integer)
+
+    # Sell pricing (what we charge the client) - stored in USD cents
+    sell_post_usd_cents = Column(Integer)
+    sell_story_usd_cents = Column(Integer)
+    sell_reel_usd_cents = Column(Integer)
+    sell_carousel_usd_cents = Column(Integer)
+    sell_video_usd_cents = Column(Integer)
+    sell_bundle_usd_cents = Column(Integer)
+    sell_monthly_usd_cents = Column(Integer)
+
+    # Auto pricing settings
+    auto_calculate_sell = Column(Boolean, default=False)
+    default_markup_percentage = Column(Numeric(5, 2), default=30.00)
+
+    # Package pricing and volume discounts (flexible JSON)
+    package_pricing = Column(JSONB, default={})
+    volume_discounts = Column(JSONB, default=[])
+
+    # Platform and content data
+    platforms = Column(JSONB, default={})
+    language_distribution = Column(JSONB, default={})
+
+    # AI analysis cache
+    ai_content_categories = Column(ARRAY(Text), default=[])
+    ai_sentiment_score = Column(Numeric(5, 4))
+    ai_audience_quality_score = Column(Numeric(5, 4))
+
+    # Tracking
+    last_analytics_refresh = Column(DateTime(timezone=True))
+    added_by = Column(UUID(as_uuid=True))
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        Index('idx_influencer_db_tags', 'tags', postgresql_using='gin'),
+        Index('idx_influencer_db_categories', 'categories', postgresql_using='gin'),
+        Index('idx_influencer_db_followers', 'followers_count'),
+        Index('idx_influencer_db_engagement', 'engagement_rate'),
+        Index('idx_influencer_db_status', 'status'),
+        Index('idx_influencer_db_username', 'username'),
+    )
+
+
+class InfluencerAccessShare(Base):
+    """
+    Defines a share configuration: which influencers are shared,
+    what fields are visible, and expiration settings.
+    """
+    __tablename__ = 'influencer_access_shares'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    influencer_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False, default=[])
+
+    # Visibility control
+    visible_fields = Column(JSONB, nullable=False, default={
+        "show_analytics": True,
+        "show_sell_pricing": False,
+        "show_engagement": True,
+        "show_audience": True,
+        "show_content_analysis": True,
+        "show_contact_info": False,
+    })
+
+    duration = Column(String(50), default='30d')
+    is_active = Column(Boolean, default=True)
+    created_by = Column(UUID(as_uuid=True), nullable=False)
+
+    # Tracking
+    access_count = Column(Integer, default=0)
+    last_accessed_at = Column(DateTime(timezone=True))
+    expires_at = Column(DateTime(timezone=True))
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    shared_with_users = relationship("InfluencerShareUser", back_populates="share", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index('idx_influencer_shares_created_by', 'created_by'),
+        Index('idx_influencer_shares_active', 'is_active', postgresql_where=text("is_active = true")),
+    )
+
+
+class InfluencerShareUser(Base):
+    """
+    Join table linking shares to individual users who can access them.
+    """
+    __tablename__ = 'influencer_share_users'
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+
+    share_id = Column(UUID(as_uuid=True), ForeignKey('influencer_access_shares.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(UUID(as_uuid=True))
+    user_email = Column(String(255), nullable=False)
+    user_name = Column(String(255))
+    access_level = Column(String(20), default='view')
+
+    granted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    expires_at = Column(DateTime(timezone=True))
+
+    # Relationships
+    share = relationship("InfluencerAccessShare", back_populates="shared_with_users")
+
+    __table_args__ = (
+        UniqueConstraint('share_id', 'user_id', name='unique_share_user'),
+        Index('idx_share_users_share', 'share_id'),
+        Index('idx_share_users_user', 'user_id'),
+        Index('idx_share_users_email', 'user_email'),
+    )

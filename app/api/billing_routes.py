@@ -15,6 +15,7 @@ from app.models.auth import BillingType, UserRole
 from pydantic import BaseModel
 from app.services.stripe_billing_service import stripe_billing_service
 from app.services.supabase_auth_service import supabase_auth_service
+from app.middleware.auth_middleware import get_current_active_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["billing"])
@@ -250,13 +251,20 @@ async def handle_payment_success_webhook(
                 # User exists, just update Stripe info
                 logger.info(f"User {email} already exists, updating Stripe information")
 
+                update_values = {
+                    'subscription_tier': metadata.get('plan', 'standard'),
+                    'status': 'active'
+                }
+                # Save Stripe customer ID if available
+                stripe_customer_id = session.get('customer')
+                if stripe_customer_id:
+                    update_values['stripe_customer_id'] = stripe_customer_id
+                    logger.info(f"Saving stripe_customer_id {stripe_customer_id} for existing user {email}")
+
                 await db.execute(
                     update(User)
                     .where(User.email == email)
-                    .values(
-                        subscription_tier=metadata.get('plan', 'standard'),
-                        status='active'
-                    )
+                    .values(**update_values)
                 )
                 await db.commit()
 
@@ -309,8 +317,9 @@ async def handle_payment_success_webhook(
                         from app.database.unified_models import Team, TeamMember
                         import uuid
 
+                        team_id = uuid.uuid4()
                         team = Team(
-                            id=uuid.uuid4(),
+                            id=team_id,
                             name=f"{full_name}'s Team",
                             subscription_tier=plan,
                             max_team_members=5 if plan == 'premium' else 2,
@@ -319,18 +328,20 @@ async def handle_payment_success_webhook(
                             monthly_posts_limit=300 if plan == 'premium' else 125 if plan == 'standard' else 0
                         )
                         db.add(team)
+                        await db.flush()
 
                         # Add user as team owner
+                        # Use supabase_user_id to match team_auth_middleware queries
                         team_member = TeamMember(
                             id=uuid.uuid4(),
-                            team_id=team.id,
-                            user_id=created_user.id,
+                            team_id=team_id,
+                            user_id=created_user.supabase_user_id or created_user.id,
                             role='owner',
                             status='active'
                         )
                         db.add(team_member)
 
-                        # Create credit wallet with ALL required fields
+                        # Create credit wallet with correct field names
                         from app.database.unified_models import CreditWallet
                         from datetime import date, timedelta
 
@@ -343,7 +354,7 @@ async def handle_payment_success_webhook(
                         next_reset = next_month.replace(day=1)
 
                         wallet = CreditWallet(
-                            user_id=created_user.supabase_user_id or created_user.id,  # Use Supabase ID if available
+                            user_id=created_user.supabase_user_id or created_user.id,
                             current_balance=initial_credits,
                             lifetime_earned=initial_credits,
                             lifetime_spent=0,
@@ -351,9 +362,14 @@ async def handle_payment_success_webhook(
                             total_spent_this_cycle=0,
                             current_billing_cycle_start=today,
                             next_reset_date=next_reset,
-                            # All other required fields have defaults in DB
                         )
                         db.add(wallet)
+
+                        # Save Stripe customer ID on the user record
+                        stripe_customer_id = session.get('customer')
+                        if stripe_customer_id:
+                            created_user.stripe_customer_id = stripe_customer_id
+                            logger.info(f"Saved stripe_customer_id {stripe_customer_id} for new user {email}")
 
                         logger.info(f"Created team and wallet for {email}")
 
@@ -364,6 +380,27 @@ async def handle_payment_success_webhook(
                     # Don't fail the webhook - log and continue
 
             logger.info(f"Successfully processed payment for {email}")
+
+            # Send notification to user about successful payment
+            try:
+                from app.services.notification_service import NotificationService
+                from sqlalchemy import text as sa_text
+                uid_result = await db.execute(
+                    sa_text("SELECT id FROM auth.users WHERE email = :email"),
+                    {"email": email},
+                )
+                uid_row = uid_result.fetchone()
+                plan = metadata.get('plan', 'standard')
+                credits_map = {'premium': 5000, 'standard': 2000, 'free': 100}
+                await NotificationService.notify_credit_purchase(
+                    db,
+                    user_id=uid_row[0] if uid_row else None,
+                    user_email=email,
+                    credits_added=credits_map.get(plan, 2000),
+                    plan_name=plan.title(),
+                )
+            except Exception as notify_err:
+                logger.warning(f"Failed to send payment notification: {notify_err}")
 
         return {"received": True}
 
@@ -496,22 +533,29 @@ async def verify_checkout_session(
                     created_user = result.scalar_one_or_none()
 
                     if created_user:
-                        # Update user subscription info
+                        # Update user subscription info + save Stripe customer ID
+                        verify_update_values = {
+                            'subscription_tier': plan,
+                            'status': 'active'
+                        }
+                        stripe_customer_id = session.customer if hasattr(session, 'customer') else session.get('customer')
+                        if stripe_customer_id:
+                            verify_update_values['stripe_customer_id'] = stripe_customer_id
+                            logger.info(f"Saving stripe_customer_id {stripe_customer_id} for new user {email} via verify-session")
+
                         await db.execute(
                             update(User)
                             .where(User.email == email)
-                            .values(
-                                subscription_tier=plan,
-                                status='active'
-                            )
+                            .values(**verify_update_values)
                         )
 
                         # Create team for the user
                         from app.database.unified_models import Team, TeamMember
                         import uuid
 
+                        team_id = uuid.uuid4()
                         team = Team(
-                            id=uuid.uuid4(),
+                            id=team_id,
                             name=f"{full_name}'s Team",
                             subscription_tier=plan,
                             max_team_members=5 if plan == 'premium' else 2,
@@ -520,18 +564,20 @@ async def verify_checkout_session(
                             monthly_posts_limit=300 if plan == 'premium' else 125
                         )
                         db.add(team)
+                        await db.flush()
 
                         # Add user as team owner
+                        # Use supabase_user_id to match team_auth_middleware queries
                         team_member = TeamMember(
                             id=uuid.uuid4(),
-                            team_id=team.id,
-                            user_id=created_user.id,
+                            team_id=team_id,
+                            user_id=created_user.supabase_user_id or created_user.id,
                             role='owner',
                             status='active'
                         )
                         db.add(team_member)
 
-                        # Create credit wallet
+                        # Create credit wallet with correct field names
                         from app.database.unified_models import CreditWallet
                         from datetime import date, timedelta
 
@@ -541,19 +587,14 @@ async def verify_checkout_session(
                         next_reset = next_month.replace(day=1)
 
                         wallet = CreditWallet(
-                            user_id=created_user.supabase_user_id or created_user.id,  # Use supabase_user_id if available
+                            user_id=created_user.supabase_user_id or created_user.id,
                             current_balance=initial_credits,
                             lifetime_earned=initial_credits,
                             lifetime_spent=0,
                             total_earned_this_cycle=initial_credits,
                             total_spent_this_cycle=0,
-                            billing_cycle_start=today,
-                            billing_cycle_end=next_reset,
-                            stripe_customer_id=session.customer,
-                            stripe_subscription_id=session.subscription,
-                            package_id=None,
-                            last_credit_reset=today,
-                            next_credit_reset=next_reset
+                            current_billing_cycle_start=today,
+                            next_reset_date=next_reset,
                         )
                         db.add(wallet)
 
@@ -564,7 +605,7 @@ async def verify_checkout_session(
                         try:
                             from app.models.auth import LoginRequest
                             login_request = LoginRequest(email=email, password=password)
-                            auth_response = await supabase_auth_service.login(login_request)
+                            auth_response = await supabase_auth_service.login_user(login_request)
 
                             if auth_response and auth_response.access_token:
                                 return {
@@ -572,8 +613,8 @@ async def verify_checkout_session(
                                     "message": "Account created successfully",
                                     "email": email,
                                     "can_login": True,
-                                    "access_token": auth_response['access_token'],
-                                    "refresh_token": auth_response.get('refresh_token'),
+                                    "access_token": auth_response.access_token,
+                                    "refresh_token": auth_response.refresh_token,
                                     "user": {
                                         "id": str(created_user.id),
                                         "email": created_user.email,
@@ -747,3 +788,291 @@ async def register_free_tier(request: dict, db: AsyncSession = Depends(get_db)):
             "access_token": None,
             "refresh_token": None
         }
+
+
+# =============================================================================
+# SUBSCRIPTION STATUS & PORTAL ENDPOINTS
+# =============================================================================
+
+class PortalSessionRequest(BaseModel):
+    """Request for creating a Stripe Customer Portal session"""
+    return_url: Optional[str] = None
+
+
+@router.get("/subscription-status")
+async def get_subscription_status(
+    current_user=Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get comprehensive subscription status for the billing page.
+    Returns plan details, Stripe billing info, credit balance, usage stats,
+    and a Stripe portal URL for subscription management.
+    """
+    from app.database.unified_models import User, CreditWallet, Team, TeamMember
+    from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
+    from sqlalchemy import and_, join
+
+    try:
+        # 1. Get user record with stripe_customer_id and subscription info
+        user_result = await db.execute(
+            select(User).where(
+                User.supabase_user_id == str(current_user.id)
+            )
+        )
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            # Fallback: try by email
+            user_result = await db.execute(
+                select(User).where(User.email == current_user.email)
+            )
+            user = user_result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User record not found"
+            )
+
+        # Extract all needed user fields into local variables BEFORE any
+        # subsequent await calls. After await db.execute(), SQLAlchemy expires
+        # the ORM object's attributes and lazy-loading fails with async sessions.
+        user_stripe_customer_id = user.stripe_customer_id
+        user_email = user.email
+        user_full_name = user.full_name
+        user_billing_type = user.billing_type
+        user_status = user.status
+        user_subscription_tier = user.subscription_tier
+        user_supabase_id = user.supabase_user_id or str(user.id)
+
+        tier = user_subscription_tier or 'free'
+
+        # 2. Get plan details from SUBSCRIPTION_TIER_LIMITS
+        tier_key = getattr(SubscriptionTier, tier.upper(), tier)
+        tier_limits = SUBSCRIPTION_TIER_LIMITS.get(tier_key, SUBSCRIPTION_TIER_LIMITS.get(tier, SUBSCRIPTION_TIER_LIMITS.get(SubscriptionTier.FREE)))
+
+        plan_info = {
+            "tier": tier,
+            "status": "active" if user_status == "active" else user_status,
+            "price_per_month": tier_limits.get("price_per_month", 0),
+            "currency": tier_limits.get("currency", "USD"),
+            "features": tier_limits.get("features", []),
+            "description": tier_limits.get("description", ""),
+            "max_team_members": tier_limits.get("max_team_members", 1),
+            "monthly_profile_limit": tier_limits.get("monthly_profile_limit", 5),
+            "monthly_email_limit": tier_limits.get("monthly_email_limit", 0),
+            "monthly_posts_limit": tier_limits.get("monthly_posts_limit", 0),
+            "monthly_credits": tier_limits.get("monthly_credits", 0),
+            "topup_discount": tier_limits.get("topup_discount", 0.0),
+        }
+
+        # 3. Get team usage data
+        usage_info = {
+            "profiles_used": 0,
+            "profiles_limit": tier_limits.get("monthly_profile_limit", 5),
+            "emails_used": 0,
+            "emails_limit": tier_limits.get("monthly_email_limit", 0),
+            "posts_used": 0,
+            "posts_limit": tier_limits.get("monthly_posts_limit", 0),
+        }
+
+        # Find user's team via team_members
+        supabase_id = user_supabase_id
+        team_query = select(
+            Team.profiles_used_this_month,
+            Team.emails_used_this_month,
+            Team.posts_used_this_month,
+            Team.monthly_profile_limit,
+            Team.monthly_email_limit,
+            Team.monthly_posts_limit,
+            Team.name.label("team_name"),
+            Team.subscription_tier.label("team_tier"),
+        ).select_from(
+            join(TeamMember, Team, TeamMember.team_id == Team.id)
+        ).where(
+            and_(
+                TeamMember.user_id == supabase_id,
+                TeamMember.status == "active"
+            )
+        )
+        team_result = await db.execute(team_query)
+        team_data = team_result.first()
+
+        if team_data:
+            usage_info = {
+                "profiles_used": team_data.profiles_used_this_month or 0,
+                "profiles_limit": team_data.monthly_profile_limit or 0,
+                "emails_used": team_data.emails_used_this_month or 0,
+                "emails_limit": team_data.monthly_email_limit or 0,
+                "posts_used": team_data.posts_used_this_month or 0,
+                "posts_limit": team_data.monthly_posts_limit or 0,
+            }
+
+        # 4. Get credit wallet balance
+        credit_info = {
+            "current_balance": 0,
+            "lifetime_earned": 0,
+            "lifetime_spent": 0,
+            "total_earned_this_cycle": 0,
+            "total_spent_this_cycle": 0,
+        }
+
+        wallet_result = await db.execute(
+            select(CreditWallet).where(
+                CreditWallet.user_id == supabase_id
+            )
+        )
+        wallet = wallet_result.scalar_one_or_none()
+
+        if wallet:
+            credit_info = {
+                "current_balance": wallet.current_balance or 0,
+                "lifetime_earned": wallet.lifetime_earned or 0,
+                "lifetime_spent": wallet.lifetime_spent or 0,
+                "total_earned_this_cycle": wallet.total_earned_this_cycle or 0,
+                "total_spent_this_cycle": wallet.total_spent_this_cycle or 0,
+            }
+
+        # 5. Get Stripe subscription details + portal URL if stripe_customer_id exists
+        stripe_info = None
+        portal_url = None
+
+        if user_stripe_customer_id:
+            try:
+                # Fetch active subscriptions from Stripe
+                subscriptions = stripe.Subscription.list(
+                    customer=user_stripe_customer_id,
+                    status='all',
+                    limit=1
+                )
+
+                if subscriptions.data:
+                    sub = subscriptions.data[0]
+                    stripe_info = {
+                        "subscription_id": sub.id,
+                        "status": sub.status,
+                        "cancel_at_period_end": sub.cancel_at_period_end,
+                        "current_period_start": sub.current_period_start,
+                        "current_period_end": sub.current_period_end,
+                        "billing_interval": sub.items.data[0].price.recurring.interval if sub.items.data else None,
+                    }
+
+                    # Try to get payment method info
+                    if sub.default_payment_method:
+                        try:
+                            pm = stripe.PaymentMethod.retrieve(sub.default_payment_method)
+                            if pm.card:
+                                stripe_info["payment_method"] = {
+                                    "brand": pm.card.brand,
+                                    "last4": pm.card.last4,
+                                    "exp_month": pm.card.exp_month,
+                                    "exp_year": pm.card.exp_year,
+                                }
+                        except Exception as pm_err:
+                            logger.warning(f"Could not fetch payment method: {pm_err}")
+
+                # Generate portal URL
+                frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+                portal_session = stripe.billing_portal.Session.create(
+                    customer=user_stripe_customer_id,
+                    return_url=f"{frontend_url}/billing"
+                )
+                portal_url = portal_session.url
+
+            except stripe.error.StripeError as e:
+                logger.warning(f"Stripe API error fetching subscription status for {user_email}: {e}")
+            except Exception as e:
+                logger.warning(f"Error fetching Stripe info for {user_email}: {e}")
+
+        # 6. Assemble response
+        return {
+            "plan": plan_info,
+            "stripe": stripe_info,
+            "credits": credit_info,
+            "usage": usage_info,
+            "portal_url": portal_url,
+            "user": {
+                "email": user_email,
+                "full_name": user_full_name,
+                "has_stripe_customer": bool(user_stripe_customer_id),
+                "billing_type": user_billing_type,
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching subscription status: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch subscription status"
+        )
+
+
+@router.post("/portal-session")
+async def create_portal_session(
+    request: PortalSessionRequest,
+    current_user=Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Create a Stripe Customer Portal session for subscription management.
+    Returns a portal URL that opens Stripe's hosted billing page.
+    """
+    from app.database.unified_models import User
+
+    try:
+        # Look up user's stripe_customer_id
+        user_result = await db.execute(
+            select(User).where(
+                User.supabase_user_id == str(current_user.id)
+            )
+        )
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            user_result = await db.execute(
+                select(User).where(User.email == current_user.email)
+            )
+            user = user_result.scalar_one_or_none()
+
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User record not found"
+            )
+
+        if not user.stripe_customer_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No Stripe customer associated with this account. Portal is only available for paid subscriptions."
+            )
+
+        frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+        return_url = request.return_url or f"{frontend_url}/billing"
+
+        portal_session = stripe.billing_portal.Session.create(
+            customer=user.stripe_customer_id,
+            return_url=return_url
+        )
+
+        return {
+            "portal_url": portal_session.url,
+            "return_url": return_url
+        }
+
+    except HTTPException:
+        raise
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating portal session: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create billing portal session: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Error creating portal session: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create billing portal session"
+        )

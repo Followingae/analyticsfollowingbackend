@@ -291,7 +291,20 @@ class TeamManagementService:
                     invitation_link=f"https://app.analyticsfollowing.com/invite/{invitation_token}",
                     personal_message=invitation_data.personal_message
                 )
-                
+
+                # In-app notification
+                try:
+                    from app.services.notification_service import NotificationService
+                    await NotificationService.notify_team_invite(
+                        session,
+                        invitee_email=invitation_data.email,
+                        team_name=team.name,
+                        inviter_name="Team Admin",
+                        role=invitation_data.role or "member",
+                    )
+                except Exception as notify_err:
+                    logger.warning(f"Failed to send team invite notification: {notify_err}")
+
                 return TeamInvitationResponse(
                     id=invitation.id,
                     team_id=invitation.team_id,
@@ -365,9 +378,42 @@ class TeamManagementService:
                 invitation.status = "accepted"
                 invitation.accepted_at = datetime.now()
                 invitation.accepted_by = accepting_user_id
-                
+
                 await session.commit()
-                
+
+                # Notify team owner
+                try:
+                    from app.services.notification_service import NotificationService
+                    from sqlalchemy import text as sa_text
+                    # Get team owner
+                    owner_result = await session.execute(
+                        select(TeamMember).where(
+                            and_(TeamMember.team_id == invitation.team_id, TeamMember.role == "owner")
+                        )
+                    )
+                    owner = owner_result.scalar_one_or_none()
+                    if owner:
+                        owner_email_result = await session.execute(
+                            sa_text("SELECT email FROM auth.users WHERE id = CAST(:uid AS uuid)"),
+                            {"uid": str(owner.user_id)},
+                        )
+                        owner_email_row = owner_email_result.fetchone()
+                        # Get team name
+                        team_result = await session.execute(
+                            select(Team).where(Team.id == invitation.team_id)
+                        )
+                        team = team_result.scalar_one_or_none()
+                        if owner_email_row and team:
+                            await NotificationService.notify_team_invite_accepted(
+                                session,
+                                owner_id=owner.user_id,
+                                owner_email=owner_email_row[0],
+                                team_name=team.name,
+                                accepted_by_email=invitation.email,
+                            )
+                except Exception as notify_err:
+                    logger.warning(f"Failed to send team accept notification: {notify_err}")
+
                 return TeamMemberResponse(
                     id=team_member.id,
                     team_id=team_member.team_id,
