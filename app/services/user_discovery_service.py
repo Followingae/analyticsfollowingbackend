@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, desc, asc, text
 from sqlalchemy.orm import selectinload
 
-from app.database.unified_models import Profile, UserProfileAccess, Post
+from app.database.unified_models import Profile, UserProfileAccess, Post, MonthlyUsageTracking
 from app.services.credit_wallet_service import credit_wallet_service
 from app.services.cdn_sync_service import cdn_sync_service
 from app.core.config import settings
@@ -143,6 +143,11 @@ class UserDiscoveryService:
             profiles_result = await db.execute(paginated_query)
             profiles = profiles_result.scalars().all()
 
+            # Detach profiles from session to prevent greenlet lazy-loading errors
+            # when accessing attributes after subsequent queries (e.g., CDN lookups)
+            for p in profiles:
+                db.expunge(p)
+
             # Get unlock status if requested
             unlocked_status = {}
             if include_unlocked_status and profiles:
@@ -265,14 +270,16 @@ class UserDiscoveryService:
         try:
             logger.info(f"🔓 Profile Unlock: user={user_id}, profile={profile_id}")
 
-            # CRITICAL FIX: Map auth.users ID to public.users ID
+            # Look up app user by id or supabase_user_id (current_user.id may be either)
             from app.database.unified_models import User
-            user_query = select(User).where(User.supabase_user_id == str(user_id))
+            user_query = select(User).where(
+                or_(User.id == str(user_id), User.supabase_user_id == str(user_id))
+            )
             user_result = await db.execute(user_query)
             app_user = user_result.scalar_one_or_none()
 
             if not app_user:
-                logger.error(f"🔓 No app user found for auth user_id={user_id}")
+                logger.error(f"🔓 No app user found for user_id={user_id}")
                 return {
                     "success": False,
                     "error": "user_not_found",
@@ -280,7 +287,7 @@ class UserDiscoveryService:
                 }
 
             actual_user_id = app_user.id
-            logger.info(f"🔓 Mapped auth user {user_id} to app user {actual_user_id}")
+            logger.info(f"🔓 Resolved user {user_id} to app user {actual_user_id}")
 
             # Check if profile exists
             profile_query = select(Profile).where(Profile.id == profile_id)
@@ -368,6 +375,13 @@ class UserDiscoveryService:
             )
 
             db.add(new_access)
+
+            # ============================================================
+            # CRITICAL FIX: Update team and monthly usage tracking
+            # Without this, the dashboard usage counters never increment.
+            # ============================================================
+            await self._record_profile_usage(db, actual_user_id)
+
             await db.commit()
             await db.refresh(new_access)
 
@@ -402,6 +416,80 @@ class UserDiscoveryService:
             logger.error(traceback.format_exc())
             raise
 
+    async def _record_profile_usage(
+        self,
+        db: AsyncSession,
+        app_user_id: UUID
+    ) -> None:
+        """
+        Record profile unlock usage in both team-level and individual-level tracking.
+
+        Updates:
+        1. teams.profiles_used_this_month (read by /auth/dashboard for usage display)
+        2. monthly_usage_tracking.profiles_analyzed (individual member tracking)
+
+        This must be called within an existing transaction (before commit).
+        """
+        from app.database.unified_models import TeamMember
+        from datetime import date
+        from uuid import uuid4
+
+        try:
+            # Find the user's team membership
+            team_query = select(TeamMember).where(TeamMember.user_id == app_user_id)
+            team_result = await db.execute(team_query)
+            team_member = team_result.scalar_one_or_none()
+
+            if not team_member:
+                logger.warning(f"[USAGE] User {app_user_id} has no team membership - skipping team usage tracking")
+                return
+
+            team_id = team_member.team_id
+
+            # 1. Increment team-level usage counter (teams.profiles_used_this_month)
+            await db.execute(
+                text(
+                    "UPDATE teams SET profiles_used_this_month = profiles_used_this_month + 1, "
+                    "updated_at = now() WHERE id = :team_id"
+                ),
+                {"team_id": str(team_id)}
+            )
+            logger.info(f"[USAGE] Incremented teams.profiles_used_this_month for team {team_id}")
+
+            # 2. Upsert monthly_usage_tracking record for the individual user
+            current_month = date.today().replace(day=1)
+
+            usage_query = select(MonthlyUsageTracking).where(
+                and_(
+                    MonthlyUsageTracking.team_id == team_id,
+                    MonthlyUsageTracking.user_id == app_user_id,
+                    MonthlyUsageTracking.billing_month == current_month
+                )
+            )
+            usage_result = await db.execute(usage_query)
+            usage_record = usage_result.scalar_one_or_none()
+
+            if usage_record:
+                usage_record.profiles_analyzed += 1
+                usage_record.updated_at = datetime.now(timezone.utc)
+            else:
+                usage_record = MonthlyUsageTracking(
+                    id=uuid4(),
+                    team_id=team_id,
+                    user_id=app_user_id,
+                    billing_month=current_month,
+                    profiles_analyzed=1,
+                    emails_unlocked=0,
+                    posts_analyzed=0
+                )
+                db.add(usage_record)
+
+            logger.info(f"[USAGE] Updated monthly_usage_tracking for user {app_user_id} in team {team_id}")
+
+        except Exception as e:
+            logger.error(f"[USAGE] Failed to record profile usage for user {app_user_id}: {e}")
+            # Don't raise - usage tracking failure should not block the unlock
+
     async def get_user_unlocked_profiles(
         self,
         db: AsyncSession,
@@ -426,16 +514,16 @@ class UserDiscoveryService:
         try:
             logger.info(f"📊 Getting unlocked profiles: user={user_id}")
 
-            # CRITICAL FIX: Map auth.users ID to public.users ID
-            # The current_user.id from auth middleware is auth.users.id
-            # But user_profile_access table uses public.users.id
+            # Look up app user by id or supabase_user_id (current_user.id may be either)
             from app.database.unified_models import User
-            user_query = select(User).where(User.supabase_user_id == str(user_id))
+            user_query = select(User).where(
+                or_(User.id == str(user_id), User.supabase_user_id == str(user_id))
+            )
             user_result = await db.execute(user_query)
             app_user = user_result.scalar_one_or_none()
 
             if not app_user:
-                logger.error(f"📊 No app user found for auth user_id={user_id}")
+                logger.error(f"📊 No app user found for user_id={user_id}")
                 return {
                     "success": False,
                     "error": "User not found in application database",

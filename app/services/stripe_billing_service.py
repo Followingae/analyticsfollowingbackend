@@ -43,7 +43,7 @@ STRIPE_PRODUCTS = {
             "interval": "year",
             "savings": 480  # Save $480/year
         },
-        "credits": 500
+        "credits": 8750
     },
     "premium": {
         "name": "Analytics Following Enterprise",
@@ -58,7 +58,7 @@ STRIPE_PRODUCTS = {
             "interval": "year",
             "savings": 1200  # Save $1,200/year
         },
-        "credits": 2000,
+        "credits": 25000,
         "topup_discount": 0.20  # 20% discount on credit topups
     }
 }
@@ -73,7 +73,7 @@ class StripeBillingService:
     async def create_customer(self, user_email: str, user_name: str, user_id: str) -> str:
         """Create a Stripe customer for a new user"""
         try:
-            customer = stripe.Customer.create(
+            customer = await stripe.Customer.create_async(
                 email=user_email,
                 name=user_name,
                 metadata={
@@ -104,7 +104,7 @@ class StripeBillingService:
         """Create embedded checkout session for subscription"""
         try:
             # Create checkout session for embedded iframe
-            session = stripe.checkout.Session.create(
+            session = await stripe.checkout.Session.create_async(
                 customer=customer_id,
                 payment_method_types=['card'],
                 line_items=[{
@@ -160,7 +160,7 @@ class StripeBillingService:
         """Create customer portal session for subscription management"""
         try:
             # Create portal session for subscription management
-            session = stripe.billing_portal.Session.create(
+            session = await stripe.billing_portal.Session.create_async(
                 customer=customer_id,
                 return_url=return_url
             )
@@ -183,7 +183,7 @@ class StripeBillingService:
         """Get active subscription for customer"""
         try:
             # List all subscriptions for customer
-            subscriptions = stripe.Subscription.list(
+            subscriptions = await stripe.Subscription.list_async(
                 customer=customer_id,
                 status='active',
                 limit=1
@@ -221,10 +221,10 @@ class StripeBillingService:
         try:
             if immediate:
                 # Cancel immediately
-                sub = stripe.Subscription.cancel(subscription_id)
+                sub = await stripe.Subscription.cancel_async(subscription_id)
             else:
                 # Cancel at period end
-                sub = stripe.Subscription.modify(
+                sub = await stripe.Subscription.modify_async(
                     subscription_id,
                     cancel_at_period_end=True
                 )
@@ -348,8 +348,8 @@ class StripeBillingService:
                     subscription_expires_at=datetime.fromtimestamp(
                         subscription['current_period_end'],
                         tz=timezone.utc
-                    ),
-                    credits=STRIPE_PRODUCTS.get(tier, {}).get('credits', 0)
+                    )
+                    # DEPRECATED: No longer writing to users.credits — credit_wallets is the source of truth
                 )
             )
             await db.commit()
@@ -369,7 +369,11 @@ class StripeBillingService:
         price_id = subscription['items']['data'][0]['price']['id']
         tier = None
         for t, config in STRIPE_PRODUCTS.items():
-            if config['price_id'] == price_id:
+            # Check both monthly and annual price IDs
+            if config.get('monthly', {}).get('price_id') == price_id:
+                tier = t
+                break
+            if config.get('annual', {}).get('price_id') == price_id:
                 tier = t
                 break
 
@@ -406,8 +410,8 @@ class StripeBillingService:
                 .where(User.id == user_id)
                 .values(
                     subscription_status='cancelled',
-                    subscription_tier='free',
-                    credits=0
+                    subscription_tier='free'
+                    # DEPRECATED: No longer writing to users.credits — credit_wallets is the source of truth
                 )
             )
             await db.commit()
@@ -428,21 +432,18 @@ class StripeBillingService:
             user = result.scalar_one_or_none()
 
             if user:
-                tier = user.subscription_tier
-                credits = STRIPE_PRODUCTS.get(tier, {}).get('credits', 0)
-
+                # DEPRECATED: No longer writing to users.credits — credit_wallets is the source of truth
+                # Credit wallet reset is handled by stripe_webhook_routes.reset_credit_wallet_for_new_cycle()
                 await db.execute(
                     update(User)
                     .where(User.id == user.id)
                     .values(
-                        credits=credits,
-                        credits_used_this_month=0,
                         last_payment_at=datetime.now(timezone.utc)
                     )
                 )
                 await db.commit()
 
-                logger.info(f"Reset credits to {credits} for user {user.id} after payment")
+                logger.info(f"Payment succeeded for user {user.id} — wallet reset handled by webhook")
 
     async def _handle_payment_failed(self, invoice: Dict[str, Any]):
         """Handle failed payment"""

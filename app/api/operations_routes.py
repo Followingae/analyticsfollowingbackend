@@ -10,7 +10,7 @@ from datetime import datetime, date, timedelta
 from uuid import UUID
 import logging
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.operations_models import (
     Campaign, Workstream, Deliverable, Concept,
     Event, ProductionBatch, Assignment, Payout, ActivityLog

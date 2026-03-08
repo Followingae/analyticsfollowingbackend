@@ -53,7 +53,7 @@ class StripeSubscriptionService:
                 return existing_customer
 
             from app.services.stripe_service import stripe_service
-            customer = stripe_service.create_customer(
+            customer = await stripe_service.create_customer(
                 email=email,
                 name=name,
                 metadata={
@@ -92,7 +92,7 @@ class StripeSubscriptionService:
                     return None
 
                 from app.services.stripe_service import stripe_service
-                return stripe_service._make_request("GET", f"customers/{user.stripe_customer_id}")
+                return await stripe_service._make_request("GET", f"customers/{user.stripe_customer_id}")
 
         except Exception as e:
             logger.error(f"Error getting customer for user {user_id}: {e}")
@@ -128,7 +128,7 @@ class StripeSubscriptionService:
 
             # Create subscription
             from app.services.stripe_service import stripe_service
-            subscription = stripe_service.create_subscription(
+            subscription = await stripe_service.create_subscription(
                 customer_id=customer['id'],
                 price_id=price_id,
                 trial_period_days=trial_days,
@@ -157,7 +157,7 @@ class StripeSubscriptionService:
                 return None
 
             from app.services.stripe_service import stripe_service
-            subscriptions = stripe_service.list_customer_subscriptions(customer['id'])
+            subscriptions = await stripe_service.list_customer_subscriptions(customer['id'])
 
             # Return the first active subscription
             for subscription in subscriptions.get('data', []):
@@ -239,7 +239,7 @@ class StripeSubscriptionService:
 
             # Update subscription
             from app.services.stripe_service import stripe_service
-            updated_subscription = stripe_service._make_request(
+            updated_subscription = await stripe_service._make_request(
                 "POST",
                 f"subscriptions/{current_subscription['id']}",
                 {
@@ -272,7 +272,7 @@ class StripeSubscriptionService:
 
             # Schedule downgrade at period end
             from app.services.stripe_service import stripe_service
-            updated_subscription = stripe_service._make_request(
+            updated_subscription = await stripe_service._make_request(
                 "POST",
                 f"subscriptions/{current_subscription['id']}",
                 {
@@ -297,7 +297,7 @@ class StripeSubscriptionService:
                 raise ValidationError("No active subscription found")
 
             from app.services.stripe_service import stripe_service
-            cancelled_subscription = stripe_service.cancel_subscription(
+            cancelled_subscription = await stripe_service.cancel_subscription(
                 subscription['id'],
                 at_period_end=at_period_end
             )
@@ -334,7 +334,7 @@ class StripeSubscriptionService:
             customer = await self.get_customer_by_user(user_id)
 
             from app.services.stripe_service import stripe_service
-            payment_link = stripe_service._make_request(
+            payment_link = await stripe_service._make_request(
                 "POST",
                 "payment_links",
                 {

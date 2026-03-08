@@ -9,7 +9,7 @@ import logging
 import os
 
 from app.middleware.team_auth_middleware import get_team_owner_context, TeamContext
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.stripe_billing_service import StripeBillingService
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ async def create_checkout_session(
             import stripe
             stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
 
-            stripe_customer = stripe.Customer.create(
+            stripe_customer = await stripe.Customer.create_async(
                 email=user.email,
                 name=user.full_name or f"Team {team_context.team_name}",
                 metadata={

@@ -27,7 +27,7 @@ from typing import Optional, Dict, Any
 import logging
 from datetime import datetime, timezone
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.middleware.auth_middleware import get_current_user
 from app.services.stripe_billing_service import stripe_billing_service, STRIPE_PRODUCTS
 from app.database.unified_models import User

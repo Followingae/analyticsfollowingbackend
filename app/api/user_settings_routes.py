@@ -12,7 +12,7 @@ import json
 import logging
 
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.models.auth import UserInDB
 
 router = APIRouter(tags=["User Settings"])

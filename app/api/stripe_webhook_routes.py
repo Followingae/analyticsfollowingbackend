@@ -167,7 +167,7 @@ async def handle_payment_succeeded(invoice: Dict[str, Any]):
 
         # Get subscription details to find user
         from app.services.stripe_service import stripe_service
-        subscription = stripe_service._make_request("GET", f"subscriptions/{subscription_id}")
+        subscription = await stripe_service._make_request("GET", f"subscriptions/{subscription_id}")
 
         user_id = subscription.get('metadata', {}).get('user_id')
         if not user_id:
@@ -202,7 +202,7 @@ async def handle_payment_failed(invoice: Dict[str, Any]):
 
         # Get subscription details to find user
         from app.services.stripe_service import stripe_service
-        subscription = stripe_service._make_request("GET", f"subscriptions/{subscription_id}")
+        subscription = await stripe_service._make_request("GET", f"subscriptions/{subscription_id}")
 
         user_id = subscription.get('metadata', {}).get('user_id')
         if not user_id:

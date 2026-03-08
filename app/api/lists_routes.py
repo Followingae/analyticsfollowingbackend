@@ -17,7 +17,7 @@ from app.models.lists import (
 )
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.lists_service import lists_service
 
 logger = logging.getLogger(__name__)

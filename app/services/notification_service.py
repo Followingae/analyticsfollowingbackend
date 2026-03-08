@@ -212,6 +212,38 @@ class NotificationService:
         return result.rowcount > 0
 
     @staticmethod
+    async def mark_read_by_reference(
+        db: AsyncSession,
+        user_id: UUID,
+        user_email: str,
+        reference_type: str,
+        reference_id: Optional[UUID] = None,
+    ) -> int:
+        """Mark notifications as read by reference_type (and optionally reference_id).
+        E.g. mark all 'proposal' notifications read, or only those for a specific proposal."""
+        conditions = [
+            "(user_id = CAST(:uid AS uuid) OR user_email = :email)",
+            "is_read = FALSE",
+            "reference_type = :ref_type",
+        ]
+        params: Dict[str, Any] = {
+            "uid": str(user_id),
+            "email": user_email,
+            "ref_type": reference_type,
+        }
+        if reference_id:
+            conditions.append("reference_id = CAST(:ref_id AS uuid)")
+            params["ref_id"] = str(reference_id)
+
+        where = " AND ".join(conditions)
+        result = await db.execute(
+            text(f"UPDATE user_notifications SET is_read = TRUE, read_at = NOW() WHERE {where}"),
+            params,
+        )
+        await db.commit()
+        return result.rowcount
+
+    @staticmethod
     async def mark_all_read(
         db: AsyncSession,
         user_id: UUID,
@@ -320,7 +352,7 @@ class NotificationService:
             notification_type="analytics_completed",
             title=f"Analytics ready for @{username}",
             message=f"Creator analytics for @{username} have been generated and are ready to view.",
-            action_url=f"/search/creator/{username}",
+            action_url=f"/creator-analytics/{username}",
             reference_type="profile",
             metadata={
                 "username": username,
@@ -413,11 +445,12 @@ class NotificationService:
         """Notify the admin who created the proposal that user approved it."""
         # Resolve admin email
         admin_result = await db.execute(
-            text("SELECT email FROM auth.users WHERE id = CAST(:uid AS uuid)"),
+            text("SELECT email FROM users WHERE id = CAST(:uid AS uuid)"),
             {"uid": str(admin_id)},
         )
         admin_row = admin_result.fetchone()
         if not admin_row:
+            logger.warning(f"No email found for admin {admin_id} — proposal_approved notification skipped")
             return {}
 
         return await NotificationService.create(
@@ -449,11 +482,12 @@ class NotificationService:
     ) -> Dict[str, Any]:
         """Notify the admin who created the proposal that user rejected it."""
         admin_result = await db.execute(
-            text("SELECT email FROM auth.users WHERE id = CAST(:uid AS uuid)"),
+            text("SELECT email FROM users WHERE id = CAST(:uid AS uuid)"),
             {"uid": str(admin_id)},
         )
         admin_row = admin_result.fetchone()
         if not admin_row:
+            logger.warning(f"No email found for admin {admin_id} — proposal_rejected notification skipped")
             return {}
 
         msg = f"The user rejected your proposal for {campaign_name}."
@@ -475,6 +509,76 @@ class NotificationService:
                 "campaign_name": campaign_name,
                 "action": "rejected",
                 "reason": reason,
+            },
+        )
+
+    # =========================================================================
+    # PROPOSAL REQUEST-MORE TRIGGERS
+    # =========================================================================
+
+    @staticmethod
+    async def notify_more_requested(
+        db: AsyncSession,
+        admin_id: UUID,
+        proposal_id: UUID,
+        proposal_title: str,
+        brand_notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Notify admin that brand requested more influencers."""
+        admin_result = await db.execute(
+            text("SELECT email FROM users WHERE id = CAST(:uid AS uuid)"),
+            {"uid": str(admin_id)},
+        )
+        admin_row = admin_result.fetchone()
+        if not admin_row:
+            logger.warning(f"No email found for admin {admin_id} — more_requested notification skipped")
+            return {}
+
+        msg = f"The brand requested more influencer suggestions for \"{proposal_title}\"."
+        if brand_notes:
+            msg += f" Notes: {brand_notes}"
+
+        return await NotificationService.create(
+            db,
+            user_id=admin_id,
+            user_email=admin_row[0],
+            notification_type="proposal_updated",
+            title=f"More influencers requested: {proposal_title}",
+            message=msg,
+            action_url=f"/superadmin/proposals/{proposal_id}",
+            reference_type="proposal",
+            reference_id=proposal_id,
+            metadata={
+                "proposal_title": proposal_title,
+                "action": "more_requested",
+                "brand_notes": brand_notes,
+            },
+        )
+
+    @staticmethod
+    async def notify_more_added(
+        db: AsyncSession,
+        user_id: UUID,
+        user_email: str,
+        proposal_id: UUID,
+        proposal_title: str,
+        count_added: int,
+    ) -> Dict[str, Any]:
+        """Notify brand that admin added more influencers to their proposal."""
+        return await NotificationService.create(
+            db,
+            user_id=user_id,
+            user_email=user_email,
+            notification_type="proposal_updated",
+            title=f"New influencers added: {proposal_title}",
+            message=f"{count_added} new influencer{'s' if count_added != 1 else ''} added to your proposal \"{proposal_title}\". Review your updated selection.",
+            action_url=f"/proposals/{proposal_id}",
+            reference_type="proposal",
+            reference_id=proposal_id,
+            metadata={
+                "proposal_title": proposal_title,
+                "action": "more_added",
+                "count_added": count_added,
             },
         )
 

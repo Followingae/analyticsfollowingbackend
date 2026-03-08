@@ -220,6 +220,20 @@ async def lifespan(app: FastAPI):
         print("  - Post analytics will be blocking")
         print("  - Users may experience slower response times")
 
+    # START UNIFIED ASYNC WORKER (In-Process — replaces Celery subprocess)
+    try:
+        print("Starting Unified Async Worker...")
+        from app.workers.unified_async_worker import unified_async_worker
+
+        asyncio.create_task(unified_async_worker.start())
+        print("[SUCCESS] Unified Async Worker started successfully")
+        print("  - Processing all background jobs (creator_search, profile_analysis, etc.)")
+        print("  - In-process async — no Celery subprocess needed")
+
+    except Exception as e:
+        print(f"[WARNING] Failed to start Unified Async Worker: {e}")
+        print("  - Background jobs (creator_search, discovery_unlock, etc.) will NOT be processed")
+
     yield
     # Shutdown
     print("Shutting down Analytics Following Backend...")
@@ -229,6 +243,24 @@ async def lifespan(app: FastAPI):
         from app.services.worker_auto_manager import worker_auto_manager
         await worker_auto_manager.stop_discovery_worker()
         print("Discovery worker stopped")
+
+        # Stop post analytics worker
+        print("Stopping post analytics worker...")
+        try:
+            from app.workers.post_analytics_worker import post_analytics_worker
+            await post_analytics_worker.stop()
+            print("Post analytics worker stopped")
+        except Exception as pa_err:
+            print(f"Post analytics worker stop failed: {pa_err}")
+
+        # Stop unified async worker
+        print("Stopping unified async worker...")
+        try:
+            from app.workers.unified_async_worker import unified_async_worker
+            await unified_async_worker.stop()
+            print("Unified async worker stopped")
+        except Exception as uw_err:
+            print(f"Unified async worker stop failed: {uw_err}")
 
         # Stop other background workers
         print("Stopping background workers...")
@@ -282,147 +314,9 @@ async def validation_exception_handler(request, exc):
 import os
 from typing import List
 
-# Helper functions for API response formatting
-def _normalize_demographics(demo_data):
-    """Normalize demographics data to proper percentages"""
-    if not demo_data or not isinstance(demo_data, dict):
-        return {}
-
-    # Calculate total to check if data needs normalization
-    total = sum(demo_data.values())
-
-    if total <= 0:
-        return {}
-
-    # If total is around 1.0, treat as already normalized percentages
-    if 0.8 <= total <= 1.2:
-        return {k: round(v * 100, 1) for k, v in demo_data.items()}
-
-    # If total is much larger, normalize then convert to percentages
-    return {k: round((v / total) * 100, 1) for k, v in demo_data.items()}
-
-def _format_ai_insights(profile):
-    """Format AI insights from JSONB fields into structured data"""
-    def safe_get_jsonb(field_value):
-        if field_value is None:
-            return {}
-        if isinstance(field_value, dict):
-            return field_value
-        if isinstance(field_value, str):
-            try:
-                return json.loads(field_value)
-            except (json.JSONDecodeError, TypeError):
-                return {}
-        return {}
-
-    # Extract AI insights from JSONB fields
-    audience_insights = safe_get_jsonb(profile.ai_audience_insights)
-    visual_content = safe_get_jsonb(profile.ai_visual_content)
-    behavioral_patterns = safe_get_jsonb(profile.ai_behavioral_patterns)
-    fraud_detection = safe_get_jsonb(profile.ai_fraud_detection)
-    audience_quality = safe_get_jsonb(profile.ai_audience_quality)
-    trend_detection = safe_get_jsonb(profile.ai_trend_detection)
-    advanced_nlp = safe_get_jsonb(profile.ai_advanced_nlp)
-
-    return {
-        "audience": {
-            "demographics": {
-                "countries": _normalize_demographics(
-                    audience_insights.get('geographic_analysis', {}).get('country_distribution', {})
-                ),
-                "age_groups": _normalize_demographics(
-                    audience_insights.get('demographic_insights', {}).get('estimated_age_groups', {})
-                ),
-                "gender_split": _normalize_demographics(
-                    audience_insights.get('demographic_insights', {}).get('estimated_gender_split', {})
-                )
-            },
-            "quality": {
-                "authenticity_score": audience_quality.get('authenticity_score'),
-                "bot_detection_score": audience_quality.get('bot_detection_score'),
-                "fake_follower_percentage": audience_quality.get('fake_follower_percentage'),
-                "engagement_authenticity": audience_quality.get('engagement_authenticity'),
-                "quality_indicators": audience_quality.get('quality_indicators', {})
-            },
-            "geographic_insights": {
-                "primary_regions": audience_insights.get('geographic_analysis', {}).get('primary_regions', []),
-                "international_reach": audience_insights.get('geographic_analysis', {}).get('international_reach'),
-                "geographic_diversity_score": audience_insights.get('geographic_analysis', {}).get('geographic_diversity_score')
-            },
-            "cultural_analysis": {
-                "social_context": audience_insights.get('cultural_analysis', {}).get('social_context'),
-                "language_indicators": audience_insights.get('cultural_analysis', {}).get('language_indicators', {})
-            }
-        },
-        "content": {
-            "visual_analysis": {
-                "aesthetic_score": visual_content.get('aesthetic_score'),
-                "professional_quality_score": visual_content.get('professional_quality_score'),
-                "image_quality_metrics": {
-                    "average_quality": visual_content.get('image_quality_metrics', {}).get('average_quality'),
-                    "quality_consistency": visual_content.get('image_quality_metrics', {}).get('quality_consistency')
-                },
-                "face_analysis": {
-                    "faces_detected": visual_content.get('face_analysis', {}).get('faces_detected'),
-                    "unique_faces": visual_content.get('face_analysis', {}).get('unique_faces')
-                }
-            },
-            "nlp_insights": {
-                "vocabulary_richness": advanced_nlp.get('text_analysis', {}).get('vocabulary_richness'),
-                "text_complexity_score": advanced_nlp.get('text_analysis', {}).get('text_complexity_score'),
-                "readability_scores": advanced_nlp.get('text_analysis', {}).get('readability_scores', {}),
-                "main_themes": advanced_nlp.get('topic_modeling', {}).get('main_themes', []),
-                "top_keywords": [kw.get('keyword') for kw in advanced_nlp.get('topic_modeling', {}).get('top_keywords', [])[:10] if isinstance(kw, dict) and kw.get('keyword')]
-            }
-        },
-        "engagement": {
-            "behavioral_patterns": {
-                "posting_consistency": behavioral_patterns.get('posting_consistency'),
-                "engagement_optimization": behavioral_patterns.get('engagement_optimization'),
-                "content_strategy_maturity": behavioral_patterns.get('content_strategy_maturity'),
-                "current_stage": behavioral_patterns.get('lifecycle_analysis', {}).get('current_stage')
-            },
-            "trend_analysis": {
-                "viral_potential": trend_detection.get('viral_potential', {}).get('overall_viral_score'),
-                "optimization_recommendations": trend_detection.get('optimization_recommendations', {}).get('recommendations', [])
-            }
-        },
-        "security": {
-            "fraud_detection": {
-                "overall_fraud_score": fraud_detection.get('fraud_assessment', {}).get('overall_fraud_score'),
-                "risk_level": fraud_detection.get('fraud_assessment', {}).get('risk_level'),
-                "authenticity_score": fraud_detection.get('fraud_assessment', {}).get('authenticity_score'),
-                "bot_likelihood_percentage": fraud_detection.get('fraud_assessment', {}).get('bot_likelihood_percentage'),
-                "trust_score": fraud_detection.get('recommendations', {}).get('trust_score')
-            }
-        }
-    }
-
-def _format_content_distribution(content_dist):
-    """Format content distribution from JSONB to proper percentages"""
-    if not content_dist:
-        return {}
-    if isinstance(content_dist, str):
-        try:
-            content_dist = json.loads(content_dist)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-    if isinstance(content_dist, dict):
-        return _normalize_demographics(content_dist)
-    return {}
-
-def _format_language_distribution(lang_dist):
-    """Format language distribution from JSONB to proper percentages"""
-    if not lang_dist:
-        return {}
-    if isinstance(lang_dist, str):
-        try:
-            lang_dist = json.loads(lang_dist)
-        except (json.JSONDecodeError, TypeError):
-            return {}
-    if isinstance(lang_dist, dict):
-        return _normalize_demographics(lang_dist)
-    return {}
+# Helper functions moved to app/services/creator_search_response_builder.py
+# Imported at line 613: _format_ai_insights, _format_content_distribution,
+#                        _format_language_distribution, _normalize_demographics
 
 def get_allowed_origins() -> List[str]:
     """Get allowed origins based on environment"""
@@ -478,6 +372,10 @@ app.add_middleware(
 
 # Add custom middleware for frontend integration
 app.add_middleware(FrontendHeadersMiddleware)
+
+# Event loop blocking detector — logs warnings for handlers >100ms
+from app.middleware.blocking_detector import BlockingDetectorMiddleware
+app.add_middleware(BlockingDetectorMiddleware)
 
 # Add database health monitoring middleware
 from app.middleware.database_health_middleware import DatabaseHealthMiddleware
@@ -607,8 +505,14 @@ except ImportError as e:
 # from app.api.simple_creator_search_routes import simple_creator_search
 from fastapi import Depends, Query
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.creator_search_response_builder import (
+    build_unlocked_response, build_preview_response,
+    build_complete_response, build_new_profile_response,
+    _format_ai_insights, _format_content_distribution,
+    _format_language_distribution, _normalize_demographics,
+)
 
 @app.post("/api/v1/creator/search/{username}")
 async def creator_search_compatibility(
@@ -822,50 +726,6 @@ async def _trigger_background_processing_if_needed(profile, username: str, db) -
         logger.error(f"[ERROR] UNIFIED processing check failed for {username}: {e}")
         return {"unified_processing": False, "pipeline_started": False}
 
-async def _trigger_blocking_processing_if_needed(profile, username: str, db) -> dict:
-    """INDUSTRY-STANDARD: Trigger BLOCKING UNIFIED processing for existing profiles that need it"""
-    try:
-        processing_triggered = {"unified_processing": False, "pipeline_completed": False}
-
-        # Check if unified processing is needed
-        from app.services.unified_background_processor import unified_background_processor
-
-        # Get comprehensive processing status
-        processing_status = await unified_background_processor.get_profile_processing_status(str(profile.id))
-
-        logger.info(f"[BLOCKING-CHECK] Processing status for {username}: {processing_status.get('current_stage', 'unknown')}")
-
-        # If not fully complete, trigger BLOCKING unified processing
-        if not processing_status.get('overall_complete', False):
-            logger.info(f"[BLOCKING-PROCESSING] Profile {username} needs processing - WAITING for complete pipeline")
-
-            try:
-                # CRITICAL: AWAIT the complete processing pipeline (BLOCKING)
-                pipeline_results = await unified_background_processor.process_profile_complete_pipeline(
-                    profile_id=str(profile.id),
-                    username=username
-                )
-
-                processing_triggered["unified_processing"] = True
-                processing_triggered["pipeline_completed"] = pipeline_results.get('overall_success', False)
-                processing_triggered["processing_results"] = pipeline_results.get('results', {})
-                processing_triggered["completed_at"] = pipeline_results.get('completed_at')
-
-                logger.info(f"[SUCCESS] BLOCKING processing pipeline COMPLETED for {username}")
-
-            except Exception as e:
-                logger.error(f"[CRITICAL-ERROR] BLOCKING processing FAILED for {username}: {e}")
-                processing_triggered["error"] = str(e)
-        else:
-            logger.info(f"[BLOCKING-SKIP] Profile {username} is fully processed - no action needed")
-            processing_triggered["already_complete"] = True
-
-        return processing_triggered
-
-    except Exception as e:
-        logger.error(f"[ERROR] BLOCKING processing check failed for {username}: {e}")
-        return {"unified_processing": False, "pipeline_completed": False, "error": str(e)}
-
 # Frontend compatibility route - maps to the same bulletproof function
 @app.get("/api/v1/search/creator/{username}")
 async def creator_search_frontend_route(
@@ -875,6 +735,52 @@ async def creator_search_frontend_route(
 ):
     """Frontend compatibility route - redirects to bulletproof creator search"""
     return await bulletproof_creator_search(username, current_user, db)
+
+async def _run_background_country_detection(profile_id: str, username: str):
+    """Run country detection from stored DB data (lightweight, no Apify re-fetch)"""
+    try:
+        from app.database.optimized_pools import optimized_pools
+        from app.services.location_detection_service import LocationDetectionService
+        from sqlalchemy import text as sa_text
+
+        location_service = LocationDetectionService()
+
+        async with optimized_pools.get_background_session() as db:
+            # Get biography
+            bio_r = await db.execute(
+                sa_text("SELECT biography FROM profiles WHERE id = :pid").execution_options(prepare=False),
+                {"pid": profile_id}
+            )
+            bio_row = bio_r.fetchone()
+            biography = bio_row[0] if bio_row else ""
+
+            # Get post captions
+            posts_r = await db.execute(
+                sa_text("SELECT caption FROM posts WHERE profile_id = :pid AND caption IS NOT NULL LIMIT 20").execution_options(prepare=False),
+                {"pid": profile_id}
+            )
+            posts = [{"caption": row[0]} for row in posts_r.fetchall() if row[0]]
+
+            profile_data = {
+                "biography": biography or "",
+                "posts": posts,
+                "audience_top_countries": []
+            }
+
+            result = location_service.detect_country(profile_data)
+
+            if result and result.get("country_code"):
+                await db.execute(
+                    sa_text("UPDATE profiles SET detected_country = :cc WHERE id = :pid").execution_options(prepare=False),
+                    {"cc": result["country_code"], "pid": profile_id}
+                )
+                await db.commit()
+                logger.info(f"[BG-LOCATION] Detected {result['country_code']} for {username} (confidence: {result.get('confidence', 0):.2f})")
+            else:
+                logger.info(f"[BG-LOCATION] No country detected for {username}")
+    except Exception as e:
+        logger.warning(f"[BG-LOCATION] Background country detection failed for {username}: {e}")
+
 
 @app.post("/api/v1/simple/creator/search/{username}")
 async def bulletproof_creator_search(
@@ -901,38 +807,37 @@ async def bulletproof_creator_search(
             # COMPLETENESS CHECK: Verify profile has complete analytics before serving
             logger.info(f"[COMPLETENESS] Checking if profile '{username}' has complete analytics...")
 
-            # Check completeness according to CLAUDE.md requirements
-            posts_query = select(Post).where(Post.profile_id == existing_profile.id).limit(15)
+            # Check completeness — query 12 most recent posts (matches CDN/AI processing limit)
+            posts_query = select(Post).where(
+                Post.profile_id == existing_profile.id
+            ).order_by(Post.created_at.desc()).limit(12)
             posts_result = await db.execute(posts_query)
             stored_posts = posts_result.scalars().all()
+            num_posts = len(stored_posts)
 
-            # Check completeness criteria (updated to include country detection)
+            # ALL hard gates — every check must pass to serve from DB
             has_basic_data = (existing_profile.followers_count and existing_profile.followers_count > 0)
-            has_sufficient_posts = len(stored_posts) >= 12
+            has_sufficient_posts = num_posts >= min(12, existing_profile.posts_count or 1)
             posts_with_ai = sum(1 for p in stored_posts if p.ai_content_category and p.ai_sentiment and p.ai_language_code)
-            has_ai_analysis = posts_with_ai >= 12
+            has_ai_analysis = num_posts > 0 and posts_with_ai >= num_posts * 0.9  # 90% threshold
             has_profile_ai = existing_profile.ai_profile_analyzed_at is not None
-
-            # NEW: Check country detection completeness
             has_country_detection = existing_profile.detected_country is not None
-
-            # NEW: Check CDN processing (profile + posts)
             has_profile_cdn = existing_profile.cdn_avatar_url is not None
             posts_with_cdn = sum(1 for p in stored_posts if p.cdn_thumbnail_url)
-            has_posts_cdn = posts_with_cdn >= 12
+            has_posts_cdn = num_posts > 0 and posts_with_cdn >= num_posts * 0.9  # 90% threshold
 
             is_complete = (has_basic_data and has_sufficient_posts and has_ai_analysis and
-                         has_profile_ai and has_country_detection and has_profile_cdn and has_posts_cdn)
+                           has_profile_ai and has_country_detection and has_profile_cdn and has_posts_cdn)
 
             if not is_complete:
                 logger.info(f"[COMPLETENESS] ❌ Profile '{username}' is INCOMPLETE:")
                 logger.info(f"  - Basic data: {'✅' if has_basic_data else '❌'} (followers: {existing_profile.followers_count})")
-                logger.info(f"  - Posts stored: {'✅' if has_sufficient_posts else '❌'} ({len(stored_posts)}/12 required)")
+                logger.info(f"  - Posts stored: {'✅' if has_sufficient_posts else '❌'} ({num_posts}/12 required)")
                 logger.info(f"  - AI analysis: {'✅' if has_ai_analysis else '❌'} ({posts_with_ai}/12 posts analyzed)")
                 logger.info(f"  - Profile AI: {'✅' if has_profile_ai else '❌'}")
                 logger.info(f"  - Country detection: {'✅' if has_country_detection else '❌'} ({existing_profile.detected_country})")
                 logger.info(f"  - Profile CDN: {'✅' if has_profile_cdn else '❌'}")
-                logger.info(f"  - Posts CDN: {'✅' if has_posts_cdn else '❌'} ({posts_with_cdn}/12 posts with CDN)")
+                logger.info(f"  - Posts CDN: {'✅' if has_posts_cdn else '❌'} ({posts_with_cdn}/{num_posts} posts with CDN)")
                 logger.info(f"[TRIGGER] 🔄 Triggering FULL APIFY + CDN + AI pipeline for complete analytics")
 
                 # Skip to new profile processing to trigger full pipeline
@@ -945,13 +850,18 @@ async def bulletproof_creator_search(
             logger.info(f"[FAST-PATH] Checking if profile '{username}' is unlocked for user {current_user.email}")
             from app.database.unified_models import User, UserProfileAccess
 
+            # Superadmins always have full access — no unlock required
+            _role = getattr(current_user, 'role', '')
+            _role_str = getattr(_role, 'value', str(_role))
+            is_superadmin = _role_str in ('super_admin', 'superadmin')
+
             # Map auth user to app user
             user_query = select(User).where(User.supabase_user_id == str(current_user.id))
             user_result = await db.execute(user_query)
             app_user = user_result.scalar_one_or_none()
 
-            is_unlocked = False
-            if app_user:
+            is_unlocked = is_superadmin  # Superadmins bypass unlock check
+            if not is_unlocked and app_user:
                 # Check if user has active unlock for this profile
                 access_query = select(UserProfileAccess).where(
                     UserProfileAccess.user_id == app_user.id,
@@ -982,754 +892,64 @@ async def bulletproof_creator_search(
                     db, str(existing_profile.id), existing_profile.username, post_ids
                 )
 
-                # Build minimal posts data for fast return
-                posts_data = []
-                for post in posts:
-                    post_cdn_url = posts_cdn_urls.get(post.instagram_post_id)
-                    posts_data.append({
-                        "id": post.instagram_post_id,
-                        "shortcode": post.shortcode,
-                        "caption": post.caption,
-                        "likes_count": post.likes_count,
-                        "comments_count": post.comments_count,
-                        "engagement_rate": post.engagement_rate,
-                        "display_url": post_cdn_url or post.display_url,
-                        "cdn_thumbnail_url": post_cdn_url,
-                        "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
-                        "ai_analysis": {
-                            # Basic AI fields
-                            "content_category": post.ai_content_category,
-                            "category_confidence": post.ai_category_confidence,
-                            "sentiment": post.ai_sentiment,
-                            "sentiment_score": post.ai_sentiment_score,
-                            "sentiment_confidence": post.ai_sentiment_confidence,
-                            "language_code": post.ai_language_code,
-                            "language_confidence": post.ai_language_confidence,
-                            "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None,
-                            # Complete advanced AI analysis data
-                            "full_analysis": post.ai_analysis_raw.get("category", {}) if post.ai_analysis_raw else {},
-                            "visual_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("visual_content", {}) if post.ai_analysis_raw else {},
-                            "text_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}) if post.ai_analysis_raw else {},
-                            "engagement_prediction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("engagement_prediction", {}) if post.ai_analysis_raw else {},
-                            "brand_safety": post.ai_analysis_raw.get("advanced_models", {}).get("fraud_detection", {}) if post.ai_analysis_raw else {},
-                            "hashtag_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
-                            "entity_extraction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
-                            "topic_modeling": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("topic_modeling", {}) if post.ai_analysis_raw else {},
-                            "data_size_chars": len(str(post.ai_analysis_raw)) if post.ai_analysis_raw else 0
-                        },
-                        # Complete raw AI analysis for advanced features
-                        "ai_analysis_raw": post.ai_analysis_raw if post.ai_analysis_raw else None
-                    })
-
-                # Calculate avg_likes and avg_comments from posts data for fast path
-                total_likes_fast = sum(post.get('likes_count', 0) for post in posts_data)
-                total_comments_fast = sum(post.get('comments_count', 0) for post in posts_data)
-                posts_count_fast = len(posts_data)
-
-                avg_likes_fast = round(total_likes_fast / posts_count_fast, 1) if posts_count_fast > 0 else 0
-                avg_comments_fast = round(total_comments_fast / posts_count_fast, 1) if posts_count_fast > 0 else 0
-
                 fast_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-                logger.info(f"[FAST-PATH] ⚡ INSTANT RETURN completed in {fast_time:.3f}s")
+                logger.info(f"[FAST-PATH] INSTANT RETURN completed in {fast_time:.3f}s")
 
-                return {
-                    "success": True,
-                    "profile": {
-                        "id": str(existing_profile.id),
-                        "username": existing_profile.username,
-                        "full_name": existing_profile.full_name,
-                        "biography": existing_profile.biography,
-                        "followers_count": existing_profile.followers_count,
-                        "following_count": existing_profile.following_count,
-                        "posts_count": existing_profile.posts_count,
-                        "is_verified": existing_profile.is_verified,
-                        "is_private": existing_profile.is_private,
-                        "is_business_account": existing_profile.is_business_account,
-                        "profile_pic_url": existing_profile.profile_pic_url or "",
-                        "profile_pic_url_hd": existing_profile.profile_pic_url_hd or "",
-                        "cdn_avatar_url": cdn_avatar_url,
-                        "external_url": existing_profile.external_url,
-                        "business_category_name": existing_profile.category or existing_profile.instagram_business_category,
-                        "business_email": getattr(existing_profile, 'business_email', None),
-                        "business_phone_number": getattr(existing_profile, 'business_phone_number', None),
-                        "engagement_rate": existing_profile.engagement_rate,
-                        "detected_country": existing_profile.detected_country,
-                        "avg_likes": avg_likes_fast,
-                        "avg_comments": avg_comments_fast,
-                        "influence_score": getattr(existing_profile, 'influence_score', None),
-                        "content_quality_score": getattr(existing_profile, 'content_quality_score', None),
-                        "follower_growth_rate": getattr(existing_profile, 'follower_growth_rate', None),
-                        # Complete AI analysis (ALL 10 MODELS) - same as complete path
-                        "ai_analysis": {
-                            "primary_content_type": existing_profile.ai_primary_content_type,
-                            "content_distribution": _format_content_distribution(getattr(existing_profile, 'ai_content_distribution', {})),
-                            "avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
-                            "language_distribution": _format_language_distribution(getattr(existing_profile, 'ai_language_distribution', {})),
-                            "content_quality_score": existing_profile.ai_content_quality_score,
-                            "profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None,
-                            "comprehensive_analyzed_at": getattr(existing_profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(existing_profile, 'ai_comprehensive_analyzed_at', None) else None,
-                            "models_success_rate": getattr(existing_profile, 'ai_models_success_rate', 0.0)
-                        },
-
-                        # Structured AI insights (parsed from JSONB)
-                        **_format_ai_insights(existing_profile),
-                        "posts": posts_data,
-                        "last_refreshed": existing_profile.last_refreshed.isoformat() if existing_profile.last_refreshed else None,
-                        "data_quality_score": existing_profile.data_quality_score,
-                        "created_at": existing_profile.created_at.isoformat() if existing_profile.created_at else None,
-                        "updated_at": existing_profile.updated_at.isoformat() if existing_profile.updated_at else None
-                    },
-                    "analytics_summary": {
-                        "total_posts_analyzed": len(posts_data),
-                        "posts_with_ai": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]),
-                        "ai_completion_rate": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]) / max(len(posts_data), 1) * 100,
-                        "avg_engagement_rate": existing_profile.engagement_rate,
-                        "content_categories_found": len(existing_profile.ai_top_10_categories) if existing_profile.ai_top_10_categories else 0
-                    },
-                    "background_processing": {"unified_processing": False, "already_complete": True, "fast_path": True},
-                    "message": f"⚡ INSTANT database return for already unlocked profile (completed in {fast_time:.3f}s)",
-                    "data_source": "database_fast_path",
-                    "cached": True,
-                    "unlock_required": False,
-                    "unlocked": True,
-                    "preview_mode": False,
-                    "performance": {
-                        "fast_path_enabled": True,
-                        "total_time_seconds": fast_time,
-                        "optimization": "already_unlocked_instant_return"
-                    }
-                }
+                return build_unlocked_response(
+                    existing_profile, posts, posts_cdn_urls, cdn_avatar_url, fast_time
+                )
             else:
                 # NON-UNLOCKED PROFILE: Return preview data only
                 logger.info(f"[PREVIEW] Profile '{username}' found but not unlocked - returning preview data")
 
-                return {
-                    "success": True,
-                    "profile": {
-                        "id": str(existing_profile.id),
-                        "username": existing_profile.username,
-                        "full_name": existing_profile.full_name,
-                        "followers_count": existing_profile.followers_count,
-                        "following_count": existing_profile.following_count,
-                        "posts_count": existing_profile.posts_count,
-                        "biography": existing_profile.biography,
-                        # Limited preview data only
-                        "profile_pic_url": existing_profile.profile_pic_url or "",
-                        "profile_pic_url_hd": existing_profile.profile_pic_url_hd or "",
-                        "is_verified": existing_profile.is_verified,
-                        "is_private": existing_profile.is_private,
-                    },
-                    "unlock_required": True,
-                    "unlock_cost": 25,
-                    "preview_mode": True,
-                    "message": "Profile found! Unlock for full analytics and insights (25 credits)",
-                    "unlock_endpoint": "/api/v1/discovery/unlock-profile"
-                }
+                return build_preview_response(existing_profile)
 
-            # REGULAR PATH: New profile analysis (first time search)
-            logger.info(f"[SUCCESS] STEP 1 RESULT: Profile '{username}' EXISTS in database (new unlock)")
-            logger.info(f"[ANALYTICS] Profile ID: {existing_profile.id}")
-            logger.info(f"[ANALYTICS] Followers: {existing_profile.followers_count:,}")
-            logger.info(f"[ANALYTICS] Posts: {existing_profile.posts_count:,}")
-            logger.info(f"[SEARCH] STEP 1.1: Retrieving COMPLETE stored data (posts + AI + analytics)...")
-
-            bulletproof_logger.info(f"BULLETPROOF: Profile {username} exists - returning COMPLETE stored data")
-            
-            # PERFORMANCE TRACKING - CDN profile URL
-            start_time = datetime.now(timezone.utc)
-            cdn_avatar_url_2 = await cdn_sync_service.get_profile_cdn_url(
-                db, str(existing_profile.id), existing_profile.username
-            )
-            cdn_profile_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-            logger.info(f"[PERF] CDN profile URL: {cdn_profile_time:.3f}s")
-
-            # PERFORMANCE TRACKING - Posts query
-            start_time = datetime.now(timezone.utc)
-            posts_query = select(Post).where(
-                Post.profile_id == existing_profile.id
-            ).order_by(Post.created_at.desc()).limit(50)  # Last 50 posts
-            posts_result = await db.execute(posts_query)
-            posts = posts_result.scalars().all()
-            posts_query_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-            logger.info(f"[PERF] Posts query ({len(posts)} posts): {posts_query_time:.3f}s")
-
-            # PERFORMANCE TRACKING - CDN posts URLs
-            start_time = datetime.now(timezone.utc)
-            post_ids = [post.instagram_post_id for post in posts if post.instagram_post_id]
-            posts_cdn_urls = await cdn_sync_service.get_posts_cdn_urls(
-                db, str(existing_profile.id), existing_profile.username, post_ids
-            )
-            cdn_posts_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-            logger.info(f"[PERF] CDN posts URLs ({len(post_ids)} posts): {cdn_posts_time:.3f}s")
-            
-            # Build complete posts data with AI analysis and CDN URLs
-            posts_data = []
-            for post in posts:
-                # Get CDN URL for this specific post
-                post_cdn_url = posts_cdn_urls.get(post.instagram_post_id)
-                
-                posts_data.append({
-                    "id": post.instagram_post_id,
-                    "shortcode": post.shortcode,
-                    "caption": post.caption,
-                    "likes_count": post.likes_count,
-                    "comments_count": post.comments_count,
-                    "engagement_rate": post.engagement_rate,
-                    "display_url": post_cdn_url or post.display_url,  # CDN first, Instagram fallback
-                    "cdn_thumbnail_url": post_cdn_url,  # CRITICAL: Actual CDN URL from database
-                    "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
-                    "ai_analysis": {
-                        "content_category": post.ai_content_category,
-                        "category_confidence": post.ai_category_confidence,
-                        "sentiment": post.ai_sentiment,
-                        "sentiment_score": post.ai_sentiment_score,
-                        "sentiment_confidence": post.ai_sentiment_confidence,
-                        "language_code": post.ai_language_code,
-                        "language_confidence": post.ai_language_confidence,
-                        "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None
-                    }
-                })
-            
-            logger.info(f"[SUCCESS] STEP 1.1 RESULT: Retrieved {len(posts_data)} posts with complete AI analysis")
-
-            # Calculate avg_likes and avg_comments from posts data
-            total_likes = sum(post.get('likes_count', 0) for post in posts_data)
-            total_comments = sum(post.get('comments_count', 0) for post in posts_data)
-            posts_count = len(posts_data)
-
-            avg_likes = round(total_likes / posts_count, 1) if posts_count > 0 else 0
-            avg_comments = round(total_comments / posts_count, 1) if posts_count > 0 else 0
-
-            # Return COMPLETE profile data (everything we have stored)
-            result = {
-                "success": True,
-                "profile": {
-                    # Basic profile data
-                    "id": str(existing_profile.id),
-                    "username": existing_profile.username,
-                    "full_name": existing_profile.full_name,
-                    "biography": existing_profile.biography,
-                    "followers_count": existing_profile.followers_count,
-                    "following_count": existing_profile.following_count,
-                    "posts_count": existing_profile.posts_count,
-                    "is_verified": existing_profile.is_verified,
-                    "is_private": existing_profile.is_private,
-                    "is_business_account": existing_profile.is_business_account,
-                    "profile_pic_url": existing_profile.profile_pic_url or "",
-                    "profile_pic_url_hd": existing_profile.profile_pic_url_hd or "",
-                    "cdn_avatar_url": cdn_avatar_url_2,
-                    "external_url": existing_profile.external_url,
-                    "business_category_name": existing_profile.category or existing_profile.instagram_business_category,
-                    "business_email": getattr(existing_profile, 'business_email', None),
-                    "business_phone_number": getattr(existing_profile, 'business_phone_number', None),
-                    
-                    # Analytics data
-                    "engagement_rate": existing_profile.engagement_rate,
-                    "detected_country": existing_profile.detected_country,
-                    "avg_likes": avg_likes,
-                    "avg_comments": avg_comments,
-                    "influence_score": getattr(existing_profile, 'influence_score', None),
-                    "content_quality_score": getattr(existing_profile, 'content_quality_score', None),
-                    "follower_growth_rate": getattr(existing_profile, 'follower_growth_rate', None),
-                    
-                    # Complete AI analysis (structured format)
-                    "ai_analysis": {
-                        "primary_content_type": existing_profile.ai_primary_content_type,
-                        "content_distribution": _format_content_distribution(getattr(existing_profile, 'ai_content_distribution', {})),
-                        "avg_sentiment_score": existing_profile.ai_avg_sentiment_score,
-                        "language_distribution": _format_language_distribution(getattr(existing_profile, 'ai_language_distribution', {})),
-                        "content_quality_score": existing_profile.ai_content_quality_score,
-                        "profile_analyzed_at": existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None,
-                        "comprehensive_analyzed_at": getattr(existing_profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(existing_profile, 'ai_comprehensive_analyzed_at', None) else None,
-                        "models_success_rate": getattr(existing_profile, 'ai_models_success_rate', 0.0)
-                    },
-
-                    # Structured AI insights (parsed from JSONB)
-                    **_format_ai_insights(existing_profile),
-                    
-                    # Posts with complete AI analysis
-                    "posts": posts_data,
-                    
-                    # Metadata
-                    "last_refreshed": existing_profile.last_refreshed.isoformat() if existing_profile.last_refreshed else None,
-                    "data_quality_score": existing_profile.data_quality_score,
-                    "created_at": existing_profile.created_at.isoformat() if existing_profile.created_at else None,
-                    "updated_at": existing_profile.updated_at.isoformat() if existing_profile.updated_at else None
-                },
-                "analytics_summary": {
-                    "total_posts_analyzed": len(posts_data),
-                    "posts_with_ai": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]),
-                    "ai_completion_rate": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]) / max(len(posts_data), 1) * 100,
-                    "avg_engagement_rate": existing_profile.engagement_rate,
-                    "content_categories_found": len(existing_profile.ai_top_10_categories) if existing_profile.ai_top_10_categories else 0
-                },
-                # CRITICAL: Skip blocking processing check - serve directly from database for better performance
-                "background_processing": {"unified_processing": False, "already_complete": True, "note": "serving_from_database"},
-                "message": "Complete profile data loaded from database",
-                "data_source": "database_complete",
-                "cached": True
-            }
-
-            # FIXED: Skip refresh logic since we're serving directly from database
-            processing_info = result["background_processing"]
-            if False:  # Disabled: processing_info.get("pipeline_completed", False):
-                logger.info(f"[REFRESH] Blocking processing completed - refreshing profile data from database")
-
-                # Refresh profile object with latest data
-                await db.refresh(existing_profile)
-
-                # Update the response with refreshed data
-                result["profile"]["ai_analysis"]["primary_content_type"] = existing_profile.ai_primary_content_type
-                result["profile"]["ai_analysis"]["content_distribution"] = existing_profile.ai_content_distribution
-                result["profile"]["ai_analysis"]["avg_sentiment_score"] = existing_profile.ai_avg_sentiment_score
-                result["profile"]["ai_analysis"]["language_distribution"] = existing_profile.ai_language_distribution
-                result["profile"]["ai_analysis"]["content_quality_score"] = existing_profile.ai_content_quality_score
-                result["profile"]["ai_analysis"]["top_3_categories"] = existing_profile.ai_top_3_categories
-                result["profile"]["ai_analysis"]["top_10_categories"] = existing_profile.ai_top_10_categories
-                result["profile"]["ai_analysis"]["profile_analyzed_at"] = existing_profile.ai_profile_analyzed_at.isoformat() if existing_profile.ai_profile_analyzed_at else None
-
-                # Update posts data with latest AI analysis
-                refreshed_posts_data = []
-                for post in posts:
-                    await db.refresh(post)  # Refresh each post
-
-                    # Get updated CDN URL
-                    post_cdn_url = posts_cdn_urls.get(post.instagram_post_id)
-
-                    refreshed_posts_data.append({
-                        "id": post.instagram_post_id,
-                        "shortcode": post.shortcode,
-                        "caption": post.caption,
-                        "likes_count": post.likes_count,
-                        "comments_count": post.comments_count,
-                        "engagement_rate": post.engagement_rate,
-                        "display_url": post_cdn_url or post.display_url,
-                        "cdn_thumbnail_url": post_cdn_url,
-                        "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
-                        "ai_analysis": {
-                            # Basic AI fields
-                            "content_category": post.ai_content_category,
-                            "category_confidence": post.ai_category_confidence,
-                            "sentiment": post.ai_sentiment,
-                            "sentiment_score": post.ai_sentiment_score,
-                            "sentiment_confidence": post.ai_sentiment_confidence,
-                            "language_code": post.ai_language_code,
-                            "language_confidence": post.ai_language_confidence,
-                            "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None,
-                            # Complete advanced AI analysis data
-                            "full_analysis": post.ai_analysis_raw.get("category", {}) if post.ai_analysis_raw else {},
-                            "visual_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("visual_content", {}) if post.ai_analysis_raw else {},
-                            "text_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}) if post.ai_analysis_raw else {},
-                            "engagement_prediction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("engagement_prediction", {}) if post.ai_analysis_raw else {},
-                            "brand_safety": post.ai_analysis_raw.get("advanced_models", {}).get("fraud_detection", {}) if post.ai_analysis_raw else {},
-                            "hashtag_analysis": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
-                            "entity_extraction": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("entity_extraction", {}) if post.ai_analysis_raw else {},
-                            "topic_modeling": post.ai_analysis_raw.get("advanced_models", {}).get("advanced_nlp", {}).get("topic_modeling", {}) if post.ai_analysis_raw else {},
-                            "data_size_chars": len(str(post.ai_analysis_raw)) if post.ai_analysis_raw else 0
-                        },
-                        # Complete raw AI analysis for advanced features
-                        "ai_analysis_raw": post.ai_analysis_raw if post.ai_analysis_raw else None
-                    })
-
-                # Replace posts data with refreshed data
-                posts_data = refreshed_posts_data
-
-                # Update analytics summary
-                result["analytics_summary"]["posts_with_ai"] = len([p for p in posts_data if p['ai_analysis']['analyzed_at']])
-                result["analytics_summary"]["ai_completion_rate"] = len([p for p in posts_data if p['ai_analysis']['analyzed_at']]) / max(len(posts_data), 1) * 100
-                result["analytics_summary"]["content_categories_found"] = len(existing_profile.ai_top_10_categories) if existing_profile.ai_top_10_categories else 0
-
-                result["message"] = "Complete profile data loaded from database - ALL processing completed upfront"
-                result["data_source"] = "database_complete_with_blocking_processing"
-
-                logger.info(f"[SUCCESS] Profile data refreshed after blocking processing for {username}")
-
-            return result
         else:
-            # Fetch new profile with COMPLETE data population using Apify
-            logger.info(f"[ERROR] STEP 1 RESULT: Profile '{username}' NOT FOUND in database")
-            logger.info(f"[SEARCH] STEP 2: Fetching COMPLETE data from Apify API...")
-            bulletproof_logger.info(f"BULLETPROOF: New profile {username} - fetching COMPLETE data from Apify")
+            # NEW PROFILE: Enqueue for background processing, return 202 immediately
+            logger.info(f"[ASYNC] Profile '{username}' NOT in database - enqueueing for background processing")
 
-            async with ApifyInstagramClient(settings.APIFY_API_TOKEN) as apify_client:
-                logger.info(f"[API] Calling Apify API for '{username}' (12 posts, 10 related, 12 reels)...")
+            from app.core.job_queue import job_queue, JobPriority, QueueType
+            from app.api.fast_handoff_api import FastHandoffResponse
 
-                # Use Apify client with EXACT limits set
-                apify_data = await apify_client.get_instagram_profile_comprehensive(username)
+            # Determine user tier for quota management
+            try:
+                from app.database.unified_models import User as AppUser
+                user_q = select(AppUser).where(AppUser.supabase_user_id == str(current_user.id))
+                user_r = await db.execute(user_q)
+                app_user = user_r.scalar_one_or_none()
+                user_tier = getattr(app_user, 'subscription_tier', 'free') or 'free'
+            except Exception:
+                user_tier = 'free'
 
-            if not apify_data:
-                logger.error(f"[ERROR] STEP 2 RESULT: Apify returned NO DATA for '{username}'")
-                raise HTTPException(status_code=404, detail="Profile not found")
-
-            logger.info(f"[SUCCESS] STEP 2 RESULT: Apify data received for '{username}'")
-
-            # Extract data from Apify response (already in Apify-compatible format)
-            profile_data = apify_data['results'][0]['content']['data']
-            logger.info(f"[ANALYTICS] Apify followers: {profile_data.get('followers_count', 0):,}")
-            logger.info(f"[ANALYTICS] Apify posts: {len(profile_data.get('posts', []))}")
-
-            logger.info(f"[SEARCH] STEP 3: Storing COMPLETE profile data in database...")
-            comprehensive_service = ComprehensiveDataService()
-
-            # Store new profile with enhanced retry mechanisms
-            profile, is_new = await comprehensive_service.store_complete_profile(
-                db, username, apify_data
+            enqueue_result = await job_queue.enqueue_job(
+                user_id=str(current_user.id),
+                job_type='creator_search',
+                params={'username': username, 'user_email': current_user.email},
+                priority=JobPriority.CRITICAL,
+                queue_type=QueueType.API_QUEUE,
+                estimated_duration=120,
+                user_tier=user_tier,
+                idempotency_key=f"creator_search:{username}:{str(current_user.id)}"
             )
 
-            logger.info(f"[SUCCESS] STEP 3 RESULT: Profile stored (new: {is_new})")
-            logger.info(f"[ANALYTICS] Profile ID: {profile.id}")
-
-            # CRITICAL SAFEGUARD: Check if profile is already being processed
-            logger.info(f"[SEARCH] STEP 4: Checking for concurrent processing attempts...")
-            from app.cache.redis_cache_manager import cache_manager
-
-            processing_lock_key = f"processing_lock:profile:{username}"
-            processing_status_key = f"processing_status:profile:{username}"
-
-            try:
-                # Check if already processing
-                if cache_manager.initialized:
-                    existing_lock = await cache_manager.redis_client.get(processing_lock_key)
-                    if existing_lock:
-                        logger.warning(f"[SAFEGUARD] Profile {username} is already being processed by another request")
-
-                        # Get processing status
-                        status_info = await cache_manager.redis_client.get(processing_status_key)
-                        status_data = {}
-                        if status_info:
-                            import json
-                            try:
-                                status_data = json.loads(status_info)
-                            except:
-                                status_data = {"stage": "unknown", "started_at": "unknown"}
-
-                        return {
-                            "success": True,
-                            "profile": {"username": username},
-                            "processing_status": {
-                                "in_progress": True,
-                                "current_stage": status_data.get("stage", "processing"),
-                                "started_at": status_data.get("started_at"),
-                                "message": "Profile is currently being processed by another request. Please wait and try again in a few moments."
-                            },
-                            "message": "Processing already in progress - please wait",
-                            "data_source": "processing_queue",
-                            "cached": False
-                        }
-
-                    # Acquire processing lock (5 minute expiry for safety)
-                    lock_acquired = await cache_manager.redis_client.set(
-                        processing_lock_key,
-                        f"processing_{current_user.id}_{datetime.now().isoformat()}",
-                        ex=300,  # 5 minutes
-                        nx=True  # Only set if key doesn't exist
-                    )
-
-                    if not lock_acquired:
-                        logger.warning(f"[SAFEGUARD] Failed to acquire processing lock for {username}")
-                        return {
-                            "success": False,
-                            "error": "Could not acquire processing lock - another request may be in progress",
-                            "message": "Please try again in a few moments"
-                        }
-
-                    # Set processing status
-                    await cache_manager.redis_client.set(
-                        processing_status_key,
-                        json.dumps({
-                            "stage": "unified_processing_starting",
-                            "started_at": datetime.now().isoformat(),
-                            "user_id": str(current_user.id)
-                        }),
-                        ex=300  # 5 minutes
-                    )
-
-                    logger.info(f"[SAFEGUARD] Processing lock acquired for {username}")
-
-            except Exception as lock_error:
-                logger.warning(f"[SAFEGUARD] Lock system error for {username}: {lock_error}")
-                # Continue without lock if Redis is unavailable
-
-            # CRITICAL: Start UNIFIED BACKGROUND PROCESSING with correct sequencing
-            logger.info(f"[SEARCH] STEP 4: Starting UNIFIED background processing (Apify → CDN → AI)...")
-            bulletproof_logger.info(f"BULLETPROOF: Starting unified background processing for {username}")
-
-            try:
-                from app.services.unified_background_processor import unified_background_processor
-
-                # Trigger complete pipeline processing (Apify already done, now CDN → AI)
-                logger.info(f"[UNIFIED-PROCESSOR] Starting complete pipeline for {username} (Profile: {profile.id})")
-                logger.info(f"[INDUSTRY-STANDARD] WAITING for complete CDN + AI processing before returning to user")
-
-                # Update processing status
-                if cache_manager.initialized:
-                    try:
-                        await cache_manager.redis_client.set(
-                            processing_status_key,
-                            json.dumps({
-                                "stage": "cdn_and_ai_processing",
-                                "started_at": datetime.now().isoformat(),
-                                "user_id": str(current_user.id)
-                            }),
-                            ex=300
-                        )
-                    except:
-                        pass
-
-                # CRITICAL FIX: AWAIT the complete background processing pipeline (BLOCKING until 100% complete)
-                pipeline_results = await unified_background_processor.process_profile_complete_pipeline(
-                    profile_id=str(profile.id),
-                    username=username
+            if not enqueue_result.get('success'):
+                logger.warning(f"[ASYNC] Job enqueue failed for {username}: {enqueue_result}")
+                raise HTTPException(
+                    status_code=429 if enqueue_result.get('error') == 'quota_exceeded' else 503,
+                    detail=enqueue_result.get('message', 'Failed to enqueue analysis job')
                 )
 
-                logger.info(f"[SUCCESS] STEP 4 RESULT: Complete unified processing pipeline FINISHED")
-                logger.info(f"[PIPELINE-COMPLETE] CDN: {pipeline_results.get('results', {}).get('cdn_results', {}).get('processed_images', 0)} images processed")
-                logger.info(f"[PIPELINE-COMPLETE] AI: {pipeline_results.get('results', {}).get('ai_results', {}).get('completed_models', 0)}/10 models completed")
-                bulletproof_logger.info(f"BULLETPROOF: Complete unified processing pipeline FINISHED for {username}")
+            logger.info(f"[ASYNC] Job {enqueue_result['job_id']} enqueued for {username}")
 
-
-            except Exception as processing_error:
-                logger.error(f"[CRITICAL] STEP 4 ERROR: Unified processing failed for {username}: {processing_error}")
-                bulletproof_logger.error(f"BULLETPROOF: Unified processing FAILED for {username}: {processing_error}")
-                # Don't fail the entire request if background processing fails
-
-            finally:
-                # CRITICAL CLEANUP: Always release processing lock
-                try:
-                    if cache_manager.initialized:
-                        await cache_manager.redis_client.delete(processing_lock_key)
-                        await cache_manager.redis_client.delete(processing_status_key)
-                        logger.info(f"[SAFEGUARD] Processing lock released for {username}")
-                except Exception as cleanup_error:
-                    logger.warning(f"[SAFEGUARD] Lock cleanup error for {username}: {cleanup_error}")
-            
-            # CRITICAL FIX: Get COMPLETE refreshed profile data after processing pipeline
-            logger.info(f"[SEARCH] STEP 5: Retrieving COMPLETE processed data from database...")
-
-            # Handle potential transaction errors from processing pipeline
-            try:
-                await db.refresh(profile)
-            except Exception as refresh_error:
-                logger.error(f"[DATABASE] Profile refresh failed, attempting transaction recovery: {refresh_error}")
-
-                # Rollback any failed transaction and start fresh
-                try:
-                    await db.rollback()
-                    logger.info(f"[DATABASE] Transaction rolled back successfully")
-                except Exception as rollback_error:
-                    logger.error(f"[DATABASE] Rollback failed: {rollback_error}")
-
-                # Re-query profile from database with fresh transaction
-                try:
-                    profile_query = select(Profile).where(Profile.username == username)
-                    profile_result = await db.execute(profile_query)
-                    fresh_profile = profile_result.scalar_one_or_none()
-
-                    if fresh_profile:
-                        profile = fresh_profile
-                        logger.info(f"[DATABASE] Successfully recovered profile data for {username}")
-                    else:
-                        logger.error(f"[DATABASE] Profile {username} not found after recovery attempt")
-                        raise HTTPException(status_code=404, detail=f"Profile {username} not found after processing")
-
-                except Exception as recovery_error:
-                    logger.error(f"[DATABASE] Profile recovery failed: {recovery_error}")
-                    raise HTTPException(status_code=500, detail=f"Database error during profile retrieval for {username}")
-
-            # Get CDN URLs for profile picture
-            # Get CDN URL for avatar (separate from profile_pic_url)
-            profile_cdn_query = text("""
-                SELECT cdn_url_512
-                FROM cdn_image_assets
-                WHERE source_id = :profile_id
-                AND source_type = 'profile_avatar'
-                AND cdn_url_512 IS NOT NULL
-                LIMIT 1
-            """)
-            profile_cdn_result = await db.execute(profile_cdn_query, {'profile_id': str(profile.id)})
-            profile_cdn_row = profile_cdn_result.fetchone()
-            cdn_avatar_url = profile_cdn_row[0] if profile_cdn_row else profile.cdn_avatar_url
-
-            # Get ALL posts with complete AI analysis and CDN URLs
-            posts_query = select(Post).where(
-                Post.profile_id == profile.id
-            ).order_by(Post.created_at.desc()).limit(50)
-            posts_result = await db.execute(posts_query)
-            posts = posts_result.scalars().all()
-
-            # Get CDN URLs for all posts
-            posts_cdn_query = text("""
-                SELECT media_id, cdn_url_512
-                FROM cdn_image_assets
-                WHERE source_id = :profile_id
-                AND source_type = 'post_thumbnail'
-                AND cdn_url_512 IS NOT NULL
-            """)
-            posts_cdn_result = await db.execute(posts_cdn_query, {'profile_id': str(profile.id)})
-            posts_cdn_urls = {row[0]: row[1] for row in posts_cdn_result.fetchall()}
-
-            # Build complete posts data with AI analysis and CDN URLs
-            posts_data = []
-            for post in posts:
-                post_cdn_url = posts_cdn_urls.get(post.instagram_post_id)
-                posts_data.append({
-                    "id": post.instagram_post_id,
-                    "shortcode": post.shortcode,
-                    "caption": post.caption,
-                    "likes_count": post.likes_count,
-                    "comments_count": post.comments_count,
-                    "engagement_rate": post.engagement_rate,
-                    "display_url": post_cdn_url or post.display_url,
-                    "cdn_thumbnail_url": post_cdn_url,
-                    "taken_at": datetime.fromtimestamp(post.taken_at_timestamp, tz=timezone.utc).isoformat() if post.taken_at_timestamp else None,
-                    "ai_analysis": {
-                        "content_category": post.ai_content_category,
-                        "category_confidence": post.ai_category_confidence,
-                        "sentiment": post.ai_sentiment,
-                        "sentiment_score": post.ai_sentiment_score,
-                        "sentiment_confidence": post.ai_sentiment_confidence,
-                        "language_code": post.ai_language_code,
-                        "language_confidence": post.ai_language_confidence,
-                        "analyzed_at": post.ai_analyzed_at.isoformat() if post.ai_analyzed_at else None
-                    }
-                })
-
-            logger.info(f"[SUCCESS] STEP 5 RESULT: Retrieved {len(posts_data)} posts with COMPLETE processing")
-
-            # Import JSON sanitizer to prevent numpy serialization errors
-            from app.utils.json_serializer import safe_json_response
-
-            response_data = {
-                "success": True,
-                "profile": {
-                    "id": str(profile.id),
-                    "username": profile.username,
-                    "full_name": profile.full_name,
-                    "biography": profile.biography,
-                    "followers_count": profile.followers_count,
-                    "following_count": profile.following_count,
-                    "posts_count": profile.posts_count,
-                    "is_verified": profile.is_verified,
-                    "is_private": profile.is_private,
-                    "is_business_account": profile.is_business_account,
-                    "profile_pic_url": profile.profile_pic_url or "",
-                    "profile_pic_url_hd": profile.profile_pic_url_hd or "",
-                    "cdn_avatar_url": cdn_avatar_url,
-                    "external_url": profile.external_url,
-                    "engagement_rate": profile.engagement_rate,
-                    "detected_country": profile.detected_country,
-
-                    # Complete AI Analysis (structured format)
-                    "ai_analysis": {
-                        "primary_content_type": profile.ai_primary_content_type,
-                        "content_distribution": _format_content_distribution(getattr(profile, 'ai_content_distribution', {})),
-                        "avg_sentiment_score": profile.ai_avg_sentiment_score,
-                        "language_distribution": _format_language_distribution(getattr(profile, 'ai_language_distribution', {})),
-                        "content_quality_score": profile.ai_content_quality_score,
-                        "profile_analyzed_at": profile.ai_profile_analyzed_at.isoformat() if profile.ai_profile_analyzed_at else None,
-                        "comprehensive_analyzed_at": getattr(profile, 'ai_comprehensive_analyzed_at', None).isoformat() if getattr(profile, 'ai_comprehensive_analyzed_at', None) else None,
-                        "models_success_rate": getattr(profile, 'ai_models_success_rate', 0.0)
-                    },
-
-                    # Structured AI insights (parsed from JSONB)
-                    **_format_ai_insights(profile)
-                },
-
-                "posts": posts_data,
-                "posts_count": len(posts_data),
-
-                # Processing Results Summary
-                "processing_results": {
-                    "pipeline_completed": pipeline_results.get('overall_success', False) if 'pipeline_results' in locals() else False,
-                    "cdn_processing": pipeline_results.get('results', {}).get('cdn_results', {}) if 'pipeline_results' in locals() else {},
-                    "ai_processing": pipeline_results.get('results', {}).get('ai_results', {}) if 'pipeline_results' in locals() else {},
-                    "processing_stages_completed": ["apify_storage", "cdn_processing", "ai_analysis"]
-                },
-
-                "analytics_summary": {
-                    "total_posts_analyzed": len(posts_data),
-                    "posts_with_ai": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]),
-                    "ai_completion_rate": len([p for p in posts_data if p['ai_analysis']['analyzed_at']]) / max(len(posts_data), 1) * 100 if posts_data else 0,
-                    "avg_engagement_rate": profile.engagement_rate,
-                    "content_categories_found": len(profile.ai_top_10_categories) if profile.ai_top_10_categories else 0
-                },
-
-                "message": "Profile found and analyzed! Full data ready - unlock for complete access",
-                "data_source": "complete_pipeline",
-                "cached": False,
-                "unlock_required": True,
-                "unlock_cost": 25,
-                "preview_mode": False,
-                "unlock_endpoint": "/api/v1/discovery/unlock-profile",
-                "industry_standard_workflow": "complete_processing_before_response"
-            }
-
-            # AUTOMATIC UNLOCK: User gets access after successful processing
-            auto_unlock_success = False
-            try:
-                # Map auth user to app user (reuse logic from fast path)
-                from app.database.unified_models import User, UserProfileAccess
-                user_query = select(User).where(User.supabase_user_id == str(current_user.id))
-                user_result = await db.execute(user_query)
-                app_user = user_result.scalar_one_or_none()
-
-                if app_user:
-                    # Check if user already has access
-                    existing_access_query = select(UserProfileAccess).where(
-                        UserProfileAccess.user_id == app_user.id,
-                        UserProfileAccess.profile_id == profile.id,
-                        UserProfileAccess.expires_at > datetime.now(timezone.utc)
-                    )
-                    existing_access_result = await db.execute(existing_access_query)
-                    existing_access = existing_access_result.scalar_one_or_none()
-
-                    if not existing_access:
-                        # Create automatic unlock after successful processing
-                        new_access = UserProfileAccess(
-                            user_id=app_user.id,
-                            profile_id=profile.id,
-                            granted_at=datetime.now(timezone.utc),
-                            expires_at=datetime.now(timezone.utc) + timedelta(days=30)
-                        )
-                        db.add(new_access)
-                        await db.commit()
-                        logger.info(f"[AUTO-UNLOCK] ✅ Automatically unlocked {username} for user {current_user.email} after successful processing")
-                        auto_unlock_success = True
-                    else:
-                        logger.info(f"[AUTO-UNLOCK] ℹ️ User {current_user.email} already has access to {username}")
-                        auto_unlock_success = True
-                else:
-                    logger.error(f"[AUTO-UNLOCK] ❌ Could not find app user for auth user {current_user.id}")
-
-            except Exception as unlock_error:
-                logger.error(f"[AUTO-UNLOCK] ❌ Failed to auto-unlock {username} for user {current_user.email}: {unlock_error}")
-
-            # Update response data with unlock status
-            response_data.update({
-                "message": "Profile processed and unlocked successfully! Full analytics access granted.",
-                "data_source": "complete_pipeline",
-                "cached": False,
-                "unlock_required": False,
-                "unlocked": True,
-                "auto_unlocked": auto_unlock_success,
-                "preview_mode": False,
-                "industry_standard_workflow": "complete_processing_before_response"
-            })
-
-            # Notify user that analytics are ready
-            try:
-                from app.services.notification_service import NotificationService
-                await NotificationService.notify_analytics_completed(
-                    db,
-                    user_id=current_user.id,
-                    user_email=current_user.email,
-                    username=username,
+            return JSONResponse(
+                status_code=202,
+                content=FastHandoffResponse.success(
+                    job_id=str(enqueue_result['job_id']),
+                    estimated_completion_seconds=enqueue_result.get('estimated_completion_seconds', 120),
+                    queue_position=enqueue_result.get('queue_position', 0),
+                    message=f"Analysis started for @{username}"
                 )
-            except Exception as notify_err:
-                logger.warning(f"Failed to send analytics completion notification: {notify_err}")
-
-            # Return sanitized JSON response to prevent numpy serialization errors
-            return safe_json_response(response_data)
+            )
         
         print(f"COMPREHENSIVE CREATOR SEARCH SUCCESS for '{username}'")
         print(f"==================== CREATOR SEARCH END ====================\n")
@@ -2014,6 +1234,10 @@ app.include_router(cdn_monitoring_router)
 from app.api.cloudflare_mcp_routes import router as cloudflare_mcp_router
 app.include_router(cloudflare_mcp_router)
 
+# Admin Proposal Management Routes
+from app.api.admin.admin_proposal_routes import router as admin_proposal_router
+app.include_router(admin_proposal_router, prefix="/api/v1/admin")
+
 # Influencer Master Database (IMD) Routes
 from app.api.admin.influencer_database_routes import router as influencer_db_router
 app.include_router(influencer_db_router, prefix="/api/v1/admin")
@@ -2154,12 +1378,31 @@ async def monitor_workers():
         except Exception as e:
             job_queue_status = f"error: {str(e)[:50]}"
 
+        # Check Unified Async Worker status
+        unified_worker_status = {}
+        try:
+            from app.workers.unified_async_worker import unified_async_worker
+            unified_worker_status = unified_async_worker.get_status()
+        except Exception as uw_err:
+            unified_worker_status = {"error": str(uw_err)[:50]}
+
+        # Check Post Analytics Worker status
+        post_analytics_status = {}
+        try:
+            from app.workers.post_analytics_worker import post_analytics_worker
+            post_analytics_status = post_analytics_worker.get_status()
+        except Exception as pa_err:
+            post_analytics_status = {"error": str(pa_err)[:50]}
+
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "unified_async_worker": unified_worker_status,
+            "post_analytics_worker": post_analytics_status,
             "celery_workers": {
                 "status": celery_status,
                 "active_tasks": active_tasks,
-                "task_count": len(active_tasks)
+                "task_count": len(active_tasks),
+                "note": "Celery subprocess replaced by UnifiedAsyncWorker (in-process)"
             },
             "job_queue": {
                 "status": job_queue_status,
@@ -2167,7 +1410,7 @@ async def monitor_workers():
                 "job_count": len(active_db_jobs)
             },
             "system": "operational",
-            "message": f"Monitoring: {len(active_tasks)} Celery tasks, {len(active_db_jobs)} DB jobs"
+            "message": f"Monitoring: unified_worker={'running' if unified_worker_status.get('running') else 'stopped'}, post_analytics={'running' if post_analytics_status.get('running') else 'stopped'}, {len(active_db_jobs)} DB jobs"
         }
     except Exception as e:
         return {

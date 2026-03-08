@@ -179,24 +179,18 @@ class CreatorAnalyticsTriggerService:
             if progress_callback:
                 await progress_callback("cdn_processing", "Starting CDN image processing...", 60)
 
-            # For bulk repair operations, run synchronously to track progress
-            # For regular operations, run in background
+            # Always AWAIT the pipeline — CDN must complete before AI starts
             try:
                 if progress_callback:
-                    # Synchronous processing with progress tracking for bulk repairs
                     await self._process_with_progress_tracking(
                         profile_id, username, progress_callback
                     )
                 else:
-                    # Fire and forget - AI processing runs in background for regular operations
-                    import asyncio
-                    asyncio.create_task(
-                        unified_background_processor.process_profile_complete_pipeline(
-                            profile_id=profile_id,
-                            username=username
-                        )
+                    await unified_background_processor.process_profile_complete_pipeline(
+                        profile_id=profile_id,
+                        username=username
                     )
-                logger.info(f"✅ Processing task completed/created for {username}")
+                logger.info(f"✅ Processing pipeline completed for {username}")
 
             except Exception as processing_error:
                 logger.error(f"❌ Failed to process/create processing task: {processing_error}")

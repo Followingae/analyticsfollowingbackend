@@ -153,7 +153,8 @@ class ProductionAIOrchestrator:
             Prerequisites verification result
         """
         try:
-            async with get_session() as db:
+            from app.database.optimized_pools import optimized_pools
+            async with optimized_pools.get_background_session() as db:
                 # Check profile exists with Apify data
                 profile_check = text("""
                     SELECT
@@ -197,12 +198,10 @@ class ProductionAIOrchestrator:
                     # Profile has no posts - skip CDN checks, allow AI to analyze profile data only
                     logger.info(f"[AI-ORCHESTRATOR] Profile {data.username} has no posts - will analyze profile data only")
                 else:
-                    # RELAXED: Lower CDN processing threshold to 50% for production flexibility
                     cdn_completion = data.posts_with_cdn / max(data.posts_count, 1)
                     if cdn_completion < 0.5:
-                        # Don't block AI processing - just warn and proceed with available data
-                        logger.warning(f"[AI-ORCHESTRATOR] CDN processing incomplete for {data.username}: {cdn_completion:.1%}, but proceeding with AI analysis")
-                        # missing.append(f'cdn_processing_incomplete_{cdn_completion:.1%}')  # COMMENTED OUT - don't block
+                        # CDN incomplete — warn but proceed (AI analyzes text/metadata, not image pixels)
+                        logger.warning(f"[AI-ORCHESTRATOR] CDN {cdn_completion:.0%} for {data.username}, proceeding — AI uses text/metadata not images")
 
                 # CDN profile pic processing is optional
                 # (profile_pic_cdn_url column doesn't exist in current schema)
@@ -282,7 +281,8 @@ class ProductionAIOrchestrator:
         Returns:
             Tuple of (profile_data, posts_data)
         """
-        async with get_session() as db:
+        from app.database.optimized_pools import optimized_pools
+        async with optimized_pools.get_background_session() as db:
             # Fetch profile data
             profile_query = text("""
                 SELECT
@@ -357,7 +357,9 @@ class ProductionAIOrchestrator:
             posts_data: Posts data used for analysis
             ai_results: Complete AI analysis results from all 10 models
         """
-        async with get_session() as db:
+        # Use optimized_pools (has statement_cache_size=0 for pgbouncer compatibility)
+        from app.database.optimized_pools import optimized_pools
+        async with optimized_pools.get_background_session() as db:
             try:
                 # STEP 1: Store individual post AI analysis
                 await self._store_post_ai_analysis(db, posts_data, ai_results)
@@ -372,7 +374,7 @@ class ProductionAIOrchestrator:
 
             except Exception as e:
                 await db.rollback()
-                logger.error(f"[AI-ORCHESTRATOR] Failed to store AI results: {e}")
+                logger.error(f"[AI-ORCHESTRATOR] Failed to store AI results: {str(e) or repr(e)}")
                 raise
 
     async def _store_post_ai_analysis(self, db: AsyncSession, posts_data: List[Dict], ai_results: Dict[str, Any]) -> None:
@@ -386,15 +388,16 @@ class ProductionAIOrchestrator:
         language_results = ai_results.get('language', {})
         category_results = ai_results.get('category', {})
 
-        # Process each post
-        for i, post in enumerate(validated_posts):
-            if i >= len(sentiment_results.get('sentiment_scores', [])):
-                continue
+        # Process each post — always store defaults even if AI results are missing
+        sentiment_scores = sentiment_results.get('sentiment_scores', [])
+        language_scores = language_results.get('language_scores', [])
+        category_scores = category_results.get('category_scores', [])
 
-            # Get AI analysis for this post
-            sentiment_data = sentiment_results['sentiment_scores'][i] if i < len(sentiment_results.get('sentiment_scores', [])) else {}
-            language_data = language_results['language_scores'][i] if i < len(language_results.get('language_scores', [])) else {}
-            category_data = category_results['category_scores'][i] if i < len(category_results.get('category_scores', [])) else {}
+        for i, post in enumerate(validated_posts):
+            # Get AI analysis for this post, defaulting to safe values if missing
+            sentiment_data = sentiment_scores[i] if i < len(sentiment_scores) else {'sentiment': 'neutral', 'score': 0.0, 'confidence': 0.0}
+            language_data = language_scores[i] if i < len(language_scores) else {'language': 'en', 'confidence': 0.0}
+            category_data = category_scores[i] if i < len(category_scores) else {'category': 'general', 'confidence': 0.0}
 
             # Compile all AI analysis into raw JSONB
             ai_analysis_raw = {
@@ -466,7 +469,7 @@ class ProductionAIOrchestrator:
         # Calculate core aggregations
         primary_content_type = category_results.get('primary_category', 'general')
         content_distribution = json.dumps(category_results.get('category_distribution', {}))
-        avg_sentiment_score = sentiment_results.get('confidence_avg', 0.0)
+        avg_sentiment_score = sentiment_results.get('avg_score', sentiment_results.get('confidence_avg', 0.0))
         language_distribution = json.dumps(language_results.get('language_distribution', {}))
         content_quality_score = audience_quality.get('authenticity_score', 75.0)
 

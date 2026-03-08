@@ -20,7 +20,7 @@ from app.middleware.role_based_auth import (
     auth_service,
     audit_action
 )
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import (
     Users, CreditWallet, CreditTransactions, CreditAdjustments,
     SubscriptionHistory, RevenueAttribution, PlatformMetrics

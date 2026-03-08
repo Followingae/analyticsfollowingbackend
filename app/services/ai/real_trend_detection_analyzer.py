@@ -123,8 +123,8 @@ class RealTrendDetectionAnalyzer:
             content_types = []
 
             for post in posts_data:
-                # Get timestamp
-                timestamp = post.get('taken_at_timestamp')
+                # Get timestamp (try taken_at_timestamp first, then posted_at)
+                timestamp = post.get('taken_at_timestamp') or post.get('posted_at')
                 if timestamp:
                     try:
                         if isinstance(timestamp, (int, float)):

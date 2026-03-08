@@ -146,12 +146,27 @@ class WorkerManager:
             logger.error(f"Failed to configure Post Analytics Worker: {e}")
             return False
 
+    def start_unified_worker(self) -> bool:
+        """Start unified background worker (in-process async worker).
+
+        The actual UnifiedAsyncWorker runs in-process via asyncio.create_task()
+        in the FastAPI lifespan  - no Celery subprocess needed.
+        """
+        try:
+            logger.info("Unified Async Worker configured - will start with FastAPI app")
+            logger.info("  (In-process async worker replaces Celery subprocess)")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to configure Unified worker: {e}")
+            return False
+
     def start_all_workers(self) -> bool:
         """Start all background workers"""
         logger.info("Starting all background workers...")
 
         success_count = 0
-        total_workers = 3  # AI, CDN, and Post Analytics
+        total_workers = 4  # AI, CDN, Post Analytics, and Unified
 
         # Start Post Analytics Worker (critical for non-blocking operations)
         if self.start_post_analytics_worker():
@@ -171,8 +186,17 @@ class WorkerManager:
         if self.start_cdn_worker():
             success_count += 1
 
+        # Wait a moment before starting Unified worker
+        time.sleep(2)
+
+        # Start Unified worker (processes all 202 async jobs)
+        if self.start_unified_worker():
+            success_count += 1
+        else:
+            logger.warning("⚠️ Unified Worker failed - async 202 jobs will NOT be processed!")
+
         logger.info(f"Started {success_count}/{total_workers} workers successfully")
-        return success_count >= 2  # At least 2 workers should be running
+        return success_count >= 3  # At least 3 workers should be running
     
     def stop_all_workers(self):
         """Stop all background workers"""

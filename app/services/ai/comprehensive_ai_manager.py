@@ -68,6 +68,13 @@ from app.database.unified_models import Profile, Post
 
 # New Real AI Analyzers (with fallback handling)
 try:
+    from app.services.ai.clip_visual_analyzer import CLIPVisualAnalyzer
+    CLIP_VISUAL_AVAILABLE = True
+except ImportError as e:
+    CLIP_VISUAL_AVAILABLE = False
+    logger.warning(f"CLIP Visual Analyzer not available: {e}")
+
+try:
     from app.services.ai.real_visual_content_analyzer import RealVisualContentAnalyzer
     REAL_VISUAL_AVAILABLE = True
 except ImportError as e:
@@ -321,17 +328,57 @@ class ComprehensiveAIManager:
             'retry_attempts': {}
         }
         
-        # Process all models with retry mechanisms
+        # Process all models in two parallel groups for ~2-3x speedup
         all_results = {}
-        
-        for model_type in AIModelType:
-            logger.info(f"[SYNC] Processing {model_type.value} for profile {profile_id}")
-            
-            # Attempt processing with retries
+
+        # Group A: Independent models (run in parallel)
+        group_a_models = [
+            AIModelType.SENTIMENT, AIModelType.LANGUAGE, AIModelType.CATEGORY,
+            AIModelType.VISUAL_CONTENT, AIModelType.ADVANCED_NLP
+        ]
+        # Group B: Models that benefit from Group A context (run in parallel after A)
+        group_b_models = [
+            AIModelType.AUDIENCE_QUALITY, AIModelType.AUDIENCE_INSIGHTS,
+            AIModelType.TREND_DETECTION, AIModelType.FRAUD_DETECTION,
+            AIModelType.BEHAVIORAL_PATTERNS
+        ]
+
+        async def _run_model(model_type):
             result = await self._process_model_with_retry(
                 model_type, profile_id, profile_data, posts_data, job_status
             )
-            
+            return model_type, result
+
+        logger.info(f"[PARALLEL] Running Group A ({len(group_a_models)} models) in parallel for {profile_id}")
+        group_a_tasks = [_run_model(m) for m in group_a_models]
+        group_a_results = await asyncio.gather(*group_a_tasks, return_exceptions=True)
+
+        for item in group_a_results:
+            if isinstance(item, Exception):
+                logger.error(f"[PARALLEL] Group A model exception: {item}")
+                job_status['failed_models'] += 1
+                continue
+            model_type, result = item
+            if result['success']:
+                all_results[model_type.value] = result['data']
+                job_status['completed_models'] += 1
+                job_status['model_status'][model_type.value] = 'completed'
+                logger.info(f"[SUCCESS] {model_type.value} completed for profile {profile_id}")
+            else:
+                job_status['failed_models'] += 1
+                job_status['model_status'][model_type.value] = 'failed'
+                logger.error(f"[ERROR] {model_type.value} failed for profile {profile_id}: {result.get('error')}")
+
+        logger.info(f"[PARALLEL] Running Group B ({len(group_b_models)} models) in parallel for {profile_id}")
+        group_b_tasks = [_run_model(m) for m in group_b_models]
+        group_b_results = await asyncio.gather(*group_b_tasks, return_exceptions=True)
+
+        for item in group_b_results:
+            if isinstance(item, Exception):
+                logger.error(f"[PARALLEL] Group B model exception: {item}")
+                job_status['failed_models'] += 1
+                continue
+            model_type, result = item
             if result['success']:
                 all_results[model_type.value] = result['data']
                 job_status['completed_models'] += 1
@@ -436,21 +483,35 @@ class ComprehensiveAIManager:
             return await self._analyze_audience_quality(profile_data, posts_data)
             
         elif model_type == AIModelType.VISUAL_CONTENT:
-            # Use new real visual content analyzer if available
+            # Prefer CLIP analyzer (zero-shot brand/scene/content detection)
+            if CLIP_VISUAL_AVAILABLE:
+                try:
+                    clip_analyzer = CLIPVisualAnalyzer()
+                    return await clip_analyzer.analyze_visual_content(posts_data)
+                except Exception as e:
+                    logger.warning(f"CLIP visual analyzer failed: {e}, trying fallback")
+            # Fall back to ResNet-based analyzer
             if REAL_VISUAL_AVAILABLE:
                 try:
                     real_analyzer = RealVisualContentAnalyzer()
                     return await real_analyzer.analyze_visual_content(posts_data)
                 except Exception as e:
-                    logger.warning(f"Real visual analyzer failed: {e}, using fallback")
-            return await self._analyze_visual_content(posts_data)
+                    logger.warning(f"Real visual analyzer failed: {e}, using empty fallback")
+            # Return empty analysis instead of fake data
+            return self._get_empty_visual_analysis(posts_data)
 
         elif model_type == AIModelType.AUDIENCE_INSIGHTS:
             # Use new real geographic/demographic analyzer if available
             if REAL_GEO_AVAILABLE:
                 try:
                     real_analyzer = RealGeographicDemographicAnalyzer()
-                    return await real_analyzer.analyze_geographic_demographics(profile_data, posts_data)
+                    # Cap at 60s to prevent geocoding from stalling the whole pipeline
+                    return await asyncio.wait_for(
+                        real_analyzer.analyze_geographic_demographics(profile_data, posts_data),
+                        timeout=60
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Real geographic analyzer timed out after 60s, using fallback")
                 except Exception as e:
                     logger.warning(f"Real geographic analyzer failed: {e}, using fallback")
             return await self._analyze_audience_insights(profile_data, posts_data)
@@ -515,6 +576,7 @@ class ComprehensiveAIManager:
                         'cdn_thumbnail_url': getattr(post, 'cdn_thumbnail_url', ''),
                         'is_video': getattr(post, 'is_video', False) or False,
                         'video_view_count': getattr(post, 'video_view_count', 0) or 0,
+                        'taken_at_timestamp': getattr(post, 'taken_at_timestamp', None),
                         'posted_at': getattr(post, 'posted_at', None),
                         'created_at': getattr(post, 'created_at', None)
                     }
@@ -645,7 +707,14 @@ class ComprehensiveAIManager:
             # Determine overall sentiment
             max_sentiment = max(sentiment_counts.items(), key=lambda x: x[1])
             results['overall_sentiment'] = max_sentiment[0]
-        
+
+            # Calculate actual average sentiment score (not just model confidence)
+            # Per-post score is score_map[sentiment] * confidence, ranging from -0.5 to +0.5
+            if results['sentiment_scores']:
+                results['avg_score'] = sum(s['score'] for s in results['sentiment_scores']) / len(results['sentiment_scores'])
+            else:
+                results['avg_score'] = 0.0
+
         return results
     
     async def _analyze_language_comprehensive(self, posts_data: List[dict]) -> Dict[str, Any]:
@@ -986,24 +1055,29 @@ class ComprehensiveAIManager:
     
     def _get_fallback_visual_analysis(self, posts_data: List[dict]) -> Dict[str, Any]:
         """Fallback visual analysis when computer vision models fail"""
+        return self._get_empty_visual_analysis(posts_data)
+
+    def _get_empty_visual_analysis(self, posts_data: List[dict]) -> Dict[str, Any]:
+        """Empty visual analysis - no fake data generated"""
         return {
             'visual_analysis': {
-                'processing_note': 'fallback_analysis_used',
-                'images_processed': len(posts_data),
-                'total_posts': len(posts_data)
+                'total_posts': len(posts_data),
+                'images_processed': 0,
+                'processing_success_rate': 0.0,
+                'analysis_method': 'unavailable',
             },
-            'dominant_colors': [
-                {"color": "#4A90E2", "percentage": 0.30},
-                {"color": "#F39C12", "percentage": 0.25},
-                {"color": "#E74C3C", "percentage": 0.20}
-            ],
-            'aesthetic_score': 65.0,  # Neutral assumption
-            'professional_quality_score': 60.0,
+            'brands_detected': [],
+            'scene_distribution': {},
+            'content_types': {},
+            'visual_consistency': None,
+            'production_quality': None,
+            'professional_score': None,
+            'aesthetic_score': None,
+            'professional_quality_score': None,
+            'dominant_colors': [],
             'brand_logo_detected': [],
-            'face_analysis': {
-                'faces_detected': 0,
-                'processing_note': 'computer_vision_unavailable'
-            }
+            'face_analysis': {'faces_detected': 0, 'unique_faces': 0, 'celebrities': [], 'emotions': []},
+            'image_quality_metrics': {},
         }
 
     async def _analyze_audience_insights(self, profile_data: dict, posts_data: List[dict]) -> Dict[str, Any]:

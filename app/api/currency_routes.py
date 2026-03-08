@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.currency_service import currency_service
 from app.models.auth import UserInDB
 

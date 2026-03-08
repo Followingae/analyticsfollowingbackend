@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete, and_, or_, func, text
 from contextlib import asynccontextmanager
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import Profile, Post, AIAnalysisJob, AIAnalysisJobLog
 # Background task manager removed - using direct analysis now
 

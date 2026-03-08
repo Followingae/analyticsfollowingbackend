@@ -63,7 +63,9 @@ def create_ultimate_pgbouncer_engine(database_url: str):
 
         # Connection arguments to force no prepared statements
         connect_args={
-            "statement_cache_size": 0,  # THE critical setting for asyncpg
+            "statement_cache_size": 0,  # Disable asyncpg prepared statement cache
+            "prepared_statement_cache_size": 0,  # Disable SQLAlchemy adapter's own prepared statement cache
+            "prepared_statement_name_func": lambda: "",  # CRITICAL: force UNNAMED prepared statements for PGBouncer
             "command_timeout": 30
         },
 

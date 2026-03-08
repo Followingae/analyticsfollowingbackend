@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.middleware.auth_middleware import get_current_active_user, require_admin
 from app.services.user_subscription_service import UserSubscriptionService
 from app.services.stripe_subscription_service import StripeSubscriptionService

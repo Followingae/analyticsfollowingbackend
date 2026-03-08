@@ -17,7 +17,7 @@ from app.middleware.team_auth_middleware import (
     get_team_owner_context, get_any_team_member_context,
     TeamContext
 )
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import User, Team
 from app.core.config import settings
 from app.models.teams import SUBSCRIPTION_TIER_LIMITS
@@ -83,7 +83,7 @@ async def create_stripe_customer(
             raise HTTPException(status_code=404, detail="User not found")
         
         # Create Stripe customer
-        stripe_customer = stripe.Customer.create(
+        stripe_customer = await stripe.Customer.create_async(
             email=user.email,
             name=user.full_name or f"Team Owner - {team_context.team_name}",
             metadata={
@@ -153,7 +153,7 @@ async def get_customer_portal_url(
         portal_return_url = return_url or f"{settings.FRONTEND_URL}/dashboard/subscription"
         
         # Create Customer Portal session
-        portal_session = stripe.billing_portal.Session.create(
+        portal_session = await stripe.billing_portal.Session.create_async(
             customer=stripe_customer_id,
             return_url=portal_return_url
         )

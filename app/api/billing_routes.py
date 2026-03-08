@@ -10,7 +10,7 @@ import stripe
 import os
 import asyncio
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.models.auth import BillingType, UserRole
 from pydantic import BaseModel
 from app.services.stripe_billing_service import stripe_billing_service
@@ -129,7 +129,7 @@ async def create_pre_registration_checkout(
             )
 
         # Create Stripe checkout session with metadata
-        session = stripe.checkout.Session.create(
+        session = await stripe.checkout.Session.create_async(
             payment_method_types=['card'],
             line_items=[{
                 'price': price_id,
@@ -344,9 +344,12 @@ async def handle_payment_success_webhook(
                         # Create credit wallet with correct field names
                         from app.database.unified_models import CreditWallet
                         from datetime import date, timedelta
+                        from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
 
-                        # Determine initial credits based on plan
-                        initial_credits = 5000 if plan == 'premium' else 2000 if plan == 'standard' else 100
+                        # Determine initial credits from canonical tier limits
+                        tier_key = SubscriptionTier(plan) if plan in ('free', 'standard', 'premium') else SubscriptionTier.FREE
+                        tier_limits = SUBSCRIPTION_TIER_LIMITS.get(tier_key, SUBSCRIPTION_TIER_LIMITS[SubscriptionTier.FREE])
+                        initial_credits = tier_limits.get('monthly_credits', 125)
 
                         # Calculate billing cycle dates
                         today = date.today()
@@ -391,12 +394,14 @@ async def handle_payment_success_webhook(
                 )
                 uid_row = uid_result.fetchone()
                 plan = metadata.get('plan', 'standard')
-                credits_map = {'premium': 5000, 'standard': 2000, 'free': 100}
+                from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
+                notify_tier_key = SubscriptionTier(plan) if plan in ('free', 'standard', 'premium') else SubscriptionTier.FREE
+                notify_tier_limits = SUBSCRIPTION_TIER_LIMITS.get(notify_tier_key, SUBSCRIPTION_TIER_LIMITS[SubscriptionTier.FREE])
                 await NotificationService.notify_credit_purchase(
                     db,
                     user_id=uid_row[0] if uid_row else None,
                     user_email=email,
-                    credits_added=credits_map.get(plan, 2000),
+                    credits_added=notify_tier_limits.get('monthly_credits', 125),
                     plan_name=plan.title(),
                 )
             except Exception as notify_err:
@@ -426,7 +431,7 @@ async def verify_checkout_session(
         logger.info(f"Verifying session: {session_id}")
 
         # Retrieve session from Stripe
-        session = stripe.checkout.Session.retrieve(session_id)
+        session = await stripe.checkout.Session.retrieve_async(session_id)
         logger.info(f"Session payment status: {session.payment_status}, Session status: {session.status}")
 
         if session.payment_status == 'paid':
@@ -817,7 +822,7 @@ async def get_subscription_status(
         # 1. Get user record with stripe_customer_id and subscription info
         user_result = await db.execute(
             select(User).where(
-                User.supabase_user_id == str(current_user.id)
+                User.supabase_user_id == str(current_user.supabase_user_id)
             )
         )
         user = user_result.scalar_one_or_none()
@@ -844,6 +849,7 @@ async def get_subscription_status(
         user_billing_type = user.billing_type
         user_status = user.status
         user_subscription_tier = user.subscription_tier
+        user_app_id = str(user.id)  # App UUID for team_members FK
         user_supabase_id = user.supabase_user_id or str(user.id)
 
         tier = user_subscription_tier or 'free'
@@ -878,7 +884,8 @@ async def get_subscription_status(
         }
 
         # Find user's team via team_members
-        supabase_id = user_supabase_id
+        # NOTE: team_members.user_id FK references users.id (app UUID),
+        # NOT auth UUID. Use user_app_id for this query.
         team_query = select(
             Team.profiles_used_this_month,
             Team.emails_used_this_month,
@@ -892,7 +899,7 @@ async def get_subscription_status(
             join(TeamMember, Team, TeamMember.team_id == Team.id)
         ).where(
             and_(
-                TeamMember.user_id == supabase_id,
+                TeamMember.user_id == user_app_id,
                 TeamMember.status == "active"
             )
         )
@@ -918,9 +925,10 @@ async def get_subscription_status(
             "total_spent_this_cycle": 0,
         }
 
+        # NOTE: credit_wallets.user_id stores auth UUID (supabase_user_id)
         wallet_result = await db.execute(
             select(CreditWallet).where(
-                CreditWallet.user_id == supabase_id
+                CreditWallet.user_id == user_supabase_id
             )
         )
         wallet = wallet_result.scalar_one_or_none()
@@ -941,7 +949,7 @@ async def get_subscription_status(
         if user_stripe_customer_id:
             try:
                 # Fetch active subscriptions from Stripe
-                subscriptions = stripe.Subscription.list(
+                subscriptions = await stripe.Subscription.list_async(
                     customer=user_stripe_customer_id,
                     status='all',
                     limit=1
@@ -961,7 +969,7 @@ async def get_subscription_status(
                     # Try to get payment method info
                     if sub.default_payment_method:
                         try:
-                            pm = stripe.PaymentMethod.retrieve(sub.default_payment_method)
+                            pm = await stripe.PaymentMethod.retrieve_async(sub.default_payment_method)
                             if pm.card:
                                 stripe_info["payment_method"] = {
                                     "brand": pm.card.brand,
@@ -974,7 +982,7 @@ async def get_subscription_status(
 
                 # Generate portal URL
                 frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
-                portal_session = stripe.billing_portal.Session.create(
+                portal_session = await stripe.billing_portal.Session.create_async(
                     customer=user_stripe_customer_id,
                     return_url=f"{frontend_url}/billing"
                 )
@@ -1026,7 +1034,7 @@ async def create_portal_session(
         # Look up user's stripe_customer_id
         user_result = await db.execute(
             select(User).where(
-                User.supabase_user_id == str(current_user.id)
+                User.supabase_user_id == str(current_user.supabase_user_id)
             )
         )
         user = user_result.scalar_one_or_none()
@@ -1052,7 +1060,7 @@ async def create_portal_session(
         frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:3000')
         return_url = request.return_url or f"{frontend_url}/billing"
 
-        portal_session = stripe.billing_portal.Session.create(
+        portal_session = await stripe.billing_portal.Session.create_async(
             customer=user.stripe_customer_id,
             return_url=return_url
         )

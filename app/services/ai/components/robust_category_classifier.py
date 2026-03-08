@@ -217,22 +217,24 @@ class RobustCategoryClassifier:
         pipeline = ai_manager.get_category_pipeline()
         if not pipeline:
             raise Exception("Category pipeline not available")
-        
+
         # Preprocess text to prevent tensor size errors
         processed_text = ai_manager.preprocess_text_for_model(text, 'category')
         processing_info["preprocessing_applied"] = processed_text != text
         processing_info["processed_text_length"] = len(processed_text)
-        
+
         if not processed_text.strip():
             return {
                 "category": "General",
                 "confidence": 0.3,
                 "reason": "empty_after_preprocessing"
             }
-        
+
         try:
-            # Run zero-shot classification
-            results = pipeline(processed_text, self.CATEGORIES)
+            # Run zero-shot classification off the event loop via thread executor
+            results = await ai_manager.run_inference(
+                'category', processed_text, candidate_labels=self.CATEGORIES
+            )
             
             if results and 'labels' in results and 'scores' in results:
                 top_category = results['labels'][0]

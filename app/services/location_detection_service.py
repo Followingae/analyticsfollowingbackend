@@ -9,72 +9,204 @@ Detects creator's primary country using weighted analysis of multiple signals:
 """
 
 import re
-import spacy
 import unicodedata
 from typing import Dict, List, Tuple, Optional
 from collections import Counter
-import pycountry
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Try to load spaCy, but don't fail if unavailable
+try:
+    import spacy
+    _SPACY_AVAILABLE = True
+except ImportError:
+    _SPACY_AVAILABLE = False
+
+# Try to load pycountry, but don't fail if unavailable
+try:
+    import pycountry
+    _PYCOUNTRY_AVAILABLE = True
+except ImportError:
+    _PYCOUNTRY_AVAILABLE = False
+
 
 class LocationDetectionService:
 
     def __init__(self):
         # Load spaCy model for entity extraction
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            logger.warning("spaCy model not found, entity extraction will be disabled")
-            self.nlp = None
+        self.nlp = None
+        if _SPACY_AVAILABLE:
+            try:
+                self.nlp = spacy.load("en_core_web_sm")
+            except OSError:
+                logger.warning("spaCy model not found, entity extraction will be disabled")
 
-        # Country name mappings and aliases
+        # Country name mappings and aliases (English + Arabic + abbreviations)
         self.country_mappings = {
-            # Common variations and aliases
+            # UAE
             "uae": "AE", "emirates": "AE", "dubai": "AE", "abu dhabi": "AE",
+            "الامارات": "AE", "الإمارات": "AE", "دبي": "AE", "ابوظبي": "AE", "أبوظبي": "AE",
+            "dxb": "AE",
+            # USA
             "usa": "US", "america": "US", "united states": "US",
+            "امريكا": "US", "أمريكا": "US",
+            # UK
             "uk": "GB", "britain": "GB", "england": "GB", "scotland": "GB", "wales": "GB",
+            "بريطانيا": "GB", "لندن": "GB",
+            # Saudi Arabia
             "ksa": "SA", "saudi": "SA", "saudi arabia": "SA",
-            "germany": "DE", "deutschland": "DE",
-            "france": "FR", "francia": "FR",
-            "spain": "ES", "españa": "ES",
-            "italy": "IT", "italia": "IT",
-            "netherlands": "NL", "holland": "NL",
-            "australia": "AU", "aussie": "AU",
-            "canada": "CA",
-            "india": "IN", "bharat": "IN",
-            "japan": "JP", "nippon": "JP",
-            "china": "CN", "prc": "CN",
-            "russia": "RU", "russian federation": "RU",
-            "brazil": "BR", "brasil": "BR",
-            "mexico": "MX", "méxico": "MX",
-            "turkey": "TR", "türkiye": "TR",
+            "السعودية": "SA", "المملكة": "SA",
+            # Germany
+            "germany": "DE", "deutschland": "DE", "المانيا": "DE", "ألمانيا": "DE",
+            # France
+            "france": "FR", "francia": "FR", "فرنسا": "FR",
+            # Spain
+            "spain": "ES", "españa": "ES", "اسبانيا": "ES", "إسبانيا": "ES",
+            # Italy
+            "italy": "IT", "italia": "IT", "ايطاليا": "IT", "إيطاليا": "IT",
+            # Netherlands
+            "netherlands": "NL", "holland": "NL", "هولندا": "NL",
+            # Australia
+            "australia": "AU", "aussie": "AU", "استراليا": "AU",
+            # Canada
+            "canada": "CA", "كندا": "CA",
+            # India
+            "india": "IN", "bharat": "IN", "الهند": "IN",
+            # Japan
+            "japan": "JP", "nippon": "JP", "اليابان": "JP",
+            # China
+            "china": "CN", "prc": "CN", "الصين": "CN",
+            # Russia
+            "russia": "RU", "russian federation": "RU", "روسيا": "RU",
+            # Brazil
+            "brazil": "BR", "brasil": "BR", "البرازيل": "BR",
+            # Mexico
+            "mexico": "MX", "méxico": "MX", "المكسيك": "MX",
+            # Turkey
+            "turkey": "TR", "türkiye": "TR", "تركيا": "TR",
+            # Egypt
             "egypt": "EG", "مصر": "EG",
+            # Lebanon
             "lebanon": "LB", "لبنان": "LB",
-            "jordan": "JO", "الأردن": "JO",
+            # Jordan
+            "jordan": "JO", "الأردن": "JO", "الاردن": "JO",
+            # Kuwait
             "kuwait": "KW", "الكويت": "KW",
+            # Qatar
             "qatar": "QA", "قطر": "QA",
+            # Bahrain
             "bahrain": "BH", "البحرين": "BH",
-            "oman": "OM", "عمان": "OM",
+            # Oman
+            "oman": "OM", "عمان": "OM", "عُمان": "OM",
+            # Iraq
+            "iraq": "IQ", "العراق": "IQ",
+            # Morocco
+            "morocco": "MA", "المغرب": "MA",
+            # Tunisia
+            "tunisia": "TN", "تونس": "TN",
+            # Algeria
+            "algeria": "DZ", "الجزائر": "DZ",
+            # Pakistan
+            "pakistan": "PK", "باكستان": "PK",
+            # South Korea
+            "south korea": "KR", "korea": "KR",
+            # Singapore
+            "singapore": "SG",
+            # Thailand
+            "thailand": "TH", "bangkok": "TH",
+            # Indonesia
+            "indonesia": "ID",
+            # Malaysia
+            "malaysia": "MY",
+            # Philippines
+            "philippines": "PH",
+            # Portugal
+            "portugal": "PT",
+            # Sweden
+            "sweden": "SE",
+            # Norway
+            "norway": "NO",
+            # Denmark
+            "denmark": "DK",
+            # Switzerland
+            "switzerland": "CH", "suisse": "CH",
+            # Austria
+            "austria": "AT",
+            # Belgium
+            "belgium": "BE",
+            # Ireland
+            "ireland": "IE",
+            # Poland
+            "poland": "PL",
+            # Greece
+            "greece": "GR",
         }
 
-        # City to country mappings
+        # City to country mappings (English + Arabic + abbreviations)
         self.city_mappings = {
             # UAE cities
             "dubai": "AE", "abu dhabi": "AE", "sharjah": "AE", "ajman": "AE",
+            "ras al khaimah": "AE", "fujairah": "AE", "al ain": "AE",
+            "دبي": "AE", "ابوظبي": "AE", "أبوظبي": "AE", "الشارقة": "AE",
+            "عجمان": "AE", "العين": "AE", "رأس الخيمة": "AE", "الفجيرة": "AE",
+            "jbr": "AE", "dxb": "AE", "jlt": "AE", "difc": "AE",
+            # Saudi cities
+            "riyadh": "SA", "jeddah": "SA", "mecca": "SA", "medina": "SA", "dammam": "SA",
+            "الرياض": "SA", "جدة": "SA", "مكة": "SA", "المدينة": "SA", "الدمام": "SA",
+            # Kuwait
+            "kuwait city": "KW", "مدينة الكويت": "KW",
+            # Qatar
+            "doha": "QA", "الدوحة": "QA",
+            # Bahrain
+            "manama": "BH", "المنامة": "BH",
+            # Egypt
+            "cairo": "EG", "alexandria": "EG", "القاهرة": "EG", "الاسكندرية": "EG",
+            # Lebanon
+            "beirut": "LB", "بيروت": "LB",
+            # Jordan
+            "amman": "JO", "عمّان": "JO",
+            # Iraq
+            "baghdad": "IQ", "erbil": "IQ", "بغداد": "IQ", "اربيل": "IQ",
+            # Morocco
+            "casablanca": "MA", "marrakech": "MA", "الدار البيضاء": "MA",
             # US cities
             "new york": "US", "los angeles": "US", "chicago": "US", "miami": "US",
             "san francisco": "US", "boston": "US", "seattle": "US", "las vegas": "US",
+            "houston": "US", "dallas": "US", "atlanta": "US", "nyc": "US", "la": "US",
             # UK cities
             "london": "GB", "manchester": "GB", "birmingham": "GB", "glasgow": "GB",
             "edinburgh": "GB", "liverpool": "GB", "bristol": "GB",
-            # Other major cities
-            "paris": "FR", "berlin": "DE", "madrid": "ES", "rome": "IT",
-            "amsterdam": "NL", "sydney": "AU", "melbourne": "AU", "toronto": "CA",
-            "vancouver": "CA", "mumbai": "IN", "delhi": "IN", "tokyo": "JP",
-            "beijing": "CN", "shanghai": "CN", "moscow": "RU", "istanbul": "TR",
-            "cairo": "EG", "beirut": "LB", "amman": "JO", "riyadh": "SA",
-            "jeddah": "SA", "doha": "QA", "kuwait city": "KW",
+            # European cities
+            "paris": "FR", "berlin": "DE", "madrid": "ES", "barcelona": "ES",
+            "rome": "IT", "milan": "IT", "amsterdam": "NL", "brussels": "BE",
+            "munich": "DE", "vienna": "AT", "zurich": "CH", "geneva": "CH",
+            "lisbon": "PT", "dublin": "IE", "copenhagen": "DK", "stockholm": "SE",
+            "oslo": "NO", "helsinki": "FI", "prague": "CZ", "warsaw": "PL",
+            "athens": "GR", "istanbul": "TR",
+            # Asia-Pacific cities
+            "tokyo": "JP", "osaka": "JP", "seoul": "KR", "beijing": "CN",
+            "shanghai": "CN", "hong kong": "HK", "singapore": "SG",
+            "bangkok": "TH", "mumbai": "IN", "delhi": "IN", "bangalore": "IN",
+            "jakarta": "ID", "kuala lumpur": "MY", "manila": "PH",
+            # Other
+            "sydney": "AU", "melbourne": "AU", "toronto": "CA", "vancouver": "CA",
+            "moscow": "RU", "são paulo": "BR", "mexico city": "MX",
+        }
+
+        # Flag emoji to country code mapping
+        self.flag_emoji_mappings = {
+            "🇦🇪": "AE", "🇺🇸": "US", "🇬🇧": "GB", "🇸🇦": "SA", "🇰🇼": "KW",
+            "🇶🇦": "QA", "🇧🇭": "BH", "🇴🇲": "OM", "🇮🇶": "IQ", "🇯🇴": "JO",
+            "🇱🇧": "LB", "🇪🇬": "EG", "🇲🇦": "MA", "🇹🇳": "TN", "🇩🇿": "DZ",
+            "🇹🇷": "TR", "🇩🇪": "DE", "🇫🇷": "FR", "🇪🇸": "ES", "🇮🇹": "IT",
+            "🇳🇱": "NL", "🇧🇪": "BE", "🇦🇹": "AT", "🇨🇭": "CH", "🇸🇪": "SE",
+            "🇳🇴": "NO", "🇩🇰": "DK", "🇮🇪": "IE", "🇵🇹": "PT", "🇬🇷": "GR",
+            "🇵🇱": "PL", "🇨🇿": "CZ", "🇷🇺": "RU", "🇺🇦": "UA",
+            "🇮🇳": "IN", "🇵🇰": "PK", "🇯🇵": "JP", "🇰🇷": "KR", "🇨🇳": "CN",
+            "🇭🇰": "HK", "🇸🇬": "SG", "🇹🇭": "TH", "🇮🇩": "ID", "🇲🇾": "MY",
+            "🇵🇭": "PH", "🇦🇺": "AU", "🇳🇿": "NZ", "🇨🇦": "CA", "🇧🇷": "BR",
+            "🇲🇽": "MX", "🇦🇷": "AR", "🇨🇴": "CO",
         }
 
     def detect_country(self, profile_data: dict) -> Dict:
@@ -85,12 +217,7 @@ class LocationDetectionService:
         {
             "country_code": "AE",
             "confidence": 0.85,
-            "signals": {
-                "biography": {"score": 0.45, "countries": {"AE": 0.9}},
-                "content": {"score": 0.20, "countries": {"AE": 1.0}},
-                "entities": {"score": 0.10, "countries": {"AE": 1.0}},
-                "audience": {"score": 0.02, "countries": {"US": 0.1}}
-            }
+            "signals": { ... }
         }
         """
 
@@ -147,6 +274,14 @@ class LocationDetectionService:
         bio_lower = normalized_bio.lower()
         countries_found = {}
 
+        # Check flag emojis first (high confidence — deliberate choice by creator)
+        for emoji, country_code in self.flag_emoji_mappings.items():
+            if emoji in biography:  # Check original (not lowered) for emoji
+                countries_found[country_code] = max(
+                    countries_found.get(country_code, 0),
+                    0.95  # Flag emojis are very strong signals
+                )
+
         # Look for country names and aliases
         for location, country_code in self.country_mappings.items():
             if location in bio_lower:
@@ -166,8 +301,11 @@ class LocationDetectionService:
                     confidence
                 )
 
-        # Look for location emojis and indicators
-        location_indicators = ["📍", "🇦🇪", "🇺🇸", "🇬🇧", "🇸🇦", "based in", "from", "live in"]
+        # Look for location indicators
+        location_indicators = [
+            "📍", "based in", "from", "live in", "living in",
+            "located in", "born in", "raised in", "hometown",
+        ]
         has_location_indicator = any(indicator in bio_lower for indicator in location_indicators)
 
         if countries_found and has_location_indicator:
@@ -197,14 +335,32 @@ class LocationDetectionService:
         if not all_text.strip():
             return {"score": 0.0, "countries": {}}
 
+        # Also check flag emojis in post content (use original case text)
+        all_text_original = " ".join(post.get("caption", "") for post in posts if post.get("caption"))
+        for emoji, country_code in self.flag_emoji_mappings.items():
+            if emoji in all_text_original:
+                # Flag emoji in posts is a moderate signal
+                pass  # Will be caught by location_counts below via country_mappings
+
         # Count location mentions
         location_counts = {}
         for location, country_code in {**self.country_mappings, **self.city_mappings}.items():
+            # Use word boundary check for short terms to avoid false positives
+            if len(location) <= 2:
+                # Skip very short terms in content analysis (too many false positives)
+                continue
             count = all_text.count(location)
             if count > 0:
                 if country_code not in location_counts:
                     location_counts[country_code] = 0
                 location_counts[country_code] += count
+
+        # Also check flag emojis in content
+        for emoji, country_code in self.flag_emoji_mappings.items():
+            if emoji in all_text_original:
+                if country_code not in location_counts:
+                    location_counts[country_code] = 0
+                location_counts[country_code] += all_text_original.count(emoji) * 2  # Flag emojis weighted higher
 
         if not location_counts:
             return {"score": 0.0, "countries": {}}
@@ -227,7 +383,9 @@ class LocationDetectionService:
         if not biography or not self.nlp:
             return {"score": 0.0, "countries": {}}
 
-        doc = self.nlp(biography)
+        # Normalize Unicode before NER
+        normalized_bio = unicodedata.normalize('NFKD', biography)
+        doc = self.nlp(normalized_bio)
         locations = []
 
         for ent in doc.ents:
@@ -278,6 +436,8 @@ class LocationDetectionService:
 
     def get_country_name(self, country_code: str) -> str:
         """Get full country name from ISO code"""
+        if not _PYCOUNTRY_AVAILABLE:
+            return country_code
         try:
             country = pycountry.countries.get(alpha_2=country_code)
             return country.name if country else country_code

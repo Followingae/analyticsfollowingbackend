@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query, 
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.hrm_service import HRMService
 from app.models.hrm import EmployeeStatus, LeaveType, LeaveStatus, TimesheetStatus, PaymentStatus
 import logging

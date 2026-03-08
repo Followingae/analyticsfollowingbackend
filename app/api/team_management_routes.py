@@ -17,7 +17,7 @@ from app.middleware.team_auth_middleware import (
     get_team_owner_context, get_any_team_member_context, 
     TeamContext, TeamRoles
 )
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import TeamMember, TeamInvitation, User, Team
 from app.models.teams import (
     TeamInvitationCreate, TeamInvitationResponse, TeamMemberResponse,

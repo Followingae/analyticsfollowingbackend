@@ -390,6 +390,10 @@ class BulletproofTransactionService:
 
                 # Transaction will auto-commit here
 
+            # 4. Record team and monthly usage tracking for profile unlocks
+            if intent.action_type == "profile_analysis":
+                await self._record_profile_usage(db, intent.user_id)
+
             return TransactionResult(
                 success=True,
                 intent_id=intent.intent_id,
@@ -469,6 +473,74 @@ class BulletproofTransactionService:
     async def _log_transaction_failure(self, db: AsyncSession, intent_id: str, user_id: str, error: str):
         """Log transaction failure for audit"""
         self.logger.error(f"💥 TRANSACTION FAILURE LOG: {intent_id} | User: {user_id} | Error: {error}")
+
+    async def _record_profile_usage(
+        self,
+        db: AsyncSession,
+        auth_user_id: str
+    ) -> None:
+        """
+        Record profile unlock usage in team-level and individual-level tracking.
+
+        Updates:
+        1. teams.profiles_used_this_month (read by /auth/dashboard for usage display)
+        2. monthly_usage_tracking.profiles_analyzed (individual member tracking)
+        """
+        try:
+            # Map auth.users.id to public.users.id
+            user_mapping = await db.execute(
+                text("SELECT id FROM users WHERE supabase_user_id = :auth_id"),
+                {"auth_id": str(auth_user_id)}
+            )
+            user_row = user_mapping.fetchone()
+            if not user_row:
+                self.logger.warning(f"[USAGE] Cannot find public.users record for auth user {auth_user_id}")
+                return
+
+            public_user_id = user_row[0]
+
+            # Find team membership
+            team_result = await db.execute(
+                text("SELECT team_id FROM team_members WHERE user_id = :user_id LIMIT 1"),
+                {"user_id": str(public_user_id)}
+            )
+            team_row = team_result.fetchone()
+            if not team_row:
+                self.logger.warning(f"[USAGE] User {public_user_id} has no team membership")
+                return
+
+            team_id = team_row[0]
+
+            # 1. Increment team-level counter
+            await db.execute(
+                text(
+                    "UPDATE teams SET profiles_used_this_month = profiles_used_this_month + 1, "
+                    "updated_at = now() WHERE id = :team_id"
+                ),
+                {"team_id": str(team_id)}
+            )
+
+            # 2. Upsert monthly_usage_tracking
+            current_month_str = datetime.now(timezone.utc).strftime('%Y-%m-01')
+            await db.execute(
+                text("""
+                    INSERT INTO monthly_usage_tracking (id, team_id, user_id, billing_month, profiles_analyzed, emails_unlocked, posts_analyzed, created_at, updated_at)
+                    VALUES (gen_random_uuid(), :team_id, :user_id, :billing_month, 1, 0, 0, now(), now())
+                    ON CONFLICT (team_id, user_id, billing_month)
+                    DO UPDATE SET profiles_analyzed = monthly_usage_tracking.profiles_analyzed + 1, updated_at = now()
+                """),
+                {
+                    "team_id": str(team_id),
+                    "user_id": str(public_user_id),
+                    "billing_month": current_month_str
+                }
+            )
+
+            self.logger.info(f"[USAGE] Recorded profile usage for user {public_user_id} in team {team_id}")
+
+        except Exception as e:
+            self.logger.error(f"[USAGE] Failed to record profile usage: {e}")
+            # Don't raise -- usage tracking failure should not block the transaction
 
     async def _repair_transaction_inconsistency(
         self,

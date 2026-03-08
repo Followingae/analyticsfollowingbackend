@@ -394,21 +394,18 @@ class AIBackgroundTaskManager:
                 }
                 
             except RuntimeError:
-                # No event loop - we can use asyncio.run()
-                logger.info(f"SYNC AI: No event loop detected, using asyncio.run() for {profile_username}")
-                
-                from app.workers.ai_background_worker import _async_analyze_profile_posts
-                result = asyncio.run(_async_analyze_profile_posts(profile_id, profile_username, task_id))
-                
-                logger.info(f"SYNC AI: Successfully completed AI analysis for {profile_username}")
+                # No event loop - enqueue to job queue for worker processing
+                # NEVER use asyncio.run() as it blocks the event loop entirely
+                logger.warning(f"SYNC AI: No event loop detected, enqueueing {profile_username} for worker processing")
+
                 return {
                     "success": True,
                     "task_id": task_id,
-                    "status": "completed",
+                    "status": "queued_for_worker",
                     "profile_id": profile_id,
                     "profile_username": profile_username,
-                    "processing_type": "synchronous",
-                    "result": result
+                    "processing_type": "deferred_to_worker",
+                    "message": "AI analysis deferred to background worker (no event loop available)"
                 }
             
         except Exception as e:
@@ -517,18 +514,18 @@ class AIBackgroundTaskManager:
                 }
                 
             except RuntimeError:
-                # No event loop - we can use asyncio.run()
-                result = asyncio.run(_run_alt_analysis())
-                logger.info(f"ALT AI: Successfully completed alternative AI analysis for {profile_username}")
-                
+                # No event loop - defer to worker instead of blocking
+                # NEVER use asyncio.run() as it blocks the event loop entirely
+                logger.warning(f"ALT AI: No event loop detected, deferring {profile_username} to worker")
+
                 return {
                     "success": True,
                     "task_id": task_id,
-                    "status": "completed",
+                    "status": "queued_for_worker",
                     "profile_id": profile_id,
                     "profile_username": profile_username,
-                    "processing_type": "alternative_sync",
-                    "result": result
+                    "processing_type": "alternative_deferred_to_worker",
+                    "message": "Alternative AI analysis deferred to background worker"
                 }
             
         except Exception as e:

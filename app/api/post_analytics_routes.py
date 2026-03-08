@@ -1,9 +1,13 @@
 """
 Post Analytics API Routes - Individual Instagram Post Analysis
 Separate from creator profile posts - dedicated post URL analysis system
+
+Phase 3 async migration: heavy processing paths return 202 + job_id,
+fast paths (cached/existing results) still return 200 synchronously.
 """
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query, Body
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List, Dict, Any
 from uuid import UUID
@@ -12,8 +16,12 @@ import logging
 
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.standalone_post_analytics_service import standalone_post_analytics_service
+from app.core.job_queue import job_queue, JobPriority, QueueType
+from app.api.fast_handoff_api import FastHandoffResponse
+from app.middleware.credit_gate import requires_credits
+from app.services.credit_wallet_service import credit_wallet_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/post-analytics", tags=["Post Analytics"])
@@ -46,48 +54,88 @@ class PostAnalysisSearchRequest(BaseModel):
 # =============================================================================
 
 @router.post("/analyze")
+@requires_credits("posts_analytics", credits_required=10)
 async def analyze_post(
     request: PostAnalysisRequest,
     current_user: UserInDB = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Analyze a single Instagram post by URL
+    Analyze a single Instagram post by URL.
 
-    This endpoint:
-    - Extracts post data using Apify Instagram scraper
-    - Runs comprehensive AI analysis (sentiment, category, language, etc.)
-    - Stores results in dedicated post_analyses table
-    - Returns complete analytics data
+    Returns 202 + job_id for heavy processing (Apify + AI pipeline).
+    Returns 200 with cached data if the post has already been analyzed.
 
     Example URLs:
     - https://www.instagram.com/p/ABC123/
     - https://instagram.com/p/XYZ789/
     """
     try:
-        logger.info(f"🔍 Post analysis requested by user {current_user.id}: {request.post_url}")
+        logger.info(f"Post analysis requested by user {current_user.id}: {request.post_url}")
 
-        # Analyze the post (Apify will handle URL validation)
-        analysis_result = await standalone_post_analytics_service.analyze_post_by_url(
-            post_url=request.post_url,
-            db=db,
-            user_id=current_user.id
+        # --- FAST PATH: check if post already analyzed (sync 200) ---
+        try:
+            shortcode = standalone_post_analytics_service._extract_shortcode_from_url(request.post_url)
+            if shortcode:
+                existing_post = await standalone_post_analytics_service._get_post_by_shortcode(db, shortcode)
+                if existing_post and getattr(existing_post, 'ai_analyzed_at', None):
+                    logger.info(f"Fast path: post {shortcode} already analyzed, returning cached result")
+                    cached_result = await standalone_post_analytics_service.get_post_analytics_by_shortcode(
+                        shortcode=shortcode,
+                        db=db
+                    )
+                    return {
+                        "success": True,
+                        "data": cached_result,
+                        "cached": True,
+                        "message": "Post analysis retrieved from cache"
+                    }
+        except Exception as cache_err:
+            logger.debug(f"Cache check skipped: {cache_err}")
+
+        # --- HEAVY PATH: enqueue job for background processing ---
+        user_tier = getattr(current_user, 'subscription_tier', 'free') or 'free'
+
+        enqueue_result = await job_queue.enqueue_job(
+            user_id=str(current_user.id),
+            job_type='post_analysis',
+            params={
+                'post_url': request.post_url,
+                'tags': request.tags or [],
+            },
+            priority=JobPriority.HIGH,
+            queue_type=QueueType.POST_ANALYTICS_QUEUE,
+            estimated_duration=60,
+            user_tier=user_tier,
+            idempotency_key=f"post_analysis:{request.post_url}:{str(current_user.id)}"
         )
 
-        return {
-            "success": True,
-            "data": analysis_result,
-            "message": "Post analysis completed successfully"
-        }
+        if not enqueue_result.get('success'):
+            raise HTTPException(
+                status_code=429 if enqueue_result.get('error') == 'quota_exceeded' else 503,
+                detail=enqueue_result.get('message', 'Failed to enqueue post analysis job')
+            )
 
+        return JSONResponse(
+            status_code=202,
+            content=FastHandoffResponse.success(
+                job_id=enqueue_result['job_id'],
+                estimated_completion_seconds=enqueue_result.get('estimated_completion_seconds', 60),
+                queue_position=enqueue_result.get('queue_position', 0),
+                message="Post analysis started"
+            )
+        )
+
+    except HTTPException:
+        raise
     except ValueError as e:
-        logger.error(f"❌ Validation error: {e}")
+        logger.error(f"Validation error: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"❌ Error analyzing post: {e}")
+        logger.error(f"Error analyzing post: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to analyze post: {str(e)}"
@@ -100,17 +148,42 @@ async def analyze_posts_batch(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Analyze multiple Instagram posts in batch
+    Analyze multiple Instagram posts in batch.
+
+    Returns 202 + job_id immediately. A background worker processes all
+    posts sequentially with progress updates. Poll /api/v1/jobs/{job_id}/status
+    for progress and /api/v1/jobs/{job_id}/result for the final output.
 
     Features:
-    - Process up to 50 posts at once
-    - True concurrent processing with controlled concurrency (max 5 simultaneous)
+    - Process up to 50 posts per batch
     - Individual success/failure tracking per post
-    - Detailed results for each post
-    - Follows complete Post Analytics sequence (Apify → AI → CDN → Creator Analytics trigger)
+    - Progress updates as each post completes
+    - Follows complete Post Analytics sequence (Apify -> AI -> CDN -> Creator Analytics trigger)
+
+    **Credit cost**: 10 credits per post in the batch.
     """
     try:
-        logger.info(f"📦 Batch analysis requested by user {current_user.id}: {len(request.post_urls)} posts")
+        logger.info(f"Batch analysis requested by user {current_user.id}: {len(request.post_urls)} posts")
+
+        # Credit gate: charge 10 credits per post
+        from app.middleware.credit_gate import check_credits_only, CreditGateException
+        from uuid import UUID as UUIDType
+        batch_credits = 10 * len(request.post_urls)
+        user_uuid = UUIDType(str(current_user.supabase_user_id))
+        permission = await check_credits_only(user_uuid, "posts_analytics", batch_credits)
+        if not permission.can_perform:
+            raise CreditGateException(
+                f"Insufficient credits for batch analysis. Required: {batch_credits}, "
+                f"Available: {permission.wallet_balance}.",
+                status_code=402
+            )
+        # Deduct credits upfront for the batch
+        await credit_wallet_service.spend_credits(
+            user_id=user_uuid,
+            amount=batch_credits,
+            action_type="posts_analytics",
+            description=f"Batch post analysis ({len(request.post_urls)} posts)"
+        )
 
         # Validate batch size
         if len(request.post_urls) > 50:
@@ -125,85 +198,49 @@ async def analyze_posts_batch(
                 detail="At least one post URL is required"
             )
 
-        # URL validation handled by Apify
+        # Deduplicate URLs preserving order
+        seen = set()
+        unique_urls = []
+        for url in request.post_urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
 
-        # Process posts with controlled concurrency
-        import asyncio
-        from typing import List
+        user_tier = getattr(current_user, 'subscription_tier', 'free') or 'free'
 
-        async def analyze_single_post(post_url: str) -> dict:
-            """Analyze a single post and return result - each gets its own DB session"""
-            try:
-                # Each concurrent task gets its own database session
-                from app.database.connection import get_session
-                async with get_session() as post_db:
-                    analysis_result = await standalone_post_analytics_service.analyze_post_by_url(
-                        post_url=post_url,
-                        db=post_db,
-                        user_id=current_user.id
-                    )
-                    return {
-                        "success": True,
-                        "post_url": post_url,
-                        "data": analysis_result
-                    }
-            except Exception as e:
-                logger.error(f"❌ Failed to analyze {post_url}: {e}")
-                return {
-                    "success": False,
-                    "post_url": post_url,
-                    "error": str(e)
-                }
-
-        # Process with semaphore to control concurrency
-        max_concurrent = min(request.max_concurrent or 3, 5)  # Max 5 concurrent
-        semaphore = asyncio.Semaphore(max_concurrent)
-
-        async def analyze_with_semaphore(post_url: str) -> dict:
-            async with semaphore:
-                return await analyze_single_post(post_url)
-
-        # Run all posts concurrently with controlled concurrency
-        logger.info(f"🚀 Processing {len(request.post_urls)} posts with max {max_concurrent} concurrent")
-        tasks = [analyze_with_semaphore(post_url) for post_url in request.post_urls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Handle any exceptions from gather
-        processed_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                processed_results.append({
-                    "success": False,
-                    "post_url": request.post_urls[i],
-                    "error": str(result)
-                })
-            else:
-                processed_results.append(result)
-
-        results = processed_results
-
-        # Calculate summary statistics
-        successful_analyses = sum(1 for r in results if r["success"])
-        failed_analyses = len(results) - successful_analyses
-
-        return {
-            "success": True,
-            "data": {
-                "results": results,
-                "summary": {
-                    "total_requested": len(request.post_urls),
-                    "successful": successful_analyses,
-                    "failed": failed_analyses,
-                    "success_rate": round((successful_analyses / len(request.post_urls)) * 100, 1)
-                }
+        enqueue_result = await job_queue.enqueue_job(
+            user_id=str(current_user.id),
+            job_type='batch_post_analysis',
+            params={
+                'post_urls': unique_urls,
+                'total_posts': len(unique_urls),
             },
-            "message": f"Batch analysis completed: {successful_analyses}/{len(request.post_urls)} successful"
-        }
+            priority=JobPriority.NORMAL,
+            queue_type=QueueType.BULK_QUEUE,
+            estimated_duration=len(unique_urls) * 30,  # ~30s per post
+            user_tier=user_tier
+        )
+
+        if not enqueue_result.get('success'):
+            raise HTTPException(
+                status_code=429 if enqueue_result.get('error') == 'quota_exceeded' else 503,
+                detail=enqueue_result.get('message', 'Failed to enqueue batch post analysis job')
+            )
+
+        return JSONResponse(
+            status_code=202,
+            content=FastHandoffResponse.success(
+                job_id=enqueue_result['job_id'],
+                estimated_completion_seconds=enqueue_result.get('estimated_completion_seconds', len(unique_urls) * 30),
+                queue_position=enqueue_result.get('queue_position', 0),
+                message=f"Batch post analysis started for {len(unique_urls)} posts"
+            )
+        )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error in batch analysis: {e}")
+        logger.error(f"Error in batch analysis: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process batch analysis"

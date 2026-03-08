@@ -146,17 +146,17 @@ class IndustryStandardJobQueue:
             'free': {
                 'concurrent_jobs': 2,
                 'daily_limit': 50,
-                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.POST_ANALYTICS_QUEUE]  # Added POST_ANALYTICS_QUEUE for ALL users
+                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.POST_ANALYTICS_QUEUE, QueueType.BULK_QUEUE]  # Added POST_ANALYTICS_QUEUE for ALL users, BULK_QUEUE for discovery bulk unlock
             },
             'standard': {
                 'concurrent_jobs': 5,
                 'daily_limit': 500,
-                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE, QueueType.POST_ANALYTICS_QUEUE]
+                'allowed_queues': [QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE, QueueType.POST_ANALYTICS_QUEUE, QueueType.DISCOVERY_QUEUE, QueueType.BULK_QUEUE]
             },
             'premium': {
                 'concurrent_jobs': 10,
                 'daily_limit': 2000,
-                'allowed_queues': [QueueType.CRITICAL_QUEUE, QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE, QueueType.POST_ANALYTICS_QUEUE]
+                'allowed_queues': [QueueType.CRITICAL_QUEUE, QueueType.API_QUEUE, QueueType.CDN_QUEUE, QueueType.AI_QUEUE, QueueType.POST_ANALYTICS_QUEUE, QueueType.DISCOVERY_QUEUE, QueueType.BULK_QUEUE]
             },
             'enterprise': {
                 'concurrent_jobs': 20,
@@ -235,6 +235,7 @@ class IndustryStandardJobQueue:
             user_tier VARCHAR(20),
             progress_percent INTEGER DEFAULT 0,
             progress_message TEXT,
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
 
             -- Constraints
             CONSTRAINT valid_status CHECK (status IN ('queued', 'processing', 'completed', 'failed', 'retrying', 'cancelled')),
@@ -481,38 +482,15 @@ class IndustryStandardJobQueue:
         await self._trigger_celery_worker(job)
 
     async def _trigger_celery_worker(self, job: JobDefinition) -> None:
-        """Trigger the appropriate Celery worker task for the job"""
-        try:
-            # Import Celery app from unified worker
-            from app.workers.unified_worker import celery_app
-
-            # Map job types to Celery tasks
-            task_mapping = {
-                'profile_analysis': 'app.workers.unified_worker.process_profile_analysis',
-                'profile_analysis_background': 'app.workers.unified_worker.process_profile_analysis_background',
-                'post_analysis': 'app.workers.unified_worker.process_post_analysis',
-                'post_analytics_campaign': 'app.workers.unified_worker.process_post_analytics_campaign',  # Added for campaign post analytics
-                'bulk_analysis': 'app.workers.unified_worker.process_bulk_analysis'
-            }
-
-            # Get the appropriate Celery task name
-            task_name = task_mapping.get(job.job_type)
-            if not task_name:
-                logger.warning(f"No Celery task mapped for job type: {job.job_type}")
-                return
-
-            # Send task to Celery asynchronously
-            celery_app.send_task(
-                task_name,
-                args=[job.id],  # Pass job ID to worker
-                queue=self._get_celery_queue_name(job.queue_name),
-                priority=job.priority.value
-            )
-
-            logger.info(f"✅ Triggered Celery task {task_name} for job {job.id}")
-
-        except Exception as e:
-            logger.error(f"❌ Failed to trigger Celery worker for job {job.id}: {e}")
+        """
+        No-op: The in-process UnifiedAsyncWorker polls the job_queue table
+        directly every 2 seconds and will pick up this job automatically.
+        No Celery/Redis trigger needed.
+        """
+        logger.info(
+            f"Job {job.id} ({job.job_type}) enqueued - "
+            f"will be picked up by UnifiedAsyncWorker via DB poll"
+        )
 
     def _get_celery_queue_name(self, queue_type: QueueType) -> str:
         """Map our queue types to Celery queue names"""
@@ -576,12 +554,33 @@ class IndustryStandardJobQueue:
             return status_info
 
     async def _get_job_by_idempotency_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
-        """Get job by idempotency key"""
+        """Get job by idempotency key.
+        Only returns in-flight jobs (queued/processing) or recently completed ones (< 10 min).
+        Stale completed/failed jobs have their key cleared so new jobs can be created.
+        """
         async with optimized_pools.get_user_session() as session:
+            # First, clear idempotency keys on stale completed/failed jobs
+            # so the UNIQUE constraint doesn't block new inserts
+            await session.execute(text("""
+                UPDATE job_queue
+                SET idempotency_key = NULL
+                WHERE idempotency_key = :key
+                AND status IN ('completed', 'failed', 'cancelled')
+                AND (completed_at IS NULL OR completed_at < NOW() - INTERVAL '10 minutes')
+            """).execution_options(prepare=False), {'key': idempotency_key})
+            await session.commit()
+
+            # Now check for active/recent jobs
             result = await session.execute(text("""
                 SELECT id, status, created_at
                 FROM job_queue
                 WHERE idempotency_key = :key
+                AND (
+                    status IN ('queued', 'processing')
+                    OR (status = 'completed' AND completed_at > NOW() - INTERVAL '10 minutes')
+                )
+                ORDER BY created_at DESC
+                LIMIT 1
             """).execution_options(prepare=False), {'key': idempotency_key})
 
             job = result.fetchone()

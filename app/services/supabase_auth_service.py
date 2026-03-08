@@ -864,7 +864,7 @@ class ProductionSupabaseAuthService:
             user_status_enum = UserStatus.ACTIVE
 
         user_in_db = UserInDB(
-            id=user.id,
+            id=str(database_user_data['id']) if database_user_data else user.id,
             supabase_user_id=user.id,
             email=user.email,
             full_name=full_name,

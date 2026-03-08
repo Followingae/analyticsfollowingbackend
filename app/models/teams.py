@@ -280,35 +280,35 @@ SUBSCRIPTION_TIER_LIMITS = {
     },
     SubscriptionTier.STANDARD: {
         "max_team_members": 2,
-        "monthly_profile_limit": 500,
-        "monthly_email_limit": 250,
-        "monthly_posts_limit": 125,
-        "monthly_credits": 13375,  # 500×25 + 250×1 + 125×5 = 12500 + 250 + 625
+        "monthly_profile_limit": 350,
+        "monthly_email_limit": 200,
+        "monthly_posts_limit": 100,
+        "monthly_credits": 8750,  # $199 / $0.0227 per credit
         "price_per_month": 199,
         "topup_discount": 0.0,
         "features": ["full_analytics", "campaigns", "lists", "export", "priority_support"],
-        "description": "2 team members, 500 profile unlocks, 250 email unlocks, 125 post analytics",
+        "description": "2 team members, 350 profile unlocks, 200 email unlocks, 100 post analytics",
         "currency": "USD"
     },
     SubscriptionTier.PREMIUM: {
         "max_team_members": 5,
-        "monthly_profile_limit": 2000,
-        "monthly_email_limit": 800,
-        "monthly_posts_limit": 300,
-        "monthly_credits": 52300,  # 2000×25 + 800×1 + 300×5 = 50000 + 800 + 1500
+        "monthly_profile_limit": 1000,
+        "monthly_email_limit": 500,
+        "monthly_posts_limit": 250,
+        "monthly_credits": 25000,  # $499 / $0.0200 per credit (12% better value)
         "price_per_month": 499,
         "topup_discount": 0.2,  # 20% discount on credit topups
         "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"],
-        "description": "5 team members, 2000 profile unlocks, 800 email unlocks, 300 post analytics, 20% topup discount",
+        "description": "5 team members, 1000 profile unlocks, 500 email unlocks, 250 post analytics, 20% topup discount",
         "currency": "USD"
     },
     # Legacy support for existing users
     "professional": {
         "max_team_members": 5,
-        "monthly_profile_limit": 2000,
-        "monthly_email_limit": 800,
-        "monthly_posts_limit": 300,
-        "monthly_credits": 52300,  # 2000×25 + 800×1 + 300×5 = 50000 + 800 + 1500
+        "monthly_profile_limit": 1000,
+        "monthly_email_limit": 500,
+        "monthly_posts_limit": 250,
+        "monthly_credits": 25000,  # Same as Premium
         "price_per_month": 499,
         "topup_discount": 0.2,  # 20% discount on credit topups
         "features": ["full_analytics", "campaigns", "lists", "export", "priority_support", "topup_discount"],
@@ -348,7 +348,7 @@ CREDIT_TOPUP_PACKAGES = {
 # Action credit costs (what each action costs in credits)
 ACTION_CREDIT_COSTS = {
     "profile_analysis": 25,
-    "post_analytics": 5,
+    "posts_analytics": 10,
     "discovery": 1,
     "email_unlock": 1,
     "campaign_analysis": 10,

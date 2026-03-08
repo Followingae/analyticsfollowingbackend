@@ -5,7 +5,7 @@ import psutil
 import time
 from typing import Dict, Any
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.redis_cache_service import redis_cache as cache_manager
 from app.monitoring.network_health_monitor import network_health_monitor
 from app.resilience.database_resilience import database_resilience

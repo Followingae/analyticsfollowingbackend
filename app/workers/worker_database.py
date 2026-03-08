@@ -37,11 +37,11 @@ class WorkerDatabase:
             self.pool = await asyncpg.create_pool(
                 self.database_url,
                 min_size=1,
-                max_size=2,
+                max_size=5,  # Serves both PostAnalyticsWorker + UnifiedAsyncWorker (3 concurrent)
                 statement_cache_size=0,  # CRITICAL: No prepared statements for pgbouncer
                 command_timeout=60,
                 server_settings={
-                    'application_name': 'post_analytics_worker'
+                    'application_name': 'background_workers'
                 }
             )
             logger.info("[SUCCESS] Worker database connection pool initialized (no prepared statements)")
@@ -81,7 +81,7 @@ class WorkerDatabase:
                         SELECT id, user_id, job_type, params::text as params, status, priority
                         FROM job_queue
                         WHERE job_type = 'post_analytics_campaign'
-                        AND status = 'pending'
+                        AND status = 'queued'
                         ORDER BY priority DESC, created_at ASC
                         LIMIT 1
                         FOR UPDATE SKIP LOCKED
@@ -175,6 +175,64 @@ class WorkerDatabase:
 
         except Exception as e:
             logger.error(f"Failed to update job {job_id} progress: {e}")
+
+    async def get_next_unified_job(self, exclude_types: list = None) -> Optional[Dict[str, Any]]:
+        """
+        Get the next queued job of ANY type (except excluded ones).
+        Atomically claims it by setting status='processing' + started_at.
+        Uses FOR UPDATE SKIP LOCKED for safe concurrent access.
+        """
+        if not self.pool:
+            await self.initialize()
+
+        exclude_types = exclude_types or []
+
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    # Build exclusion clause
+                    if exclude_types:
+                        placeholders = ', '.join(f'${i+1}' for i in range(len(exclude_types)))
+                        exclude_clause = f"AND job_type NOT IN ({placeholders})"
+                        args = exclude_types
+                    else:
+                        exclude_clause = ""
+                        args = []
+
+                    row = await conn.fetchrow(f"""
+                        SELECT id, user_id, job_type, params::text as params,
+                               status, priority, retry_count
+                        FROM job_queue
+                        WHERE status = 'queued'
+                        {exclude_clause}
+                        ORDER BY priority DESC, created_at ASC
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    """, *args)
+
+                    if not row:
+                        return None
+
+                    # Atomically mark as processing
+                    await conn.execute("""
+                        UPDATE job_queue
+                        SET status = 'processing',
+                            started_at = $1
+                        WHERE id = $2
+                    """, datetime.now(timezone.utc), row['id'])
+
+                    return {
+                        "id": str(row['id']),
+                        "user_id": str(row['user_id']),
+                        "job_type": row['job_type'],
+                        "params": json.loads(row['params']) if row['params'] else {},
+                        "priority": row['priority'],
+                        "retry_count": row['retry_count'] or 0,
+                    }
+        except Exception as e:
+            logger.error(f"Failed to get next unified job: {e}")
+            return None
+
 
 # Global instance
 worker_db = WorkerDatabase()

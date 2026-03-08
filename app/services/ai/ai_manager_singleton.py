@@ -4,6 +4,8 @@ Ensures models are loaded once and cached throughout application lifecycle
 """
 import logging
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import functools
 import os
 import threading
 import time
@@ -57,7 +59,8 @@ class AIManagerSingleton:
         self.model_load_times: Dict[str, datetime] = {}
         self.model_usage_count: Dict[str, int] = {}
         self.initialization_lock = asyncio.Lock()
-        
+        self._ai_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai_inference")
+
         # Model configurations
         self.MODEL_CONFIGS = {
             'sentiment': {
@@ -219,7 +222,19 @@ class AIManagerSingleton:
     def get_category_pipeline(self) -> Pipeline:
         """Get category classification pipeline - MANDATORY"""
         return self.get_model_pipeline('category')
-    
+
+    async def run_inference(self, model_type: str, text_input, **kwargs):
+        """Run model inference off the event loop in a thread executor"""
+        pipeline_obj = self.get_model_pipeline(model_type)
+        if pipeline_obj is None:
+            return None
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            self._ai_executor,
+            functools.partial(pipeline_obj, text_input, **kwargs)
+        )
+        return result
+
     def preprocess_text_for_model(self, text: str, model_type: str) -> str:
         """
         Preprocess text for specific model with proper tokenization limits

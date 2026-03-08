@@ -9,7 +9,7 @@ from typing import Dict, Any
 from datetime import datetime, date
 import logging
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.middleware.auth_middleware import get_current_active_user
 from app.database.unified_models import User, Team, TeamMember, MonthlyUsageTracking
 from app.models.auth import UserInDB

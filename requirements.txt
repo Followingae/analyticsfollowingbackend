@@ -32,6 +32,9 @@ python-multipart>=0.0.6
 # Image Processing
 Pillow>=10.0.0
 
+# Excel Processing
+openpyxl>=3.1.0
+
 # Background Processing & Caching
 celery>=5.3.0
 redis>=5.0.0

@@ -146,8 +146,9 @@ class UnifiedBackgroundProcessor:
             pipeline_results['stages']['cdn_processing']['started_at'] = datetime.now(timezone.utc)
             pipeline_results['stages']['cdn_processing']['status'] = ProcessingStatus.PROCESSING.value
 
-            # Use the same CDN approach as regular creator analytics with fresh DB session
-            async with get_session() as db:
+            # Use optimized_pools (has statement_cache_size=0 for pgbouncer compatibility)
+            from app.database.optimized_pools import optimized_pools
+            async with optimized_pools.get_background_session() as db:
                 try:
                     # Get the COMPLETE profile data needed for CDN processing
                     profile_query = await db.execute(
@@ -191,10 +192,11 @@ class UnifiedBackgroundProcessor:
                             'category': profile_row[12]
                         }
 
-                        # Use fresh DB session for CDN service to avoid transaction errors
-                        async with get_session() as cdn_db:
+                        # Use optimized_pools (has statement_cache_size=0 for pgbouncer)
+                        from app.database.optimized_pools import optimized_pools
+                        async with optimized_pools.get_background_session() as cdn_db:
                             try:
-                                self.cdn_service.set_db_session(cdn_db)
+                                # Pass session directly — do NOT use set_db_session() (race condition)
                                 result = await self.cdn_service.enqueue_profile_assets(
                                     UUID(profile_id), profile_data, cdn_db
                                 )
@@ -204,15 +206,31 @@ class UnifiedBackgroundProcessor:
                                 logger.error(f"[UNIFIED-PROCESSOR] CDN transaction error: {cdn_error}")
                                 raise cdn_error
 
+                        # CDN images are processed INLINE by _process_cdn_job_immediately()
+                        # Query actual completion status using the outer db session
+                        cdn_check_query = await db.execute(
+                            text("""
+                                SELECT
+                                    COUNT(*) FILTER (WHERE processing_status = 'completed') as completed,
+                                    COUNT(*) as total
+                                FROM cdn_image_assets
+                                WHERE source_id = :profile_id
+                            """),
+                            {"profile_id": profile_id}
+                        )
+                        cdn_check_row = cdn_check_query.fetchone()
+                        actual_processed = cdn_check_row[0] if cdn_check_row else 0
+                        actual_total = cdn_check_row[1] if cdn_check_row else 0
+
                         cdn_results = {
                             'success': True,
                             'jobs_created': result.jobs_created,
-                            'processed_images': 0,  # Will be processed by background workers
-                            'total_images': result.jobs_created,
-                            'message': f"CDN processing queued: {result.jobs_created} jobs created"
+                            'processed_images': actual_processed,
+                            'total_images': actual_total,
+                            'message': f"CDN complete: {actual_processed}/{actual_total} images processed inline"
                         }
 
-                        logger.info(f"[UNIFIED-PROCESSOR] CDN processing queued: {result.jobs_created} jobs created")
+                        logger.info(f"[UNIFIED-PROCESSOR] CDN processed inline: {actual_processed}/{actual_total} images")
 
                     else:
                         cdn_results = {
@@ -234,14 +252,13 @@ class UnifiedBackgroundProcessor:
             pipeline_results['results']['cdn_results'] = cdn_results
 
             if not cdn_results['success']:
-                logger.warning(f"[UNIFIED-PROCESSOR] CDN processing had issues for {username}, but continuing to AI")
+                logger.warning(f"[UNIFIED-PROCESSOR] CDN processing failed for {username}, proceeding to AI with available data")
 
             pipeline_results['stages']['cdn_processing']['status'] = ProcessingStatus.COMPLETED.value
             pipeline_results['stages']['cdn_processing']['completed_at'] = datetime.now(timezone.utc)
             pipeline_results['current_stage'] = ProcessingStage.AI_PROCESSING.value
 
-            logger.info(f"[UNIFIED-PROCESSOR] Stage 2 complete: CDN processing for {username}")
-            logger.info(f"[CDN-SUMMARY] Queued {cdn_results.get('jobs_created', 0)} CDN jobs for background processing")
+            logger.info(f"[UNIFIED-PROCESSOR] Stage 2 complete: CDN {cdn_results.get('processed_images', 0)}/{cdn_results.get('total_images', 0)} images for {username}")
 
             # STAGE 3: Execute AI analysis (all 10 models)
             logger.info(f"[UNIFIED-PROCESSOR] Stage 3: Executing AI analysis for {username}")
@@ -267,7 +284,7 @@ class UnifiedBackgroundProcessor:
             processing_duration = (pipeline_results['completed_at'] - pipeline_results['started_at']).total_seconds()
 
             logger.info(f"[UNIFIED-PROCESSOR] Pipeline complete for {username} in {processing_duration:.1f}s")
-            logger.info(f"[PIPELINE-SUMMARY] CDN: {cdn_results['processed_images']} images, AI: {ai_results['completed_models']}/10 models")
+            logger.info(f"[PIPELINE-SUMMARY] CDN: {cdn_results.get('processed_images', 0)}/{cdn_results.get('total_images', 0)} images, AI: {ai_results.get('completed_models', 0)}/10 models")
 
             # Store pipeline completion record
             await self._store_pipeline_completion(pipeline_results)

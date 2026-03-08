@@ -248,8 +248,7 @@ class BulletproofCreatorSearch:
                 # Get CDN URLs (non-blocking)
                 cdn_media = None
                 try:
-                    cdn_image_service.set_db_session(db)
-                    cdn_media = await cdn_image_service.get_profile_media_urls(profile.id)
+                    cdn_media = await cdn_image_service.get_profile_media_urls_with_session(profile.id, db)
                 except Exception as e:
                     logger.warning(f"CDN fallback failed for {username}: {e}")
                 
@@ -325,8 +324,7 @@ class BulletproofCreatorSearch:
                 
             # Check CDN status
             async with get_session() as db:
-                cdn_image_service.set_db_session(db)
-                media_status = await cdn_image_service.get_profile_media_urls(UUID(profile_id))
+                media_status = await cdn_image_service.get_profile_media_urls_with_session(UUID(profile_id), db)
                 
                 # If CDN processing incomplete, trigger it
                 if media_status.has_pending_jobs or media_status.completed_assets < media_status.total_assets:
@@ -341,7 +339,6 @@ class BulletproofCreatorSearch:
         """Background CDN processing with error handling"""
         try:
             async with get_session() as db:
-                cdn_image_service.set_db_session(db)
                 result = await cdn_image_service.enqueue_profile_assets(
                     UUID(profile_id), profile_data, db
                 )

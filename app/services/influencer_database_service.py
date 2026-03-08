@@ -2,14 +2,14 @@
 Influencer Master Database (IMD) - Service Layer
 All business logic for superadmin influencer CRM management.
 
-This is an internal CRM — NO external API calls (no Apify, no Creator Analytics pipeline).
 If the username already has analytics in our profiles table, we reuse that data.
-If not, we just store the username with whatever CRM metadata was provided.
+If not, we auto-queue background analytics via the job queue.
 """
 import csv
 import io
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
@@ -61,9 +61,12 @@ class InfluencerDatabaseService:
         # 2. Try to get data from existing profiles table (our analytics DB)
         profile_data = await InfluencerDatabaseService._get_from_profiles_table(db, username)
 
+        # Determine if existing analytics are complete (has AI analysis)
+        has_complete_analytics = False
         if profile_data:
             logger.info(f"IMD: Found @{username} in profiles table — using existing analytics")
             ig_data = profile_data
+            has_complete_analytics = bool(profile_data.get("ai_profile_analyzed_at"))
         else:
             logger.info(f"IMD: @{username} not in profiles — storing as CRM-only entry")
             ig_data = {}
@@ -89,6 +92,7 @@ class InfluencerDatabaseService:
 
         # 4. Insert into influencer_database
         now = datetime.now(timezone.utc)
+        analytics_status = 'skipped' if has_complete_analytics else 'pending'
         params: Dict[str, Any] = {
             "username": username,
             "full_name": ig_data.get("full_name"),
@@ -114,6 +118,7 @@ class InfluencerDatabaseService:
             "ai_audience_quality_score": ig_data.get("ai_audience_quality_score"),
             "language_distribution": json.dumps(ig_data["language_distribution"]) if ig_data.get("language_distribution") else None,
             "last_analytics_refresh": now if profile_data else None,
+            "analytics_status": analytics_status,
             "created_at": now,
             "updated_at": now,
             **pricing_params,
@@ -132,7 +137,8 @@ class InfluencerDatabaseService:
                     added_by,
                     ai_content_categories, ai_sentiment_score, ai_audience_quality_score,
                     language_distribution,
-                    last_analytics_refresh, created_at, updated_at{extra_cols}
+                    last_analytics_refresh, analytics_status,
+                    created_at, updated_at{extra_cols}
                 ) VALUES (
                     :username, :full_name, :biography, :profile_image_url,
                     :is_verified, :is_private, :followers_count, :following_count,
@@ -141,15 +147,99 @@ class InfluencerDatabaseService:
                     CAST(:added_by AS uuid),
                     CAST(:ai_content_categories AS text[]), :ai_sentiment_score, :ai_audience_quality_score,
                     CAST(:language_distribution AS jsonb),
-                    :last_analytics_refresh, :created_at, :updated_at{extra_vals}
+                    :last_analytics_refresh, :analytics_status,
+                    :created_at, :updated_at{extra_vals}
                 )
-                RETURNING *
+                RETURNING id
             """),
             params,
         )
-        await db.commit()
+        # Fetch the generated ID BEFORE commit (cursor is invalidated after commit with PGBouncer)
         row = result.mappings().fetchone()
-        return dict(row) if row else params
+        new_id = str(row["id"]) if row else None
+        await db.commit()
+
+        if not new_id:
+            # Fallback: query the ID after commit
+            id_result = await db.execute(
+                text("SELECT id FROM influencer_database WHERE username = :u"),
+                {"u": username},
+            )
+            id_row = id_result.fetchone()
+            new_id = str(id_row[0]) if id_row else None
+
+        logger.info(f"IMD: Inserted @{username} with id={new_id}, analytics_status={analytics_status}")
+
+        # 5. Auto-queue analytics if no existing complete analytics
+        if not has_complete_analytics and new_id:
+            try:
+                logger.info(f"IMD: Queueing analytics for @{username} (id={new_id})")
+                record = await InfluencerDatabaseService.queue_analytics_for_influencer(
+                    db, new_id, username, str(added_by)
+                )
+                return record
+            except Exception as e:
+                logger.error(f"IMD: Failed to queue analytics for @{username} (id={new_id}): {e}", exc_info=True)
+                # Record was still created, analytics just wasn't queued
+        elif not new_id:
+            logger.error(f"IMD: Could not determine ID for @{username} — analytics not queued")
+
+        # Return the record
+        select_result = await db.execute(
+            text("SELECT * FROM influencer_database WHERE username = :u"),
+            {"u": username},
+        )
+        final_row = select_result.mappings().fetchone()
+        return dict(final_row) if final_row else params
+
+    @staticmethod
+    async def queue_analytics_for_influencer(
+        db: AsyncSession,
+        influencer_db_id: str,
+        username: str,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Queue a background analytics job for an IMD influencer."""
+        from app.core.job_queue import job_queue, QueueType
+
+        job = await job_queue.enqueue_job(
+            user_id=user_id,
+            job_type='imd_creator_analytics',
+            params={'username': username, 'influencer_db_id': influencer_db_id},
+            queue_type=QueueType.API_QUEUE,
+            user_tier='enterprise',  # Admin operation — bypass tier quota restrictions
+            idempotency_key=f"imd_analytics_{username}",
+        )
+
+        if not job.get('success', True):
+            raise Exception(f"Job queue rejected: {job.get('message', job.get('error', 'unknown'))}")
+
+        now = datetime.now(timezone.utc)
+        job_id = job.get('job_id') or job.get('id')
+        await db.execute(
+            text("""
+                UPDATE influencer_database
+                SET analytics_status = 'queued',
+                    analytics_job_id = CAST(:job_id AS uuid),
+                    analytics_queued_at = :queued_at,
+                    analytics_error = NULL,
+                    updated_at = :queued_at
+                WHERE id = CAST(:id AS uuid)
+                RETURNING *
+            """),
+            {"id": influencer_db_id, "job_id": job_id, "queued_at": now}
+        )
+        await db.commit()
+
+        logger.info(f"IMD: Queued analytics job {job_id} for @{username}")
+
+        # Return updated record
+        result = await db.execute(
+            text("SELECT * FROM influencer_database WHERE id = CAST(:id AS uuid)"),
+            {"id": influencer_db_id}
+        )
+        row = result.mappings().fetchone()
+        return dict(row) if row else {"id": influencer_db_id, "analytics_status": "queued"}
 
     @staticmethod
     async def bulk_import(
@@ -943,6 +1033,35 @@ class InfluencerDatabaseService:
             )
             influencers = [dict(r) for r in inf_result.mappings().fetchall()]
 
+            # Enrich from profiles table when influencer_database fields are empty
+            usernames_to_enrich = [
+                inf["username"] for inf in influencers
+                if inf.get("username") and (
+                    not inf.get("full_name") or
+                    not inf.get("profile_image_url") or
+                    not inf.get("followers_count")
+                )
+            ]
+            profile_lookup = {}
+            if usernames_to_enrich:
+                try:
+                    profile_result = await db.execute(
+                        text("""
+                            SELECT username, full_name, biography,
+                                   COALESCE(profile_pic_url_hd, profile_pic_url) AS profile_image_url,
+                                   is_verified, followers_count, following_count,
+                                   posts_count, engagement_rate, avg_likes, avg_comments,
+                                   cdn_avatar_url
+                            FROM profiles
+                            WHERE username = ANY(:unames)
+                        """),
+                        {"unames": usernames_to_enrich},
+                    )
+                    for row in profile_result.mappings().fetchall():
+                        profile_lookup[row["username"]] = dict(row)
+                except Exception as e:
+                    logger.warning(f"Profile enrichment failed: {e}")
+
             visible = share["visible_fields"] or {}
 
             for inf in influencers:
@@ -950,18 +1069,21 @@ class InfluencerDatabaseService:
                     continue
                 seen_ids.add(inf["id"])
 
+                # Merge profile data as fallback for empty fields
+                profile = profile_lookup.get(inf.get("username", ""), {})
+
                 # ALWAYS strip cost pricing and internal notes
                 filtered = {
                     "id": inf["id"],
                     "username": inf["username"],
-                    "full_name": inf.get("full_name"),
-                    "biography": inf.get("biography"),
-                    "profile_image_url": inf.get("profile_image_url"),
-                    "is_verified": inf.get("is_verified", False),
+                    "full_name": inf.get("full_name") or profile.get("full_name"),
+                    "biography": inf.get("biography") or profile.get("biography"),
+                    "profile_image_url": inf.get("profile_image_url") or profile.get("cdn_avatar_url") or profile.get("profile_image_url"),
+                    "is_verified": inf.get("is_verified") or profile.get("is_verified", False),
                     "is_private": inf.get("is_private", False),
-                    "followers_count": inf.get("followers_count", 0),
-                    "following_count": inf.get("following_count", 0),
-                    "posts_count": inf.get("posts_count", 0),
+                    "followers_count": inf.get("followers_count") or profile.get("followers_count", 0),
+                    "following_count": inf.get("following_count") or profile.get("following_count", 0),
+                    "posts_count": inf.get("posts_count") or profile.get("posts_count", 0),
                     "status": inf.get("status"),
                     "tier": inf.get("tier"),
                     "categories": inf.get("categories", []),
@@ -1270,10 +1392,11 @@ class InfluencerDatabaseService:
             data["avg_views"] = stats["avg_views"] or 0
 
         # Map AI fields to influencer_database format
-        top3 = data.get("ai_top_3_categories")
-        if top3 and isinstance(top3, list):
-            data["ai_content_categories"] = [c.get("category", "") for c in top3 if isinstance(c, dict)]
-            # Also use as default categories
+        # Derive categories from ai_content_distribution (always populated by production orchestrator)
+        content_dist = data.get("ai_content_distribution")
+        if content_dist and isinstance(content_dist, dict):
+            sorted_cats = sorted(content_dist.items(), key=lambda x: x[1], reverse=True)
+            data["ai_content_categories"] = [cat for cat, _ in sorted_cats if cat != "general"]
             data["categories"] = data["ai_content_categories"][:3]
         else:
             data["ai_content_categories"] = []

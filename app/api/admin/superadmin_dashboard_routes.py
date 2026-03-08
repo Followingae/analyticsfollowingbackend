@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 from app.middleware.auth_middleware import get_current_active_user
 from app.models.auth import UserInDB, UserRole, UserStatus
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import (
     User, Team, TeamMember, CreditWallet, CreditTransaction,
     UserProfileAccess, Profile, Post, MonthlyUsageTracking,

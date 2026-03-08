@@ -191,10 +191,19 @@ async def unlock_profile_for_access(
                 logger.info(f"✅ Profile already unlocked: {result['profile']['username']}")
             else:
                 logger.info(f"✅ Profile unlocked successfully: {result['profile']['username']}")
+            return result
         else:
-            logger.warning(f"❌ Profile unlock failed: {result.get('error', 'Unknown error')}")
+            error_type = result.get("error", "unknown")
+            logger.warning(f"❌ Profile unlock failed: {error_type}")
 
-        return result
+            if error_type == "insufficient_credits":
+                raise HTTPException(status_code=402, detail=result.get("message", "Insufficient credits"))
+            elif error_type == "user_not_found":
+                raise HTTPException(status_code=404, detail=result.get("message", "User not found"))
+            elif error_type == "profile_not_found":
+                raise HTTPException(status_code=404, detail=result.get("message", "Profile not found"))
+            else:
+                raise HTTPException(status_code=400, detail=result.get("message", "Unlock failed"))
 
     except Exception as e:
         logger.error(f"Profile unlock failed: {e}")

@@ -5,7 +5,7 @@ Enterprise-grade transaction monitoring and audit endpoints
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
 from app.services.transaction_audit_service import transaction_audit_service

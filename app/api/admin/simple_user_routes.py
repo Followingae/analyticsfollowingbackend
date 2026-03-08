@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.middleware.auth_middleware import require_admin, get_current_active_user
 
 logger = logging.getLogger(__name__)

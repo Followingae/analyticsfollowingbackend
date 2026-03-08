@@ -15,11 +15,12 @@ from datetime import datetime, timezone
 
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.campaign_service import campaign_service
 from app.services.standalone_post_analytics_service import standalone_post_analytics_service
 from app.services.brand_logo_service import brand_logo_service
 from app.services.campaign_export_service import campaign_export_service
+from app.middleware.credit_gate import requires_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/campaigns", tags=["Campaigns"])
@@ -1138,6 +1139,7 @@ async def delete_brand_logo(
 # =============================================================================
 
 @router.get("/{campaign_id}/export")
+@requires_credits("bulk_export", credits_required=50)
 async def export_campaign(
     campaign_id: UUID,
     format: str = Query("csv", regex="^(csv|json)$"),
@@ -1220,6 +1222,54 @@ async def export_campaign(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to export campaign"
         )
+
+@router.post("/{campaign_id}/export/async")
+@requires_credits("bulk_export", credits_required=50)
+async def export_campaign_async(
+    campaign_id: UUID,
+    format: str = Query("csv", regex="^(csv|json)$"),
+    current_user: UserInDB = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Async campaign export — returns 202 + job_id, polls for result with download URL.
+    Use this for large campaigns; the sync GET /{campaign_id}/export still works for small ones.
+    """
+    from app.core.job_queue import job_queue, JobPriority, QueueType
+    from app.api.fast_handoff_api import FastHandoffResponse
+    from fastapi.responses import JSONResponse
+
+    campaign = await campaign_service.get_campaign(db=db, campaign_id=campaign_id, user_id=current_user.id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
+
+    enqueue_result = await job_queue.enqueue_job(
+        user_id=str(current_user.id),
+        job_type='campaign_export',
+        params={
+            'campaign_id': str(campaign_id),
+            'format': format,
+            'campaign_name': campaign.name,
+        },
+        priority=JobPriority.LOW,
+        queue_type=QueueType.BULK_QUEUE,
+        estimated_duration=15,
+        user_tier='free'
+    )
+
+    if not enqueue_result.get('success'):
+        raise HTTPException(status_code=503, detail=enqueue_result.get('message', 'Failed to enqueue'))
+
+    return JSONResponse(
+        status_code=202,
+        content=FastHandoffResponse.success(
+            job_id=enqueue_result['job_id'],
+            estimated_completion_seconds=enqueue_result.get('estimated_completion_seconds', 15),
+            queue_position=enqueue_result.get('queue_position', 0),
+            message=f"Export started for campaign '{campaign.name}'"
+        )
+    )
+
 
 @router.get("/export/all")
 async def export_all_campaigns(

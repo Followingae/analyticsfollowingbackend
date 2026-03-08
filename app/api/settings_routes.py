@@ -22,7 +22,8 @@ from app.models.settings import (
 )
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import async_engine, get_db
+from app.database.connection import async_engine
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.supabase_auth_service import supabase_auth_service
 
 logger = logging.getLogger(__name__)
@@ -42,10 +43,10 @@ async def get_user_from_db_simple(user_id: str, db_session):
     
     result = await db_session.execute(text("""
         SELECT id, email, full_name, timezone, language, updated_at, avatar_config,
-               "user.first_name" as first_name, "user.last_name" as last_name, 
+               first_name, last_name,
                company, job_title, phone_number, bio, notification_preferences,
-               "user.profile_visibility" as profile_visibility, 
-               "user.data_analytics_enabled" as data_analytics_enabled, preferences
+               profile_visibility,
+               data_analytics_enabled, preferences
         FROM users WHERE supabase_user_id = :user_id
     """), {"user_id": user_id})
     
@@ -110,13 +111,13 @@ async def update_user_in_db(user_id: str, **update_data):
         async with asyncio.timeout(30):
             # Build SET clause dynamically, mapping to correct column names
             column_mapping = {
-                'first_name': '"user.first_name"',
-                'last_name': '"user.last_name"',
-                'two_factor_enabled': '"user.two_factor_enabled"',
-                'email_verified': '"user.email_verified"',
-                'phone_verified': '"user.phone_verified"',
-                'profile_visibility': '"user.profile_visibility"',
-                'data_analytics_enabled': '"user.data_analytics_enabled"'
+                'first_name': 'first_name',
+                'last_name': 'last_name',
+                'two_factor_enabled': 'two_factor_enabled',
+                'email_verified': 'email_verified',
+                'phone_verified': 'phone_verified',
+                'profile_visibility': 'profile_visibility',
+                'data_analytics_enabled': 'data_analytics_enabled'
             }
             
             set_clauses = []
@@ -155,7 +156,7 @@ async def get_user_profile(
     """
     try:
         # Get fresh user data from database using connection pool
-        user_data = await get_user_from_db_simple(current_user.id, db_session)
+        user_data = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         if not user_data:
             raise HTTPException(status_code=404, detail="User not found")
@@ -219,7 +220,7 @@ async def update_user_profile(
         # Auto-generate full_name if first_name or last_name provided
         if 'first_name' in update_data or 'last_name' in update_data:
             # Get current values for fields not being updated
-            current_user_data = await get_user_from_db_simple(current_user.id, db_session)
+            current_user_data = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
             
             first_name = update_data.get('first_name', current_user_data.first_name) or ""
             last_name = update_data.get('last_name', current_user_data.last_name) or ""
@@ -229,10 +230,10 @@ async def update_user_profile(
             raise HTTPException(status_code=400, detail="No fields provided for update")
         
         # Update user in database using connection pool
-        await update_user_in_db(current_user.id, **update_data)
+        await update_user_in_db(current_user.supabase_user_id, **update_data)
         
         # Get updated user data
-        updated_user = await get_user_from_db_simple(current_user.id, db_session)
+        updated_user = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         logger.info(f"Profile updated for user {current_user.id}: {list(update_data.keys())}")
         
@@ -328,7 +329,7 @@ async def toggle_two_factor_auth(
             raise HTTPException(status_code=400, detail="Invalid password")
         
         # Update 2FA status in database using connection pool
-        await update_user_in_db(current_user.id, two_factor_enabled=tfa_data.enable)
+        await update_user_in_db(current_user.supabase_user_id, two_factor_enabled=tfa_data.enable)
         
         response_data = {
             "two_factor_enabled": tfa_data.enable,
@@ -378,10 +379,10 @@ async def update_privacy_settings(
             raise HTTPException(status_code=400, detail="No privacy settings provided")
         
         # Update database using connection pool
-        await update_user_in_db(current_user.id, **update_data)
+        await update_user_in_db(current_user.supabase_user_id, **update_data)
         
         # Get updated values
-        updated_user = await get_user_from_db_simple(current_user.id, db_session)
+        updated_user = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         logger.info(f"Privacy settings updated for user {current_user.id}")
         
@@ -408,7 +409,7 @@ async def get_notification_preferences(
 ):
     """Get current notification preferences"""
     try:
-        user = await get_user_from_db_simple(current_user.id, db_session)
+        user = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -441,7 +442,7 @@ async def update_notification_preferences(
     """
     try:
         # Get current preferences using connection pool
-        user = await get_user_from_db_simple(current_user.id, db_session)
+        user = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         current_prefs = user.notification_preferences or {}
         
@@ -458,7 +459,7 @@ async def update_notification_preferences(
             current_prefs['weekly_reports'] = notification_data.weekly_reports
         
         # Update database using connection pool
-        await update_user_in_db(current_user.id, notification_preferences=current_prefs)
+        await update_user_in_db(current_user.supabase_user_id, notification_preferences=current_prefs)
         
         logger.info(f"Notification preferences updated for user {current_user.id}")
         
@@ -486,7 +487,7 @@ async def get_user_preferences(
 ):
     """Get current user preferences and app settings"""
     try:
-        user = await get_user_from_db_simple(current_user.id, db_session)
+        user = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -515,7 +516,7 @@ async def update_user_preferences(
     """
     try:
         # Get current user data using connection pool
-        user = await get_user_from_db_simple(current_user.id, db_session)
+        user = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         update_data = {}
         current_prefs = user.preferences or {}
@@ -538,10 +539,10 @@ async def update_user_preferences(
             raise HTTPException(status_code=400, detail="No preferences provided for update")
         
         # Update database using connection pool
-        await update_user_in_db(current_user.id, **update_data)
+        await update_user_in_db(current_user.supabase_user_id, **update_data)
         
         # Get updated data
-        updated_user = await get_user_from_db_simple(current_user.id, db_session)
+        updated_user = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         logger.info(f"User preferences updated for user {current_user.id}")
         
@@ -576,7 +577,7 @@ async def get_complete_settings_overview(
         logger.info(f"Getting settings overview for user {current_user.id}")
         
         # Use fast lookup with existing connection pool
-        user_row = await get_user_from_db_simple(current_user.id, db_session)
+        user_row = await get_user_from_db_simple(current_user.supabase_user_id, db_session)
         
         if not user_row:
             logger.warning(f"User not found in database: {current_user.id}")

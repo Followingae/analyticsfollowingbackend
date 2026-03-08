@@ -11,7 +11,7 @@ from uuid import UUID
 import logging
 import json
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.operations_models import (
     Workstream, Concept, Deliverable, ActivityLog,
     ApprovalStatusEnum

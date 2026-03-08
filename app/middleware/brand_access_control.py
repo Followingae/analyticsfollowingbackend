@@ -12,7 +12,7 @@ from uuid import UUID
 from datetime import datetime, date, timedelta
 
 from app.models.auth import UserInDB
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import (
     Users, SubscriptionFeatures, UserLimits, FeatureUsageTracking,
     CreditWallet, CreditTransactions, UnlockedInfluencers, Profiles

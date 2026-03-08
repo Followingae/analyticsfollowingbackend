@@ -13,7 +13,7 @@ import base64
 import json
 
 from app.middleware.auth_middleware import get_current_active_user, require_admin
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 
 router = APIRouter(tags=["User Documents"])
 logger = logging.getLogger(__name__)

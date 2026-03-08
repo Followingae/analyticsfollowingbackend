@@ -4,7 +4,7 @@ Handles wallet creation, balance management, and billing cycles
 """
 import logging
 import asyncio
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -90,7 +90,7 @@ class CreditWalletService:
                     package_id=package_id,
                     current_balance=initial_balance,
                     total_earned_this_cycle=initial_balance if initial_balance > 0 else 0,
-                    billing_cycle_start=date.today(),
+                    current_billing_cycle_start=datetime.now(timezone.utc),
                     next_reset_date=date.today() + timedelta(days=30)
                 )
                 
@@ -711,13 +711,24 @@ class CreditWalletService:
         """Get total credits spent in a specific month"""
         if not month_year:
             month_year = date.today().replace(day=1)
-        
+
         try:
-            # TEMPORARY FIX: Skip usage tracking due to model mismatch
-            # TODO: Fix CreditUsageTracking model schema mismatch
-            logger.warning(f"TEMP FIX: Skipping monthly spending calculation for user {user_id}")
-            return 0
-                
+            async with get_session() as session:
+                # Query credit_usage_tracking using auth UUID (matches credit_wallets.user_id)
+                next_month = (month_year.replace(day=28) + timedelta(days=4)).replace(day=1)
+                result = await session.execute(
+                    select(func.coalesce(func.sum(CreditUsageTracking.credits_consumed), 0))
+                    .where(
+                        and_(
+                            CreditUsageTracking.user_id == user_id,
+                            CreditUsageTracking.used_at >= month_year,
+                            CreditUsageTracking.used_at < next_month,
+                            CreditUsageTracking.action_successful == True
+                        )
+                    )
+                )
+                return result.scalar() or 0
+
         except Exception as e:
             logger.error(f"Error getting monthly spending for user {user_id}: {e}")
             return 0

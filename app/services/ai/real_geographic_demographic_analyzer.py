@@ -42,12 +42,88 @@ class RealGeographicDemographicAnalyzer:
     - Lookalike audience discovery using machine learning clustering
     """
 
+    # Max geocode API calls per analysis run (Nominatim rate limit: 1 req/sec)
+    MAX_GEOCODE_CALLS = 8
+
     def __init__(self):
         self.models = {}
         self.geocoder = None
         self.location_cache = {}
         self.demographic_patterns = {}
+        self._geocode_calls_remaining = self.MAX_GEOCODE_CALLS
         self._initialize_models()
+
+    # Common native/official country names → English
+    _COUNTRY_NAME_OVERRIDES = {
+        'الإمارات العربية المتحدة': 'United Arab Emirates',
+        'المملكة العربية السعودية': 'Saudi Arabia',
+        'مصر': 'Egypt',
+        'العراق': 'Iraq',
+        'الأردن': 'Jordan',
+        'الكويت': 'Kuwait',
+        'لبنان': 'Lebanon',
+        'ليبيا': 'Libya',
+        'المغرب': 'Morocco',
+        'عُمان': 'Oman',
+        'قطر': 'Qatar',
+        'السودان': 'Sudan',
+        'سوريا': 'Syria',
+        'تونس': 'Tunisia',
+        'اليمن': 'Yemen',
+        'البحرين': 'Bahrain',
+        'فلسطين': 'Palestine',
+        'Schweiz/Suisse/Svizzera/Svizra': 'Switzerland',
+        'Éire / Ireland': 'Ireland',
+        'Éire': 'Ireland',
+        'Türkiye': 'Turkey',
+        'Brasil': 'Brazil',
+        'Deutschland': 'Germany',
+        'España': 'Spain',
+        'Italia': 'Italy',
+        'Nederland': 'Netherlands',
+        'Sverige': 'Sweden',
+        'Norge': 'Norway',
+        'Danmark': 'Denmark',
+        'Suomi': 'Finland',
+        'Polska': 'Poland',
+        'Česko': 'Czech Republic',
+        'Slovensko': 'Slovakia',
+        'Slovenija': 'Slovenia',
+        'Hrvatska': 'Croatia',
+        'Srbija': 'Serbia',
+        'Україна': 'Ukraine',
+        'Беларусь': 'Belarus',
+        'Россия': 'Russia',
+        'Ελλάδα': 'Greece',
+        'ישראל': 'Israel',
+        'Österreich': 'Austria',
+        'Belgique/België': 'Belgium',
+        'Magyarország': 'Hungary',
+        'Ísland': 'Iceland',
+        'România': 'Romania',
+        'България': 'Bulgaria',
+        'México': 'Mexico',
+        'Perú': 'Peru',
+        'Việt Nam': 'Vietnam',
+    }
+
+    def _normalize_country_name(self, name: str) -> str:
+        """Normalize a country name to English. Handles native/official pycountry names."""
+        if not name:
+            return name
+        # Check overrides first
+        if name in self._COUNTRY_NAME_OVERRIDES:
+            return self._COUNTRY_NAME_OVERRIDES[name]
+        # Try pycountry fuzzy search for English common_name
+        if GEO_AVAILABLE:
+            try:
+                results = pycountry.countries.search_fuzzy(name)
+                if results:
+                    country = results[0]
+                    return getattr(country, 'common_name', country.name)
+            except LookupError:
+                pass
+        return name
 
     def _initialize_models(self):
         """Initialize geographic and demographic analysis models"""
@@ -115,6 +191,9 @@ class RealGeographicDemographicAnalyzer:
             return self._get_fallback_geo_demo_analysis()
 
         logger.info(f"🌍 Starting geographic and demographic analysis for {len(posts_data)} posts")
+
+        # Reset geocode budget for this analysis run
+        self._geocode_calls_remaining = self.MAX_GEOCODE_CALLS
 
         # Extract geographic and behavioral data
         geo_demo_data = await self._extract_geo_demo_features(profile_data, posts_data)
@@ -279,8 +358,9 @@ class RealGeographicDemographicAnalyzer:
                             context = ' '.join(words[context_start:context_end])
                             potential_locations.add(context.strip())
 
-            # Geocode potential locations (limit to avoid rate limiting)
-            for location_text in list(potential_locations)[:5]:  # Limit to 5 per text
+            # Geocode potential locations (strict limit to avoid 429s)
+            # Nominatim allows max 1 req/sec; cap at 3 per text block
+            for location_text in list(potential_locations)[:3]:
                 try:
                     if len(location_text.strip()) > 2:
                         geo_result = await self._geocode_location(location_text)
@@ -297,15 +377,28 @@ class RealGeographicDemographicAnalyzer:
             return []
 
     async def _geocode_location(self, location_text: str) -> Optional[Dict[str, Any]]:
-        """Geocode a location text to coordinates and details"""
+        """Geocode a location text to coordinates and details (non-blocking, rate-limited)"""
         try:
             # Check cache first
             cache_key = location_text.lower().strip()
             if cache_key in self.location_cache:
                 return self.location_cache[cache_key]
 
-            # Geocode using Nominatim
-            location = self.geocoder.geocode(location_text, timeout=5)
+            # Enforce per-run geocode budget
+            if self._geocode_calls_remaining <= 0:
+                logger.debug("Geocode budget exhausted, skipping")
+                return None
+            self._geocode_calls_remaining -= 1
+
+            # Rate limit: Nominatim requires max 1 request/second
+            await asyncio.sleep(1.1)
+
+            # Run synchronous geocoder in thread pool to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            location = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: self.geocoder.geocode(location_text, timeout=5)),
+                timeout=10
+            )
 
             if location:
                 result = {
@@ -321,7 +414,7 @@ class RealGeographicDemographicAnalyzer:
                 # Extract country and city from address
                 address_parts = location.address.split(', ')
                 if len(address_parts) > 0:
-                    result['country'] = address_parts[-1]
+                    result['country'] = self._normalize_country_name(address_parts[-1])
                 if len(address_parts) > 1:
                     result['city'] = address_parts[0]
 
@@ -329,10 +422,17 @@ class RealGeographicDemographicAnalyzer:
                 self.location_cache[cache_key] = result
                 return result
 
+            # Cache misses too to avoid re-querying
+            self.location_cache[cache_key] = None
             return None
 
+        except asyncio.TimeoutError:
+            logger.debug(f"Geocoding timed out for '{location_text}'")
+            self.location_cache[cache_key] = None
+            return None
         except Exception as e:
             logger.debug(f"Geocoding failed for '{location_text}': {e}")
+            self.location_cache[cache_key] = None
             return None
 
     async def _analyze_geographic_distribution(self, geo_demo_data: Dict) -> Dict[str, Any]:

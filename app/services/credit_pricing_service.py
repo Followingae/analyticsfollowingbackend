@@ -433,25 +433,39 @@ class CreditPricingService:
             return cached_count
         
         try:
-            # TEMPORARY FIX: Skip usage tracking due to model mismatch
-            # TODO: Fix CreditUsageTracking model schema mismatch
-            logger.warning(f"TEMP FIX: Skipping free allowance check for user {user_id}, action {action_type}")
-            free_used = 0
-                
+            async with get_session() as session:
+                from datetime import timedelta
+                # Query credit_usage_tracking using auth UUID (matches credit_wallets.user_id)
+                next_month = (month_year.replace(day=28) + timedelta(days=4)).replace(day=1)
+                result = await session.execute(
+                    select(func.count(CreditUsageTracking.id))
+                    .where(
+                        and_(
+                            CreditUsageTracking.user_id == user_id,
+                            CreditUsageTracking.feature_used == action_type,
+                            CreditUsageTracking.used_at >= month_year,
+                            CreditUsageTracking.used_at < next_month,
+                            CreditUsageTracking.action_successful == True,
+                            CreditUsageTracking.credits_consumed == 0  # Free allowance actions have 0 credits consumed
+                        )
+                    )
+                )
+                free_used = result.scalar() or 0
+
             # Cache the result (with graceful Redis fallback)
             try:
                 if cache_manager.redis_client:
                     import json
                     await cache_manager.redis_client.setex(
-                        cache_key, 
-                        self.allowance_cache_ttl, 
+                        cache_key,
+                        self.allowance_cache_ttl,
                         json.dumps(free_used, default=str)
                     )
             except Exception as e:
                 logger.warning(f"Failed to cache allowance used for {user_id}:{action_type}: {e}")
-                
+
             return free_used
-                
+
         except Exception as e:
             logger.error(f"Error getting free allowance used for user {user_id}: {e}")
             return 0
@@ -497,27 +511,50 @@ class CreditPricingService:
         try:
             # Get all active pricing rules
             rules = await self.get_all_pricing_rules()
-            
-            # TEMPORARY FIX: Skip usage tracking due to model mismatch
-            # TODO: Fix CreditUsageTracking model schema mismatch
-            logger.warning(f"TEMP FIX: Skipping allowance status for user {user_id}")
-            usage_records = {}
-            
-            # Build allowance status
+
+            # Build allowance status using actual usage data
             allowance_status = {}
-            
+
             for rule in rules:
-                usage = usage_records.get(rule.action_type)
-                free_used = usage.free_actions_used if usage else 0
+                free_used = await self.get_free_allowance_used(user_id, rule.action_type, month_year)
                 
+                # Get paid usage for this action type
+                paid_actions = 0
+                total_spent = 0
+                try:
+                    async with get_session() as session:
+                        from datetime import timedelta
+                        next_month = (month_year.replace(day=28) + timedelta(days=4)).replace(day=1)
+                        paid_result = await session.execute(
+                            select(
+                                func.count(CreditUsageTracking.id),
+                                func.coalesce(func.sum(CreditUsageTracking.credits_consumed), 0)
+                            ).where(
+                                and_(
+                                    CreditUsageTracking.user_id == user_id,
+                                    CreditUsageTracking.feature_used == rule.action_type,
+                                    CreditUsageTracking.used_at >= month_year,
+                                    CreditUsageTracking.used_at < next_month,
+                                    CreditUsageTracking.action_successful == True,
+                                    CreditUsageTracking.credits_consumed > 0
+                                )
+                            )
+                        )
+                        row = paid_result.fetchone()
+                        if row:
+                            paid_actions = row[0] or 0
+                            total_spent = row[1] or 0
+                except Exception as e:
+                    logger.warning(f"Failed to get paid usage for {rule.action_type}: {e}")
+
                 allowance_status[rule.action_type] = {
                     "display_name": rule.display_name,
                     "free_allowance": rule.free_allowance_per_month,
                     "free_used": free_used,
                     "free_remaining": max(0, rule.free_allowance_per_month - free_used),
                     "cost_per_action": rule.cost_per_action,
-                    "paid_actions_used": usage.paid_actions_used if usage else 0,
-                    "total_credits_spent": usage.total_credits_spent if usage else 0
+                    "paid_actions_used": paid_actions,
+                    "total_credits_spent": total_spent
                 }
             
             status = {

@@ -94,13 +94,13 @@ class RobustSentimentAnalyzer:
         pipeline = ai_manager.get_sentiment_pipeline()
         if not pipeline:
             raise Exception("Sentiment pipeline not available")
-        
+
         # CRITICAL: Preprocess text to prevent tensor size errors
         processed_text = ai_manager.preprocess_text_for_model(text, 'sentiment')
         processing_info["preprocessing_applied"] = processed_text != text
         processing_info["processed_text_length"] = len(processed_text)
         processing_info["model_used"] = "ai"
-        
+
         if not processed_text.strip():
             return {
                 "label": "neutral",
@@ -109,10 +109,10 @@ class RobustSentimentAnalyzer:
                 "method": "ai",
                 "processing_info": {**processing_info, "reason": "empty_after_preprocessing"}
             }
-        
+
         try:
-            # Run AI analysis with processed text
-            results = pipeline(processed_text)
+            # Run AI analysis off the event loop via thread executor
+            results = await ai_manager.run_inference('sentiment', processed_text)
             
             # Process results safely
             if isinstance(results, list) and len(results) > 0 and isinstance(results[0], list):

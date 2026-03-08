@@ -121,13 +121,16 @@ class CDNImageService:
         try:
             logger.info(f"📥 Enqueuing assets for profile: {profile_id}")
             print(f"[CDN] CDN: Starting CDN asset enqueue for profile {profile_id}")
-            
-            # Set database session if provided
-            if db:
-                self.db = db
-            
+
+            # Use the provided db session locally — do NOT mutate self.db
+            # This prevents race conditions when multiple jobs call concurrently
+            session = db or self.db
+            if not session:
+                logger.warning(f"No database session available for CDN processing")
+                return EnqueueResult(success=False, jobs_created=0, error="No database session")
+
             jobs_created = 0
-            
+
             # Enqueue avatar from Apify data
             print(f"[CDN] CDN: Looking for profile avatar URL in Apify data...")
             avatar_url = None
@@ -137,7 +140,7 @@ class CDNImageService:
             elif 'profile_pic_url' in apify_data and apify_data['profile_pic_url']:
                 avatar_url = apify_data['profile_pic_url']
                 print(f"[CDN] CDN: Found standard avatar URL: {avatar_url[:80]}...")
-            
+
             if avatar_url:
                 print(f"[CDN] CDN: Enqueuing profile avatar for processing (HIGH priority)...")
                 await self._enqueue_asset(
@@ -145,7 +148,8 @@ class CDNImageService:
                     source_id=profile_id,
                     media_id='avatar',
                     source_url=avatar_url,
-                    priority=3  # Higher priority for avatars
+                    priority=3,  # Higher priority for avatars
+                    _session=session
                 )
                 jobs_created += 1
                 logger.info(f"Enqueued avatar from Apify: {avatar_url[:80]}...")
@@ -156,97 +160,95 @@ class CDNImageService:
 
             # Enqueue recent posts from DATABASE (more reliable than Apify structure parsing)
             print(f"[CDN] CDN: Getting recent posts from database for profile {profile_id}...")
-            
-            if self.db:
-                from sqlalchemy import select, desc
-                from app.database.unified_models import Post
-                
-                # Get recent posts with display URLs from database
-                posts_query = select(Post.instagram_post_id, Post.display_url).where(
-                    Post.profile_id == profile_id
-                ).where(
-                    Post.display_url.is_not(None)
-                ).where(
-                    Post.display_url != ''
-                ).order_by(desc(Post.created_at)).limit(self.max_posts_per_profile)
-                
-                posts_result = await self.db.execute(posts_query)
-                db_posts = posts_result.fetchall()
-                
-                print(f"[CDN] CDN: Found {len(db_posts)} posts with display URLs in database")
-                logger.info(f"Found {len(db_posts)} recent posts with display URLs from database")
-                
-                # Process posts from database
-                for i, post_row in enumerate(db_posts, 1):
-                    media_id = post_row[0] or f'post_{i}'  # instagram_post_id
-                    display_url = post_row[1]  # display_url
-                    
-                    print(f"[CDN] CDN: Processing post {i}/{len(db_posts)} (media_id: {media_id})")
-                    
-                    if display_url:
-                        print(f"[CDN] CDN: Enqueuing post thumbnail: {display_url[:80]}...")
-                        await self._enqueue_asset(
-                            source_type='post_thumbnail',
-                            source_id=profile_id,
-                            media_id=media_id,
-                            source_url=display_url,
-                            priority=5  # Normal priority for posts
-                        )
-                        jobs_created += 1
-                        print(f"[SUCCESS] CDN: Post {i} thumbnail enqueued successfully")
-                    else:
-                        print(f"[WARNING]  CDN: Post {i} has no display_url, skipping")
-            else:
-                print(f"[WARNING]  CDN: No database session available, cannot get posts")
-                logger.warning(f"No database session available for CDN post processing")
-            
+
+            from sqlalchemy import select, desc
+            from app.database.unified_models import Post
+
+            # Get recent posts with display URLs from database
+            posts_query = select(Post.instagram_post_id, Post.display_url).where(
+                Post.profile_id == profile_id
+            ).where(
+                Post.display_url.is_not(None)
+            ).where(
+                Post.display_url != ''
+            ).order_by(desc(Post.created_at)).limit(self.max_posts_per_profile)
+
+            posts_result = await session.execute(posts_query)
+            db_posts = posts_result.fetchall()
+
+            print(f"[CDN] CDN: Found {len(db_posts)} posts with display URLs in database")
+            logger.info(f"Found {len(db_posts)} recent posts with display URLs from database")
+
+            # Process posts from database
+            for i, post_row in enumerate(db_posts, 1):
+                media_id = post_row[0] or f'post_{i}'  # instagram_post_id
+                display_url = post_row[1]  # display_url
+
+                print(f"[CDN] CDN: Processing post {i}/{len(db_posts)} (media_id: {media_id})")
+
+                if display_url:
+                    print(f"[CDN] CDN: Enqueuing post thumbnail: {display_url[:80]}...")
+                    await self._enqueue_asset(
+                        source_type='post_thumbnail',
+                        source_id=profile_id,
+                        media_id=media_id,
+                        source_url=display_url,
+                        priority=5,  # Normal priority for posts
+                        _session=session
+                    )
+                    jobs_created += 1
+                    print(f"[SUCCESS] CDN: Post {i} thumbnail enqueued successfully")
+                else:
+                    print(f"[WARNING]  CDN: Post {i} has no display_url, skipping")
+
             logger.info(f"[SUCCESS] Enqueued {jobs_created} assets for processing")
             print(f"[SUCCESS] CDN: Successfully enqueued {jobs_created} assets for CDN processing")
             print(f"[CDN] CDN: CDN jobs will be processed in background by workers")
-            
+
             return EnqueueResult(
                 success=True,
                 jobs_created=jobs_created,
                 message=f"Enqueued {jobs_created} assets for processing"
             )
-            
+
         except Exception as e:
             logger.error(f"[ERROR] Error enqueuing profile assets: {e}")
             print(f"[ERROR] CDN: Error enqueuing profile assets - {str(e)}")
-            # Add more detailed error info for debugging
-            print(f"[ERROR] CDN: Error details - profile_id: {profile_id}, db session: {self.db is not None}")
+            print(f"[ERROR] CDN: Error details - profile_id: {profile_id}")
             return EnqueueResult(
                 success=False,
                 jobs_created=0,
                 error=str(e)
             )
     
-    async def _enqueue_asset(self, source_type: str, source_id: UUID, 
-                           media_id: str, source_url: str, priority: int = 5) -> Optional[UUID]:
+    async def _enqueue_asset(self, source_type: str, source_id: UUID,
+                           media_id: str, source_url: str, priority: int = 5,
+                           _session=None) -> Optional[UUID]:
         """Create or update asset record and enqueue processing job using raw SQL"""
+        session = _session or self.db
         try:
             from sqlalchemy import text
-            
+
             # Create or get asset record
-            asset = await self._get_or_create_asset(source_type, source_id, media_id, source_url)
-            
+            asset = await self._get_or_create_asset(source_type, source_id, media_id, source_url, _session=session)
+
             # Check if asset needs processing
             if not self._needs_processing(asset, source_url):
                 logger.debug(f"Asset {asset['id']} is up to date, skipping")
                 return asset['id']
-            
+
             # Create processing job using raw SQL
             job_sql = """
                 INSERT INTO cdn_image_jobs (
-                    asset_id, job_type, source_url, priority, 
+                    asset_id, job_type, source_url, priority,
                     target_sizes, output_format, status
                 ) VALUES (
                     :asset_id, :job_type, :source_url, :priority,
                     :target_sizes, :output_format, 'queued'
                 ) RETURNING id
             """
-            
-            result = await self.db.execute(
+
+            result = await session.execute(
                 text(job_sql),
                 {
                     'asset_id': asset['id'],
@@ -257,23 +259,23 @@ class CDNImageService:
                     'output_format': 'webp'
                 }
             )
-            
-            await self.db.commit()
+
+            await session.commit()
             job_id = result.scalar()
-            
+
             logger.debug(f"[TARGET] Created job {job_id} for asset {asset['id']}")
-            
+
             # CRITICAL FIX: Process CDN job IMMEDIATELY instead of background Celery
             logger.info(f"[IMMEDIATE] Processing CDN job {job_id} immediately for fast results")
             try:
-                immediate_result = await self._process_cdn_job_immediately(job_id, source_url)
+                immediate_result = await self._process_cdn_job_immediately(job_id, source_url, _session=session)
                 if immediate_result.get("success"):
                     logger.info(f"[SUCCESS] Immediate CDN processing completed for job {job_id}")
                 else:
                     logger.warning(f"[WARNING] Immediate CDN processing failed for job {job_id}: {immediate_result.get('error')}")
             except Exception as immediate_error:
                 logger.warning(f"[WARNING] Immediate CDN processing failed for job {job_id}: {immediate_error}")
-                
+
             # Fallback: Still trigger Celery task for retry if immediate processing failed
             try:
                 from app.workers.simple_cdn_worker import app as celery_app
@@ -284,29 +286,31 @@ class CDNImageService:
                 logger.info(f"[TRIGGER] Triggered fallback CDN processing for job {job_id}")
             except Exception as celery_error:
                 logger.warning(f"[WARNING] Failed to trigger fallback CDN processing for job {job_id}: {celery_error}")
-            
+
             return asset['id']
-            
+
         except Exception as e:
-            await self.db.rollback()
+            await session.rollback()
             logger.error(f"[ERROR] Failed to enqueue asset: {e}")
             raise
     
-    async def _get_or_create_asset(self, source_type: str, source_id: UUID, 
-                                 media_id: str, source_url: str) -> Dict[str, Any]:
+    async def _get_or_create_asset(self, source_type: str, source_id: UUID,
+                                 media_id: str, source_url: str,
+                                 _session=None) -> Dict[str, Any]:
         """Get existing asset or create new one"""
+        session = _session or self.db
         try:
             from sqlalchemy import text
-            
+
             # Try to get existing asset
             asset_sql = """
-                SELECT * FROM cdn_image_assets 
-                WHERE source_type = :source_type 
-                AND source_id = :source_id 
+                SELECT * FROM cdn_image_assets
+                WHERE source_type = :source_type
+                AND source_id = :source_id
                 AND media_id = :media_id
             """
-            
-            result = await self.db.execute(
+
+            result = await session.execute(
                 text(asset_sql),
                 {
                     'source_type': source_type,
@@ -314,29 +318,29 @@ class CDNImageService:
                     'media_id': media_id
                 }
             )
-            
+
             asset = result.fetchone()
-            
+
             if asset:
                 # Convert to dict for consistent access
                 asset_dict = dict(asset._mapping)
-                
+
                 # Update source URL if it changed
                 if asset_dict['source_url'] != source_url:
                     update_sql = """
-                        UPDATE cdn_image_assets 
-                        SET source_url = :source_url, 
+                        UPDATE cdn_image_assets
+                        SET source_url = :source_url,
                             needs_update = true,
                             updated_at = NOW()
                         WHERE id = :asset_id
                     """
-                    await self.db.execute(
+                    await session.execute(
                         text(update_sql),
                         {'source_url': source_url, 'asset_id': asset_dict['id']}
                     )
                     asset_dict['source_url'] = source_url
                     asset_dict['needs_update'] = True
-                
+
                 return asset_dict
             else:
                 # Create new asset
@@ -347,8 +351,8 @@ class CDNImageService:
                         :source_type, :source_id, :media_id, :source_url, 'pending'
                     ) RETURNING *
                 """
-                
-                result = await self.db.execute(
+
+                result = await session.execute(
                     text(create_sql),
                     {
                         'source_type': source_type,
@@ -357,14 +361,14 @@ class CDNImageService:
                         'source_url': source_url
                     }
                 )
-                
+
                 new_asset = result.fetchone()
-                await self.db.commit()
-                
+                await session.commit()
+
                 return dict(new_asset._mapping)
-                
+
         except Exception as e:
-            await self.db.rollback()
+            await session.rollback()
             logger.error(f"[ERROR] Failed to get/create asset: {e}")
             raise
     
@@ -569,7 +573,8 @@ class CDNImageService:
                 LEFT JOIN cdn_image_jobs j ON j.asset_id = a.id
             """
             
-            result = await self.db.execute(stats_sql)
+            from sqlalchemy import text
+            result = await self.db.execute(text(stats_sql))
             stats = result.fetchone()
             
             return {
@@ -600,8 +605,8 @@ class CDNImageService:
         
         try:
             # Test database connection
-            test_sql = "SELECT 1"
-            await self.db.execute(test_sql)
+            from sqlalchemy import text as _text
+            await self.db.execute(_text("SELECT 1"))
             health_status['database_connection'] = True
             
             # Test R2 storage
@@ -628,18 +633,22 @@ class CDNImageService:
     async def _get_total_queue_depth(self) -> int:
         """Get total processing queue depth"""
         try:
+            from sqlalchemy import text as _text
             queue_sql = "SELECT COUNT(*) FROM cdn_image_jobs WHERE status IN ('queued', 'processing')"
-            result = await self.db.execute(queue_sql)
+            result = await self.db.execute(_text(queue_sql))
             return result.scalar() or 0
         except Exception:
             return -1
     
-    async def _process_cdn_job_immediately(self, job_id: str, source_url: str) -> Dict[str, Any]:
+    async def _process_cdn_job_immediately(self, job_id: str, source_url: str, _session=None) -> Dict[str, Any]:
         """
         BULLETPROOF SYNCHRONOUS CDN PROCESSOR
         Process CDN job immediately without Redis/Celery - 100% reliable
         Uses proven logic from process_stuck_cdn_jobs.py
         """
+        session = _session or self.db
+        if not session:
+            return {"success": False, "error": "No database session available"}
         try:
             from sqlalchemy import text
             import httpx
@@ -658,7 +667,7 @@ class CDNImageService:
                 WHERE j.id = :job_id
             """)
 
-            result = await self.db.execute(job_sql, {'job_id': job_id})
+            result = await session.execute(job_sql, {'job_id': job_id})
             job = result.fetchone()
 
             if not job:
@@ -670,8 +679,8 @@ class CDNImageService:
                 SET status = 'processing', started_at = NOW()
                 WHERE id = :job_id
             """)
-            await self.db.execute(update_sql, {'job_id': job_id})
-            await self.db.commit()
+            await session.execute(update_sql, {'job_id': job_id})
+            await session.commit()
 
             # Download image from Instagram
             logger.info(f"[IMMEDIATE] Downloading image from Instagram...")
@@ -745,7 +754,7 @@ class CDNImageService:
                     processing_completed_at = NOW()
                 WHERE id = :asset_id
             """)
-            await self.db.execute(asset_update_sql, {
+            await session.execute(asset_update_sql, {
                 'cdn_url': cdn_url,
                 'cdn_path': r2_key,
                 'asset_id': job.asset_id
@@ -758,7 +767,7 @@ class CDNImageService:
                     SET cdn_thumbnail_url = :cdn_url
                     WHERE instagram_post_id = :media_id
                 """)
-                await self.db.execute(posts_update_sql, {
+                await session.execute(posts_update_sql, {
                     'cdn_url': cdn_url,
                     'media_id': media_id
                 })
@@ -770,7 +779,7 @@ class CDNImageService:
                     SET cdn_avatar_url = :cdn_url
                     WHERE id = :profile_id
                 """)
-                await self.db.execute(profiles_update_sql, {
+                await session.execute(profiles_update_sql, {
                     'cdn_url': cdn_url,
                     'profile_id': source_id
                 })
@@ -782,11 +791,11 @@ class CDNImageService:
                     completed_at = NOW()
                 WHERE id = :job_id
             """)
-            await self.db.execute(job_complete_sql, {
+            await session.execute(job_complete_sql, {
                 'job_id': job_id
             })
 
-            await self.db.commit()
+            await session.commit()
 
             logger.info(f"[SUCCESS] Bulletproof CDN processing completed: {cdn_url}")
             return {
@@ -805,11 +814,11 @@ class CDNImageService:
                         error_message = :error
                     WHERE id = :job_id
                 """)
-                await self.db.execute(fail_sql, {
+                await session.execute(fail_sql, {
                     'job_id': job_id,
-                    'error': str(e)
+                    'error': str(e)[:500]
                 })
-                await self.db.commit()
+                await session.commit()
             except Exception:
                 pass
 

@@ -23,12 +23,31 @@ def apply_absolute_pgbouncer_fix():
         # Remove any conflicting parameters
         kwargs.pop('max_cached_statement_lifetime', None)
         kwargs.pop('max_cacheable_statement_size', None)
-        kwargs.pop('prepared_statement_cache_size', None)
+        # Keep prepared_statement_cache_size=0 if set (SQLAlchemy adapter param)
+        # Don't pop it - let it pass through to SQLAlchemy's adapter
 
         logger.debug("ABSOLUTE FIX: Forcing statement_cache_size=0 on asyncpg.connect")
         return await original_connect(*args, **kwargs)
 
     asyncpg.connect = pgbouncer_safe_connect
+
+    # Step 1b: Monkey-patch SQLAlchemy's asyncpg adapter to force unnamed prepared statements
+    try:
+        from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
+
+        original_dbapi_connect = AsyncAdapt_asyncpg_dbapi.connect
+
+        def pgbouncer_safe_dbapi_connect(self, *arg, **kw):
+            """Force prepared_statement_name_func to return empty string for PGBouncer"""
+            kw['prepared_statement_cache_size'] = 0
+            kw['prepared_statement_name_func'] = lambda: ''
+            logger.debug("ABSOLUTE FIX: Forcing unnamed prepared statements in dbapi.connect")
+            return original_dbapi_connect(self, *arg, **kw)
+
+        AsyncAdapt_asyncpg_dbapi.connect = pgbouncer_safe_dbapi_connect
+        logger.info("ABSOLUTE FIX: Patched AsyncAdapt_asyncpg_dbapi.connect for unnamed prepared statements")
+    except Exception as e:
+        logger.warning(f"Could not patch AsyncAdapt_asyncpg_dbapi: {e}")
 
     # Step 2: Monkey-patch SQLAlchemy's asyncpg dialect
     try:
@@ -63,7 +82,8 @@ def apply_absolute_pgbouncer_fix():
     logger.info("="*80)
     logger.info("ABSOLUTE PGBOUNCER FIX APPLIED!")
     logger.info("- asyncpg.connect() will ALWAYS use statement_cache_size=0")
-    logger.info("- SQLAlchemy dialect will NEVER create prepared statements")
+    logger.info("- SQLAlchemy adapter will use UNNAMED prepared statements only")
+    logger.info("- SQLAlchemy dialect will NEVER cache prepared statements")
     logger.info("- Your application is now PGBouncer compatible!")
     logger.info("="*80)
 

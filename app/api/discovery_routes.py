@@ -7,6 +7,7 @@ from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Depends, Path, Body
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from app.middleware.auth_middleware import get_current_user as get_current_active_user
 from app.models.auth import UserInDB
@@ -20,6 +21,9 @@ from app.models.discovery import (
 )
 from app.services.discovery_service import discovery_service
 from app.middleware.atomic_credit_gate import atomic_requires_credits
+from app.core.job_queue import job_queue, JobPriority, QueueType
+from app.api.fast_handoff_api import FastHandoffResponse
+from app.database.optimized_pools import optimized_pools
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
@@ -131,41 +135,174 @@ async def get_discovery_page(
 # PROFILE UNLOCK ENDPOINTS
 # ============================================================================
 
-@router.post("/unlock", response_model=ProfileUnlockApiResponse)
+@router.post("/unlock")
 @atomic_requires_credits("profile_analysis", credits_required=25, check_unlock_status=True, return_detailed_response=True)
 async def unlock_profile(
     unlock_request: ProfileUnlockRequest,
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
-    Unlock a profile for detailed analysis (25 credits)
-    Once unlocked, profile remains unlocked forever for this user
+    Unlock a profile for detailed analysis (25 credits).
+
+    Fast path (200): Profile already unlocked or profile is complete in DB.
+    Async path (202): Profile needs full pipeline (Apify + CDN + AI) -- returns job_id.
     """
     user_id = UUID(str(current_user.id))
-    
+    profile_id = unlock_request.profile_id
+
     try:
-        unlock_data = await discovery_service.unlock_profile(
-            user_id=user_id,
-            profile_id=unlock_request.profile_id,
-            unlock_reason=unlock_request.unlock_reason
-        )
-        
-        # Check for credit-related errors
-        if "error" in unlock_data:
+        # ------------------------------------------------------------------
+        # FAST PATH 1: Already unlocked -- no credits charged, instant return
+        # ------------------------------------------------------------------
+        async with optimized_pools.get_user_session() as session:
+            completeness = await session.execute(text("""
+                SELECT
+                    p.id,
+                    p.username,
+                    p.followers_count,
+                    p.posts_count,
+                    p.ai_profile_analyzed_at,
+                    p.blacklisted,
+                    p.inactive,
+                    (SELECT COUNT(*) FROM posts
+                        WHERE profile_id = p.id
+                        AND ai_content_category IS NOT NULL
+                        AND ai_sentiment IS NOT NULL
+                        AND ai_language_code IS NOT NULL) AS ai_posts_count,
+                    (SELECT COUNT(*) FROM posts
+                        WHERE profile_id = p.id
+                        AND cdn_thumbnail_url IS NOT NULL) AS cdn_posts_count,
+                    -- Check if already unlocked by this user
+                    EXISTS(
+                        SELECT 1 FROM user_profile_access upa
+                        WHERE upa.user_id = :user_id AND upa.profile_id = p.id
+                    ) AS already_unlocked,
+                    -- Get user subscription tier
+                    (SELECT subscription_tier FROM users WHERE id = :user_id) AS user_tier
+                FROM profiles p
+                WHERE p.id = :profile_id
+            """).execution_options(prepare=False), {
+                'profile_id': str(profile_id),
+                'user_id': str(user_id)
+            })
+            profile_row = completeness.fetchone()
+
+        if not profile_row:
             return ProfileUnlockApiResponse(
                 success=False,
-                error=DiscoveryErrorResponse(**unlock_data)
+                error=DiscoveryErrorResponse(
+                    error="profile_not_found",
+                    message="Profile not found"
+                )
             )
-        
-        response_data = ProfileUnlockResponse(**unlock_data)
-        
-        return ProfileUnlockApiResponse(
-            success=True,
-            data=response_data,
-            message="Profile unlocked successfully" if unlock_data.get("unlocked") 
-                   else "Profile was already unlocked"
+
+        if profile_row.blacklisted or profile_row.inactive:
+            return ProfileUnlockApiResponse(
+                success=False,
+                error=DiscoveryErrorResponse(
+                    error="profile_unavailable",
+                    message="Profile is not available for unlock"
+                )
+            )
+
+        username = profile_row.username or "unknown"
+        user_tier = profile_row.user_tier or 'free'
+
+        # If already unlocked, return immediately (no credits charged by decorator)
+        if profile_row.already_unlocked:
+            unlock_data = await discovery_service.unlock_profile(
+                user_id=user_id,
+                profile_id=profile_id,
+                unlock_reason=unlock_request.unlock_reason
+            )
+            response_data = ProfileUnlockResponse(**unlock_data)
+            return ProfileUnlockApiResponse(
+                success=True,
+                data=response_data,
+                message="Profile was already unlocked"
+            )
+
+        # ------------------------------------------------------------------
+        # FAST PATH 2: Profile is complete in DB -- unlock synchronously
+        # Complete = followers > 0, posts > 0, 12+ AI-analyzed posts,
+        #            ai_profile_analyzed_at set, 12+ CDN posts
+        # ------------------------------------------------------------------
+        is_complete = (
+            profile_row.followers_count
+            and profile_row.followers_count > 0
+            and profile_row.posts_count
+            and profile_row.posts_count > 0
+            and profile_row.ai_posts_count >= 12
+            and profile_row.cdn_posts_count >= 12
+            and profile_row.ai_profile_analyzed_at is not None
         )
-        
+
+        if is_complete:
+            # Profile is fully analyzed -- do synchronous unlock
+            unlock_data = await discovery_service.unlock_profile(
+                user_id=user_id,
+                profile_id=profile_id,
+                unlock_reason=unlock_request.unlock_reason
+            )
+
+            if "error" in unlock_data:
+                return ProfileUnlockApiResponse(
+                    success=False,
+                    error=DiscoveryErrorResponse(**unlock_data)
+                )
+
+            response_data = ProfileUnlockResponse(**unlock_data)
+            return ProfileUnlockApiResponse(
+                success=True,
+                data=response_data,
+                message="Profile unlocked successfully"
+            )
+
+        # ------------------------------------------------------------------
+        # ASYNC PATH: Profile is incomplete -- enqueue background job
+        # ------------------------------------------------------------------
+        logger.info(
+            f"[DISCOVERY-UNLOCK] Profile @{username} incomplete "
+            f"(ai_posts={profile_row.ai_posts_count}, cdn_posts={profile_row.cdn_posts_count}, "
+            f"ai_analyzed={profile_row.ai_profile_analyzed_at is not None}). "
+            f"Enqueueing async job for user {user_id}"
+        )
+
+        enqueue_result = await job_queue.enqueue_job(
+            user_id=str(user_id),
+            job_type='discovery_unlock',
+            params={
+                'profile_id': str(profile_id),
+                'username': username,
+                'unlock_reason': unlock_request.unlock_reason,
+            },
+            priority=JobPriority.HIGH,
+            queue_type=QueueType.API_QUEUE,
+            estimated_duration=30,
+            user_tier=user_tier
+        )
+
+        if not enqueue_result.get('success'):
+            error_type = enqueue_result.get('error', 'enqueue_failed')
+            status_code = 429 if error_type == 'quota_exceeded' else 503
+            return JSONResponse(
+                status_code=status_code,
+                content=FastHandoffResponse.error(
+                    error_type,
+                    enqueue_result.get('message', 'Failed to enqueue unlock job')
+                )
+            )
+
+        return JSONResponse(
+            status_code=202,
+            content=FastHandoffResponse.success(
+                job_id=enqueue_result['job_id'],
+                estimated_completion_seconds=enqueue_result.get('estimated_completion_seconds', 30),
+                queue_position=enqueue_result.get('queue_position', 0),
+                message=f"Unlock started for @{username} -- profile requires full analysis"
+            )
+        )
+
     except ValueError as e:
         logger.warning(f"Invalid profile unlock request: {e}")
         return ProfileUnlockApiResponse(
@@ -176,7 +313,7 @@ async def unlock_profile(
             )
         )
     except Exception as e:
-        logger.error(f"Error unlocking profile {unlock_request.profile_id} for user {user_id}: {e}")
+        logger.error(f"Error unlocking profile {profile_id} for user {user_id}: {e}")
         return ProfileUnlockApiResponse(
             success=False,
             error=DiscoveryErrorResponse(
@@ -186,75 +323,164 @@ async def unlock_profile(
         )
 
 
-@router.post("/unlock/bulk", response_model=BulkProfileUnlockResponse)
+@router.post("/unlock/bulk")
 async def bulk_unlock_profiles(
     bulk_request: BulkProfileUnlockRequest,
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """
-    Unlock multiple profiles at once
-    Credits are charged per successful unlock (25 credits each)
+    Unlock multiple profiles at once (async 202 pattern).
+
+    Credits are validated upfront (25 per profile that isn't already unlocked).
+    Processing happens in a background worker with concurrency control (3 at a time).
+    Poll /api/v1/jobs/{job_id}/status for progress and /api/v1/jobs/{job_id}/result
+    for the final BulkProfileUnlockResponse.
     """
     user_id = UUID(str(current_user.id))
-    
+    profile_ids = bulk_request.profile_ids
+
     try:
-        results = []
-        total_credits_spent = 0
-        successful_unlocks = 0
-        already_unlocked = 0
-        failed_unlocks = 0
-        
-        for profile_id in bulk_request.profile_ids:
-            try:
-                unlock_data = await discovery_service.unlock_profile(
-                    user_id=user_id,
-                    profile_id=profile_id,
-                    unlock_reason=bulk_request.unlock_reason
-                )
-                
-                if "error" in unlock_data:
-                    results.append({
-                        "profile_id": profile_id,
-                        "success": False,
-                        "error_message": unlock_data["message"]
-                    })
-                    failed_unlocks += 1
-                elif unlock_data.get("already_unlocked"):
-                    results.append({
-                        "profile_id": profile_id,
-                        "success": True,
-                        "credits_spent": 0,
-                        "already_unlocked": True
-                    })
-                    already_unlocked += 1
-                else:
-                    results.append({
-                        "profile_id": profile_id,
-                        "success": True,
-                        "credits_spent": unlock_data["credits_spent"],
-                        "unlock_id": unlock_data["unlock_id"]
-                    })
-                    total_credits_spent += unlock_data["credits_spent"]
-                    successful_unlocks += 1
-                    
-            except Exception as e:
-                logger.error(f"Error in bulk unlock for profile {profile_id}: {e}")
-                results.append({
-                    "profile_id": profile_id,
-                    "success": False,
-                    "error_message": str(e)
+        # ------------------------------------------------------------------
+        # Upfront validation: check which profiles exist, are available,
+        # and which are already unlocked.  Calculate actual credit cost.
+        # ------------------------------------------------------------------
+        id_list = [str(pid) for pid in profile_ids]
+        placeholders = ', '.join([f"'{pid}'" for pid in id_list])
+
+        async with optimized_pools.get_user_session() as session:
+            rows = await session.execute(text(f"""
+                SELECT
+                    p.id AS profile_id,
+                    p.username,
+                    p.blacklisted,
+                    p.inactive,
+                    EXISTS(
+                        SELECT 1 FROM user_profile_access upa
+                        WHERE upa.user_id = :user_id AND upa.profile_id = p.id
+                    ) AS already_unlocked
+                FROM profiles p
+                WHERE p.id IN ({placeholders})
+            """).execution_options(prepare=False), {'user_id': str(user_id)})
+            profile_rows = rows.fetchall()
+
+            # Get user credits and tier
+            user_row = await session.execute(text("""
+                SELECT credits, subscription_tier FROM users WHERE id = :user_id
+            """).execution_options(prepare=False), {'user_id': str(user_id)})
+            user_data = user_row.fetchone()
+
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        user_tier = user_data.subscription_tier or 'free'
+
+        # Build lookup for quick access
+        profile_lookup = {str(r.profile_id): r for r in profile_rows}
+
+        # Determine which profiles actually need unlocking (not already unlocked,
+        # not blacklisted/inactive, and actually exist)
+        profiles_to_unlock = []
+        already_unlocked_ids = []
+        invalid_ids = []
+
+        for pid in profile_ids:
+            pid_str = str(pid)
+            row = profile_lookup.get(pid_str)
+            if not row:
+                invalid_ids.append(pid_str)
+            elif row.blacklisted or row.inactive:
+                invalid_ids.append(pid_str)
+            elif row.already_unlocked:
+                already_unlocked_ids.append(pid_str)
+            else:
+                profiles_to_unlock.append({
+                    'profile_id': pid_str,
+                    'username': row.username or 'unknown'
                 })
-                failed_unlocks += 1
-        
-        return BulkProfileUnlockResponse(
-            total_requested=len(bulk_request.profile_ids),
-            successful_unlocks=successful_unlocks,
-            already_unlocked=already_unlocked,
-            failed_unlocks=failed_unlocks,
-            total_credits_spent=total_credits_spent,
-            results=results
+
+        # If nothing to unlock, return synchronously
+        if not profiles_to_unlock:
+            return BulkProfileUnlockResponse(
+                total_requested=len(profile_ids),
+                successful_unlocks=0,
+                already_unlocked=len(already_unlocked_ids),
+                failed_unlocks=len(invalid_ids),
+                total_credits_spent=0,
+                results=[
+                    *[{"profile_id": UUID(pid), "success": True, "credits_spent": 0, "already_unlocked": True}
+                      for pid in already_unlocked_ids],
+                    *[{"profile_id": UUID(pid), "success": False, "credits_spent": 0,
+                       "error_message": "Profile not found or unavailable"}
+                      for pid in invalid_ids],
+                ]
+            )
+
+        # Validate credits upfront: 25 per profile that needs unlocking
+        total_credit_cost = len(profiles_to_unlock) * 25
+        if user_data.credits < total_credit_cost:
+            return JSONResponse(
+                status_code=402,
+                content=FastHandoffResponse.error(
+                    "insufficient_credits",
+                    f"Bulk unlock requires {total_credit_cost} credits "
+                    f"({len(profiles_to_unlock)} profiles x 25), "
+                    f"you have {user_data.credits}",
+                    details={
+                        "required": total_credit_cost,
+                        "available": user_data.credits,
+                        "profiles_to_unlock": len(profiles_to_unlock),
+                        "already_unlocked": len(already_unlocked_ids),
+                        "invalid": len(invalid_ids),
+                    }
+                )
+            )
+
+        # ------------------------------------------------------------------
+        # Enqueue single bulk job
+        # ------------------------------------------------------------------
+        enqueue_result = await job_queue.enqueue_job(
+            user_id=str(user_id),
+            job_type='bulk_unlock',
+            params={
+                'profiles_to_unlock': profiles_to_unlock,
+                'already_unlocked_ids': already_unlocked_ids,
+                'invalid_ids': invalid_ids,
+                'unlock_reason': bulk_request.unlock_reason,
+                'total_credit_cost': total_credit_cost,
+                'total_requested': len(profile_ids),
+            },
+            priority=JobPriority.BULK,
+            queue_type=QueueType.BULK_QUEUE,
+            estimated_duration=len(profiles_to_unlock) * 15,  # ~15s per profile
+            user_tier=user_tier
         )
-        
+
+        if not enqueue_result.get('success'):
+            error_type = enqueue_result.get('error', 'enqueue_failed')
+            status_code = 429 if error_type == 'quota_exceeded' else 503
+            return JSONResponse(
+                status_code=status_code,
+                content=FastHandoffResponse.error(
+                    error_type,
+                    enqueue_result.get('message', 'Failed to enqueue bulk unlock job')
+                )
+            )
+
+        return JSONResponse(
+            status_code=202,
+            content=FastHandoffResponse.success(
+                job_id=enqueue_result['job_id'],
+                estimated_completion_seconds=enqueue_result.get('estimated_completion_seconds', len(profiles_to_unlock) * 15),
+                queue_position=enqueue_result.get('queue_position', 0),
+                message=(
+                    f"Bulk unlock queued for {len(profiles_to_unlock)} profiles "
+                    f"({len(already_unlocked_ids)} already unlocked, {len(invalid_ids)} invalid)"
+                )
+            )
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error in bulk profile unlock for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Error processing bulk unlock request")

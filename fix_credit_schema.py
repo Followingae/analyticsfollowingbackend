@@ -3,7 +3,7 @@ Fix missing columns in credit and user_profile_access tables
 """
 import asyncio
 from sqlalchemy import text
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 
 async def fix_missing_columns():
     """Add missing columns to database tables"""

@@ -1,10 +1,14 @@
 """
 Dedicated Post Analytics Worker
-Handles all post analytics processing asynchronously to keep the backend responsive
+Handles all post analytics processing asynchronously.
+
+Runs on a DEDICATED THREAD with its own asyncio event loop and DB pool,
+so heavy post analysis never blocks FastAPI's main event loop.
 """
 
 import asyncio
 import logging
+import threading
 import json
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
@@ -12,73 +16,96 @@ from uuid import UUID
 import uuid as uuid_lib
 
 from app.core.job_queue import JobStatus, JobPriority, QueueType
-from app.services.standalone_post_analytics_service import standalone_post_analytics_service
-from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
-from app.services.unified_background_processor import UnifiedBackgroundProcessor
-from app.services.campaign_service import campaign_service
-from app.workers.worker_database import worker_db  # Use raw asyncpg connection
-from app.database.connection import get_session  # Still needed for services
-from sqlalchemy import text
+from app.workers.worker_database import WorkerDatabase
 
 logger = logging.getLogger(__name__)
 
 
 class PostAnalyticsWorker:
     """
-    Dedicated worker for processing post analytics jobs
-    Runs independently from the main API to keep backend responsive
+    Dedicated worker for processing post analytics jobs.
+    Runs on a separate thread with its own event loop and DB pool.
     """
 
     def __init__(self):
         self.running = False
         self.current_job = None
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._db: Optional[WorkerDatabase] = None
         logger.info("[INIT] Post Analytics Worker initialized")
 
     async def start(self):
-        """Start the worker to process post analytics jobs"""
+        """
+        Launch the worker on a SEPARATE THREAD with its own event loop.
+        Called from FastAPI's lifespan but all heavy work happens on
+        the dedicated thread.
+        """
         self.running = True
+        self._thread = threading.Thread(
+            target=self._run_in_thread,
+            name="post-analytics-worker",
+            daemon=True,
+        )
+        self._thread.start()
 
-        # CRITICAL: Clean up stuck jobs on startup
+    def _run_in_thread(self):
+        """Entry point for the worker thread - creates its own event loop."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._main_loop())
+        except Exception as e:
+            logger.error(f"[POST-ANALYTICS] Thread crashed: {e}")
+        finally:
+            if self._db and self._db.pool:
+                self._loop.run_until_complete(self._db.close())
+            self._loop.close()
+
+    async def _main_loop(self):
+        """Actual async main loop on the worker thread's own event loop."""
+        # Initialize our own asyncpg pool on THIS thread's event loop
+        self._db = WorkerDatabase()
+        await self._db.initialize()
+        logger.info("[POST-ANALYTICS] Dedicated DB pool initialized on worker thread")
+
         await self._cleanup_stuck_jobs()
 
-        logger.info("[SUCCESS] Post Analytics Worker started")
+        logger.info("[SUCCESS] Post Analytics Worker started on dedicated thread")
 
         while self.running:
             try:
-                # Get next job from queue
                 job = await self._get_next_job()
-
                 if job:
                     await self._process_job(job)
                 else:
-                    # No jobs available, wait before checking again
                     await asyncio.sleep(2)
-
             except Exception as e:
                 logger.error(f"[ERROR] Worker error: {e}")
-                await asyncio.sleep(5)  # Wait before retrying
+                await asyncio.sleep(5)
 
     async def stop(self):
         """Stop the worker gracefully"""
         self.running = False
-        logger.info("[STOP] Post Analytics Worker stopping...")
+        if self._thread:
+            self._thread.join(timeout=30)
+        logger.info("[STOP] Post Analytics Worker stopped")
 
     async def _cleanup_stuck_jobs(self):
-        """Clean up any stuck jobs from previous runs"""
+        """Clean up any stuck post_analytics_campaign jobs from previous runs"""
         logger.info("[CLEANUP] Checking for stuck jobs...")
 
         try:
-            # Reset any jobs that have been stuck for more than 30 minutes
-            result = await worker_db.execute_query("""
+            # Only reset post_analytics_campaign jobs stuck in processing
+            # (UnifiedAsyncWorker handles cleanup for all other job types)
+            result = await self._db.execute_query("""
                 UPDATE job_queue
                 SET status = 'queued',
                     started_at = NULL,
                     progress_message = 'Reset after worker restart'
-                WHERE status IN ('processing', 'queued')
-                AND (
-                    created_at < NOW() - INTERVAL '30 minutes'
-                    OR started_at < NOW() - INTERVAL '30 minutes'
-                )
+                WHERE status = 'processing'
+                AND job_type = 'post_analytics_campaign'
+                AND started_at < NOW() - INTERVAL '30 minutes'
                 RETURNING id, job_type
             """)
 
@@ -91,24 +118,23 @@ class PostAnalyticsWorker:
 
         except Exception as e:
             logger.error(f"[CLEANUP] Failed to clean up stuck jobs: {e}")
-            # Don't fail startup if cleanup fails
-            pass
 
     async def _get_next_job(self) -> Optional[Dict[str, Any]]:
-        """Get the next post analytics job from the queue using raw asyncpg"""
+        """Get the next post analytics job from the queue"""
         try:
-            # First, reset any jobs that have been processing for too long (30 min timeout)
-            await worker_db.execute_query("""
+            # Reset post_analytics_campaign jobs stuck in processing (30 min timeout)
+            await self._db.execute_query("""
                 UPDATE job_queue
                 SET status = 'queued',
                     started_at = NULL,
                     progress_message = 'Reset due to timeout'
                 WHERE status = 'processing'
+                AND job_type = 'post_analytics_campaign'
                 AND started_at < NOW() - INTERVAL '30 minutes'
             """)
 
-            # Now get the next available job
-            return await worker_db.get_next_job()
+            # Get next post_analytics_campaign job using raw asyncpg
+            return await self._db.get_next_job()
 
         except Exception as e:
             logger.error(f"[ERROR] Failed to get next job: {e}")
@@ -124,8 +150,12 @@ class PostAnalyticsWorker:
         logger.info(f"   Post URL: {params.get('instagram_post_url')}")
 
         try:
-            # Get isolated database session for this job
-            async with get_session() as db:
+            # Use optimized_pools for DB session (creates connection on THIS thread's loop)
+            from app.database.optimized_pools import optimized_pools
+            from app.services.standalone_post_analytics_service import standalone_post_analytics_service
+            from app.services.campaign_service import campaign_service
+
+            async with optimized_pools.get_background_session() as db:
                 # STEP 1: Run Post Analytics
                 logger.info(f"[PROCESSING] Starting post analytics for job {job_id}")
 
@@ -135,7 +165,7 @@ class PostAnalyticsWorker:
                     user_id=UUID(params["user_id"])
                 )
 
-                # STEP 2: Wait for FULL Creator Analytics if needed (Option A)
+                # STEP 2: Wait for FULL Creator Analytics if needed
                 creator_username = post_analysis.get("profile", {}).get("username")
                 if creator_username and params.get("wait_for_full_analytics", True):
                     await self._wait_for_creator_analytics_completion(
@@ -145,7 +175,7 @@ class PostAnalyticsWorker:
                     )
 
                 # STEP 3: Add post to campaign
-                logger.info(f"➕ Adding post to campaign for job {job_id}")
+                logger.info(f"[ANALYTICS] Adding post to campaign for job {job_id}")
 
                 campaign_post = await campaign_service.add_post_to_campaign(
                     db=db,
@@ -179,16 +209,12 @@ class PostAnalyticsWorker:
         except Exception as e:
             logger.error(f"[ERROR] Job {job_id} failed: {e}")
 
-            # Check retry count
             retry_count = job.get("retry_count", 0)
             max_retries = 3
 
             if retry_count < max_retries:
-                # Retry the job
                 logger.info(f"[RETRY] Job {job_id} will be retried (attempt {retry_count + 1}/{max_retries})")
-
-                # Update job to queued for retry
-                await worker_db.execute_query("""
+                await self._db.execute_query("""
                     UPDATE job_queue
                     SET status = 'queued',
                         retry_count = retry_count + 1,
@@ -197,7 +223,6 @@ class PostAnalyticsWorker:
                     WHERE id = $2::uuid
                 """, f"Retry {retry_count + 1}/{max_retries} after error: {str(e)[:100]}", job_id)
             else:
-                # Mark job as permanently failed after max retries
                 logger.error(f"[FAILED] Job {job_id} failed after {max_retries} attempts")
                 await self._update_job_status(
                     job_id=job_id,
@@ -211,14 +236,13 @@ class PostAnalyticsWorker:
         db,
         job_id: str
     ):
-        """
-        Wait for full creator analytics completion (Option A)
-        This ensures complete data including Audience demographics
-        """
-        logger.info(f"⏳ Job {job_id}: Starting FULL Creator Analytics for @{username}")
+        """Wait for full creator analytics completion"""
+        logger.info(f"[ANALYTICS] Job {job_id}: Starting FULL Creator Analytics for @{username}")
 
         try:
-            # Trigger Creator Analytics
+            from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
+            from app.services.unified_background_processor import UnifiedBackgroundProcessor
+
             profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
                 username=username,
                 db=db,
@@ -227,8 +251,6 @@ class PostAnalyticsWorker:
 
             if not profile or profile.followers_count == 0:
                 logger.warning(f"[WARNING] Job {job_id}: Initial analytics failed, retrying with force refresh")
-
-                # Retry with force refresh
                 profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
                     username=username,
                     db=db,
@@ -239,13 +261,11 @@ class PostAnalyticsWorker:
                 profile_id = str(profile.id)
                 logger.info(f"[ANALYTICS] Job {job_id}: Creator Analytics triggered - {profile.followers_count:,} followers")
 
-                # Wait for completion
                 processor = UnifiedBackgroundProcessor()
                 max_wait_time = 300  # 5 minutes
                 check_interval = 5
                 elapsed_time = 0
 
-                # Check initial status
                 initial_status = await processor.get_profile_processing_status(profile_id)
                 logger.info(f"[PROCESSING] Job {job_id}: Initial status - Complete: {initial_status.get('overall_complete')}")
 
@@ -260,7 +280,6 @@ class PostAnalyticsWorker:
                                 logger.info(f"[COMPLETE] Job {job_id}: FULL Creator Analytics COMPLETE for @{username}")
                                 break
 
-                            # Update job progress
                             progress_percent = min(90, int((elapsed_time / max_wait_time) * 90))
                             await self._update_job_progress(job_id, progress_percent, status['current_stage'])
 
@@ -288,10 +307,9 @@ class PostAnalyticsWorker:
         result: Optional[Dict] = None,
         error: Optional[str] = None
     ):
-        """Update job status in the database using raw asyncpg"""
+        """Update job status in the database"""
         try:
-            # Use raw asyncpg connection to avoid prepared statement issues
-            await worker_db.update_job_status(
+            await self._db.update_job_status(
                 job_id=job_id,
                 status=status.value,
                 result=result,
@@ -301,16 +319,24 @@ class PostAnalyticsWorker:
             logger.error(f"[ERROR] Failed to update job {job_id} status: {e}")
 
     async def _update_job_progress(self, job_id: str, progress_percent: int, current_stage: str):
-        """Update job progress for status polling using raw asyncpg"""
+        """Update job progress for status polling"""
         try:
-            # Use raw asyncpg connection to avoid prepared statement issues
-            await worker_db.update_job_progress(
+            await self._db.update_job_progress(
                 job_id=job_id,
                 progress_percent=progress_percent,
                 current_stage=current_stage
             )
         except Exception as e:
             logger.warning(f"[WARNING] Failed to update job {job_id} progress: {e}")
+
+    def is_running(self) -> bool:
+        return self.running
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            'running': self.running,
+            'current_job': self.current_job,
+        }
 
 
 # Global worker instance
@@ -320,4 +346,4 @@ post_analytics_worker = PostAnalyticsWorker()
 async def start_post_analytics_worker():
     """Start the post analytics worker as a background task"""
     logger.info("[INIT] Starting Post Analytics Worker...")
-    asyncio.create_task(post_analytics_worker.start())
+    await post_analytics_worker.start()

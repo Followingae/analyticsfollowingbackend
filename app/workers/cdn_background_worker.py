@@ -16,6 +16,7 @@ import os
 
 from celery import Celery
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
 
@@ -66,10 +67,21 @@ def get_async_engine():
         engine = create_async_engine(
             database_url,
             echo=False,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,
+            poolclass=NullPool,
+            pool_pre_ping=False,
+            query_cache_size=0,
+            execution_options={
+                "compiled_cache": None,
+                "postgresql_prepared": False,
+            },
+            connect_args={
+                'statement_cache_size': 0,
+                'prepared_statement_cache_size': 0,
+                'prepared_statement_name_func': lambda: '',  # Force UNNAMED prepared statements for PGBouncer
+                'command_timeout': 60,
+            }
         )
+        engine.dialect.supports_statement_cache = False
     return engine
 
 def get_async_session_factory():

@@ -9,7 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.middleware.auth_middleware import get_current_active_user
 from app.services.notification_service import NotificationService
 
@@ -78,6 +78,30 @@ async def mark_notification_read(
         return {"success": True, "data": {"marked": marked}}
     except Exception as e:
         logger.error(f"Error marking notification read: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/notifications/mark-read-by-reference")
+async def mark_read_by_reference(
+    reference_type: str = Query(..., description="e.g. 'proposal', 'share', 'profile'"),
+    reference_id: Optional[str] = Query(None, description="Specific reference UUID"),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Mark notifications as read by reference_type and optionally reference_id.
+    Used for auto-marking notifications when visiting the relevant page."""
+    try:
+        ref_uuid = UUID(reference_id) if reference_id else None
+        count = await NotificationService.mark_read_by_reference(
+            db,
+            user_id=current_user.id,
+            user_email=current_user.email,
+            reference_type=reference_type,
+            reference_id=ref_uuid,
+        )
+        return {"success": True, "data": {"marked_count": count}}
+    except Exception as e:
+        logger.error(f"Error marking notifications read by reference: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

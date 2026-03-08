@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 import asyncio
@@ -18,6 +18,15 @@ from app.core.job_queue import job_queue, JobPriority, QueueType, JobStatus
 from app.database.optimized_pools import optimized_pools
 from app.middleware.auth_middleware import get_current_active_user
 from app.database.unified_models import User
+
+
+def _safe_json_parse(value):
+    """Parse JSON if string, return as-is if already a dict/list (JSONB columns)."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    return json.loads(value)
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +96,6 @@ class FastHandoffResponse:
 @router.post("/analytics/profile/{username}")
 async def analyze_profile_fast_handoff(
     username: str,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_active_user)
 ) -> JSONResponse:
     """
@@ -127,8 +135,8 @@ async def analyze_profile_fast_handoff(
                 LEFT JOIN profiles p ON p.username = :username
                 WHERE u.id = :user_id
                 GROUP BY u.id, u.credits, u.subscription_tier, u.status, p.id, p.updated_at, p.ai_profile_analyzed_at
-            """), {
-                'user_id': current_user.id,
+            """).execution_options(prepare=False), {
+                'user_id': str(current_user.id),
                 'username': username.lower().strip()
             })
 
@@ -257,14 +265,7 @@ async def analyze_profile_fast_handoff(
                 )
             )
 
-        # STEP 4: ASYNC DISPATCH (Fire and forget)
-        background_tasks.add_task(
-            dispatch_profile_analysis_to_worker,
-            enqueue_result['job_id'],
-            job_priority.value
-        )
-
-        # STEP 5: IMMEDIATE RESPONSE
+        # STEP 4: IMMEDIATE RESPONSE (Celery dispatch handled by job_queue.enqueue_job)
         total_time = (time.time() - start_time) * 1000
         logger.info(f"Profile analysis request for {username} completed in {total_time:.1f}ms (job: {enqueue_result['job_id']})")
 
@@ -298,7 +299,6 @@ async def analyze_profile_fast_handoff(
 @router.post("/analytics/posts/{username}")
 async def analyze_posts_fast_handoff(
     username: str,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_active_user)
 ) -> JSONResponse:
     """Fast handoff for post analytics"""
@@ -312,7 +312,7 @@ async def analyze_posts_fast_handoff(
             result = await session.execute(text("""
                 SELECT credits, subscription_tier, status
                 FROM users WHERE id = :user_id
-            """), {'user_id': current_user.id})
+            """).execution_options(prepare=False), {'user_id': str(current_user.id)})
 
             user_data = result.fetchone()
 
@@ -353,12 +353,6 @@ async def analyze_posts_fast_handoff(
                     enqueue_result['message']
                 )
             )
-
-        # Async dispatch
-        background_tasks.add_task(
-            dispatch_post_analysis_to_worker,
-            enqueue_result['job_id']
-        )
 
         total_time = (time.time() - start_time) * 1000
         logger.info(f"Post analysis request completed in {total_time:.1f}ms")
@@ -403,9 +397,9 @@ async def get_job_status(
                     estimated_duration, progress_percent, progress_message, retry_count
                 FROM job_queue
                 WHERE id = :job_id AND user_id = :user_id
-            """), {
+            """).execution_options(prepare=False), {
                 'job_id': job_id,
-                'user_id': current_user.id
+                'user_id': str(current_user.id)
             })
 
             job_data = result.fetchone()
@@ -418,21 +412,21 @@ async def get_job_status(
 
         # Build comprehensive status response
         status_response = {
-            "job_id": job_data.id,
+            "job_id": str(job_data.id),
             "job_type": job_data.job_type,
             "status": job_data.status,
-            "progress_percent": job_data.progress_percent,
+            "progress_percent": job_data.progress_percent or 0,
             "progress_message": job_data.progress_message,
-            "created_at": job_data.created_at.isoformat(),
+            "created_at": job_data.created_at.isoformat() if job_data.created_at else None,
             "started_at": job_data.started_at.isoformat() if job_data.started_at else None,
             "completed_at": job_data.completed_at.isoformat() if job_data.completed_at else None,
         }
 
         # Add result or error details
         if job_data.status == 'completed' and job_data.result:
-            status_response["result"] = json.loads(job_data.result)
+            status_response["result"] = _safe_json_parse(job_data.result)
         elif job_data.status == 'failed' and job_data.error_details:
-            status_response["error_details"] = json.loads(job_data.error_details)
+            status_response["error_details"] = _safe_json_parse(job_data.error_details)
             status_response["retry_count"] = job_data.retry_count
 
         # Add time estimates for active jobs
@@ -463,6 +457,63 @@ async def get_job_status(
             content=FastHandoffResponse.error("status_error", "Error retrieving job status")
         )
 
+@router.get("/jobs/{job_id}/result")
+async def get_job_result(
+    job_id: str,
+    current_user: User = Depends(get_current_active_user)
+) -> JSONResponse:
+    """
+    Retrieve the completed job result in the original response shape.
+    Returns 202 if still processing, 200 if completed, 404/500 for errors.
+    """
+    try:
+        async with optimized_pools.get_user_session() as session:
+            result = await session.execute(text("""
+                SELECT status, result, error_details, progress_percent, progress_message
+                FROM job_queue
+                WHERE id = :job_id AND user_id = :user_id
+            """).execution_options(prepare=False), {'job_id': job_id, 'user_id': str(current_user.id)})
+            job_data = result.fetchone()
+
+        if not job_data:
+            return JSONResponse(
+                status_code=404,
+                content=FastHandoffResponse.error("job_not_found", "Job not found")
+            )
+
+        if job_data.status == 'completed' and job_data.result:
+            # Return the full response dict — same shape as the sync endpoint
+            return JSONResponse(status_code=200, content=_safe_json_parse(job_data.result))
+
+        if job_data.status == 'failed':
+            error_details = _safe_json_parse(job_data.error_details) if job_data.error_details else {}
+            return JSONResponse(
+                status_code=500,
+                content=FastHandoffResponse.error(
+                    "processing_failed",
+                    error_details.get('error', 'Processing failed'),
+                    details=error_details
+                )
+            )
+
+        # Still in progress
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": job_data.status,
+                "progress_percent": job_data.progress_percent or 0,
+                "progress_message": job_data.progress_message or "Processing...",
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting job result for {job_id}: {e}")
+        return JSONResponse(
+            status_code=500,
+            content=FastHandoffResponse.error("result_error", "Error retrieving job result")
+        )
+
+
 @router.websocket("/ws/jobs/{job_id}")
 async def job_status_websocket(websocket: WebSocket, job_id: str):
     """Real-time job status updates via WebSocket"""
@@ -477,7 +528,7 @@ async def job_status_websocket(websocket: WebSocket, job_id: str):
                 result = await session.execute(text("""
                     SELECT status, progress_percent, progress_message, result, error_details
                     FROM job_queue WHERE id = :job_id
-                """), {'job_id': job_id})
+                """).execution_options(prepare=False), {'job_id': job_id})
 
                 job_data = result.fetchone()
 
@@ -501,9 +552,9 @@ async def job_status_websocket(websocket: WebSocket, job_id: str):
             # Break if job is completed
             if job_data.status in ['completed', 'failed', 'cancelled']:
                 if job_data.result:
-                    current_status["result"] = json.loads(job_data.result)
+                    current_status["result"] = _safe_json_parse(job_data.result)
                 if job_data.error_details:
-                    current_status["error_details"] = json.loads(job_data.error_details)
+                    current_status["error_details"] = _safe_json_parse(job_data.error_details)
 
                 await websocket.send_json(current_status)
                 break
@@ -518,57 +569,12 @@ async def job_status_websocket(websocket: WebSocket, job_id: str):
         await websocket.send_json({"error": "Internal error"})
 
 # ============================================================================
-# BACKGROUND TASK DISPATCH FUNCTIONS
-# ============================================================================
-
-async def dispatch_profile_analysis_to_worker(job_id: str, priority: int) -> None:
-    """Dispatch profile analysis job to appropriate worker"""
-    try:
-        from app.workers.unified_worker import celery_app
-
-        # Send to appropriate queue based on priority
-        if priority >= JobPriority.HIGH.value:
-            queue_name = 'high_priority'
-        else:
-            queue_name = 'normal_priority'
-
-        # Dispatch to Celery worker
-        celery_app.send_task(
-            'unified_worker.process_profile_analysis',
-            args=[job_id],
-            queue=queue_name,
-            routing_key=queue_name
-        )
-
-        logger.info(f"Dispatched profile analysis job {job_id} to {queue_name} queue")
-
-    except Exception as e:
-        logger.error(f"Failed to dispatch profile analysis job {job_id}: {e}")
-
-async def dispatch_post_analysis_to_worker(job_id: str) -> None:
-    """Dispatch post analysis job to worker"""
-    try:
-        from app.workers.unified_worker import celery_app
-
-        celery_app.send_task(
-            'unified_worker.process_post_analysis',
-            args=[job_id],
-            queue='cdn_processing'
-        )
-
-        logger.info(f"Dispatched post analysis job {job_id} to cdn_processing queue")
-
-    except Exception as e:
-        logger.error(f"Failed to dispatch post analysis job {job_id}: {e}")
-
-# ============================================================================
 # BULK OPERATIONS WITH THROTTLING
 # ============================================================================
 
 @router.post("/analytics/bulk/profiles")
 async def bulk_profile_analysis(
     usernames: List[str],
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_active_user)
 ) -> JSONResponse:
     """Bulk profile analysis with automatic throttling"""
@@ -588,7 +594,7 @@ async def bulk_profile_analysis(
     async with optimized_pools.get_user_session() as session:
         result = await session.execute(text("""
             SELECT credits, subscription_tier FROM users WHERE id = :user_id
-        """), {'user_id': current_user.id})
+        """).execution_options(prepare=False), {'user_id': str(current_user.id)})
 
         user_data = result.fetchone()
 
@@ -604,7 +610,7 @@ async def bulk_profile_analysis(
     # Enqueue bulk job
     enqueue_result = await job_queue.enqueue_job(
         user_id=str(current_user.id),
-        job_type='bulk_profile_analysis',
+        job_type='bulk_analysis',
         params={
             'usernames': usernames,
             'credit_cost': credit_cost,
@@ -625,11 +631,6 @@ async def bulk_profile_analysis(
             )
         )
 
-    background_tasks.add_task(
-        dispatch_bulk_analysis_to_worker,
-        enqueue_result['job_id']
-    )
-
     return JSONResponse(
         status_code=202,
         content=FastHandoffResponse.success(
@@ -640,18 +641,3 @@ async def bulk_profile_analysis(
         )
     )
 
-async def dispatch_bulk_analysis_to_worker(job_id: str) -> None:
-    """Dispatch bulk analysis to worker"""
-    try:
-        from app.workers.unified_worker import celery_app
-
-        celery_app.send_task(
-            'unified_worker.process_bulk_analysis',
-            args=[job_id],
-            queue='bulk_processing'
-        )
-
-        logger.info(f"Dispatched bulk analysis job {job_id}")
-
-    except Exception as e:
-        logger.error(f"Failed to dispatch bulk analysis job {job_id}: {e}")

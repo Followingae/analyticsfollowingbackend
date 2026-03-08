@@ -93,29 +93,48 @@ class SupabaseOptimizedPools:
                 logger.info(f"Creating {pool_name} pool: {config['pool_size']} connections")
 
                 # Create async engine optimized for Supabase (pgbouncer)
+                # NullPool is required: PGBouncer handles connection pooling,
+                # SQLAlchemy QueuePool on top causes prepared statement name conflicts
                 engine = create_async_engine(
                     supabase_url,
-                    # Basic async engine configuration
-                    pool_size=config['pool_size'],
-                    max_overflow=config['max_overflow'],
-                    pool_timeout=config['pool_timeout'],
-                    pool_recycle=config['pool_recycle'],
+                    poolclass=NullPool,  # Let PGBouncer handle pooling
                     pool_pre_ping=False,  # Disable pre-ping to avoid prepared statements
                     echo=False,  # Disable SQL logging in production
+                    query_cache_size=0,  # Disable query cache for pgbouncer
+                    execution_options={
+                        "compiled_cache": None,  # Disable compiled cache for pgbouncer
+                        "postgresql_prepared": False,  # Disable prepared statements
+                    },
                     connect_args={
-                        # Essential pgbouncer compatibility settings
-                        'statement_cache_size': 0,  # Required for pgbouncer transaction pooling
-                        'prepared_statement_cache_size': 0,  # Additional safety for prepared statements
-                        'prepared_statement_name_func': None,  # Disable named prepared statements
+                        # Only valid asyncpg parameters
+                        'statement_cache_size': 0,  # CRITICAL: disable asyncpg prepared statement cache
+                        'prepared_statement_cache_size': 0,  # CRITICAL: disable SQLAlchemy adapter's own cache
+                        'prepared_statement_name_func': lambda: '',  # CRITICAL: force UNNAMED prepared statements for PGBouncer
+                        'command_timeout': config.get('command_timeout', 30),
                         'server_settings': {
                             'application_name': config['application_name']
                         }
                     }
                 )
 
+                # Disable prepared statement support at dialect level (PGBouncer compat)
+                engine.dialect.supports_statement_cache = False
+                if hasattr(engine.dialect, 'statement_cache_size'):
+                    engine.dialect.statement_cache_size = 0
+
+                # Skip dialect.initialize version check — it runs
+                # `select pg_catalog.version()` which creates a prepared statement
+                original_initialize = engine.dialect.initialize
+
+                def skip_version_check(connection, _orig=original_initialize):
+                    engine.dialect.server_version_info = (14, 0)
+                    engine.dialect.default_schema_name = "public"
+                    engine.dialect.default_isolation_level = "READ COMMITTED"
+
+                engine.dialect.initialize = skip_version_check
+
                 # Skip connection test to avoid pgbouncer prepared statement conflicts
-                # Connection will be tested when first used
-                logger.info(f"Pool {pool_name} created successfully (connection test skipped for pgbouncer compatibility)")
+                logger.info(f"Pool {pool_name} created successfully (NullPool, zero prepared statements, unnamed only)")
 
                 # Store pool and create session maker
                 self.pools[pool_name] = engine
@@ -128,12 +147,8 @@ class SupabaseOptimizedPools:
             self.initialized = True
             logger.info("All connection pools initialized successfully")
 
-            # Log connection allocation summary
-            total_allocated = sum(
-                config['pool_size'] + config['max_overflow']
-                for config in self.pool_config.values()
-            )
-            logger.info(f"Total connections allocated: {total_allocated}/500 (Safety buffer: {500-total_allocated})")
+            # Log pool summary
+            logger.info(f"All {len(self.pool_config)} pools use NullPool (PGBouncer handles connection pooling)")
 
             return True
 
@@ -359,3 +374,33 @@ async def get_ai_db_session():
 async def get_discovery_db_session():
     """Get optimized session for discovery operations"""
     return optimized_pools.get_discovery_session()
+
+
+# FastAPI dependency — drop-in replacement for get_db() from connection.py
+async def get_db_optimized():
+    """
+    FastAPI dependency using optimized user_api pool.
+    Drop-in replacement for get_db() — same AsyncSession interface,
+    but uses the dedicated user_api pool instead of the shared single pool.
+    """
+    if not optimized_pools.initialized:
+        await optimized_pools.initialize_pools()
+
+    session_maker = optimized_pools.session_makers.get('user_api')
+    if not session_maker:
+        # Fallback to connection.py get_db if pools not available
+        from app.database.connection import get_db
+        async for session in get_db():
+            yield session
+        return
+
+    session = session_maker()
+    try:
+        yield session
+        if session.in_transaction() and session.is_active:
+            await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()

@@ -12,7 +12,7 @@ from pydantic import BaseModel, EmailStr, Field
 import logging
 
 from app.middleware.auth_middleware import get_current_active_user, require_admin
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import (
     User, Team, TeamMember, CreditWallet, CreditTransaction,
     UserProfileAccess, Profile, Post,

@@ -1,38 +1,36 @@
 # Analytics Following Backend
 
-Instagram analytics platform backend. FastAPI + PostgreSQL (Supabase) + Redis + AI/ML pipeline.
+Instagram analytics & influencer management platform. FastAPI + Supabase + Redis + AI/ML.
 
 ## Tech Stack
 
-- **Backend**: FastAPI (async), SQLAlchemy (async), asyncpg
-- **Database**: PostgreSQL via Supabase (RLS enabled on all tables)
-- **Cache**: Redis (profile 24h, posts 12h, AI results 7d)
-- **Background**: Celery with Redis broker
-- **AI Models**: HuggingFace transformers (sentiment, language detection, content classification)
-- **CDN**: Cloudflare R2 for thumbnail storage
-- **External API**: Decodo (Instagram data via Apify)
-- **Auth**: Supabase Auth + JWT
+- **Runtime**: FastAPI (async), SQLAlchemy (async), asyncpg
+- **Database**: PostgreSQL via Supabase — project ref: `vkbuxemkprorqxmzzkuu`, region: `ap-south-1`
+- **Cache**: Redis (profiles 24h, posts 12h, AI 7d)
+- **Background**: Celery + Redis broker
+- **AI**: HuggingFace transformers (sentiment, language, classification) — singleton pattern
+- **CDN**: Cloudflare R2 (thumbnails)
+- **External API**: Decodo/Apify (Instagram data)
+- **Auth**: Supabase Auth + JWT, resilient auth service with caching
+- **Payments**: Stripe (infrastructure ready, not live)
 
 ## Project Structure
 
 ```
 app/
   api/              # Route handlers (FastAPI routers)
-  services/         # Business logic layer
-    ai/             # AI model services
-    background/     # Background processors (discovery, etc.)
+    admin/          # Superadmin routes (proposals, user mgmt, influencer DB)
+  services/         # Business logic
+    ai/             # AI model services (sentiment, language, classification)
   core/             # Config, settings, constants
-  database/         # DB connection, session management
-  models/           # SQLAlchemy models
-  middleware/       # Auth, credit gates, rate limiting
-  cache/            # Redis cache layer
-  resilience/       # Circuit breakers, retry strategies
-  integrations/     # Cloudflare, external API clients
-  monitoring/       # Health checks, metrics
-scripts/            # CLI tools (repair, discovery, debugging)
+  database/         # DB connection, session management, models (unified_models.py)
+  middleware/       # Auth, credit gates, rate limiting, team auth, brand access
+  workers/          # Background workers (AI, CDN, post analytics)
+scripts/            # CLI tools
+migrations/         # SQL migration scripts
 ```
 
-## Key Database Tables (19 active, Supabase project: `xyzltfollowinganalytics`)
+## Key Database Tables
 
 | Group | Tables |
 |-------|--------|
@@ -40,40 +38,42 @@ scripts/            # CLI tools (repair, discovery, debugging)
 | Users | `users`, `auth_users`, `user_profile_access`, `user_roles` |
 | Credits | `credit_packages`, `credit_wallets`, `credit_pricing_rules` |
 | Teams | `teams`, `team_members`, `monthly_usage_tracking`, `team_profile_access` |
+| Proposals | `campaign_proposals`, `proposal_influencers` |
+| Influencer CRM | `influencer_database` (master DB with cost/sell pricing per deliverable) |
 | CDN | `cdn_image_assets`, `cdn_image_jobs`, `cdn_processing_stats` |
 | System | `system_configurations`, `list_templates` |
 
-All tables have RLS policies and 80+ performance indexes.
+All tables have RLS policies. Models defined in `app/database/unified_models.py`.
 
 ## Core Data Pipeline
 
 ```
-Instagram username -> Decodo/Apify API -> profiles + posts tables
-  -> CDN processing (thumbnails to R2)
-  -> AI analysis (sentiment, language, category per post)
-  -> Profile-level AI aggregation
+Instagram username → Decodo/Apify API → profiles + posts
+  → CDN (thumbnails → R2) → AI analysis (sentiment, language, category)
+  → Profile-level aggregation
 ```
 
-**New creator**: ~160s (full pipeline). **Unlocked creator**: <1s (DB fast path).
+New creator: ~160s full pipeline. Unlocked creator: <1s DB fast path.
 
-## Profile Completeness Criteria
+## Proposal System
 
-A profile is "complete" when:
-1. `followers_count > 0` and `posts_count > 0`
-2. 12+ posts stored with AI analysis (`ai_content_category`, `ai_sentiment`, `ai_language_code`)
-3. `ai_profile_analyzed_at IS NOT NULL`
-4. 12+ posts have `cdn_thumbnail_url`
-5. Demographics optional (not populated yet)
+Admin creates proposals for brands with curated influencer lists.
 
-## Creator Analytics Response (5 sections)
+**Flow**: `draft → sent → in_review → approved/rejected/more_requested`
 
-Single endpoint: `GET /api/v1/search/creator/{username}`
+**Key files**:
+- `app/api/campaign_proposal_routes.py` — brand-facing endpoints
+- `app/api/admin/admin_proposal_routes.py` — admin CRUD
+- `app/services/campaign_proposals_service.py` — business logic
+- `app/database/unified_models.py` — `CampaignProposal`, `ProposalInfluencer`
 
-1. **Overview**: Profile data, followers, engagement, AI content classification
-2. **Audience**: Demographics, language distribution, authenticity, fraud detection
-3. **Engagement**: Behavioral patterns, sentiment, post-level metrics
-4. **Content**: Visual analysis, content distribution, trends, NLP
-5. **Posts**: 12+ posts with individual AI analysis and CDN thumbnails
+**Per-influencer data**:
+- Price snapshots frozen at creation (`sell_price_snapshot`, `cost_price_snapshot`)
+- Custom overrides via `custom_sell_pricing`
+- Brand selection: `selected_by_user`, `selected_deliverables` (JSONB array)
+- 7 deliverable types: post, story, reel, carousel, video, bundle, monthly
+
+**Pricing**: Stored as USD cents in `influencer_database` (`sell_post_usd_cents`, `cost_reel_usd_cents`, etc.). Sell pricing priority: `custom_sell_pricing > sell_price_snapshot > {}`.
 
 ## Credit System
 
@@ -82,65 +82,52 @@ Single endpoint: `GET /api/v1/search/creator/{username}`
 | Profile unlock | 25 credits (30-day access) |
 | Post analytics | 5 credits |
 | Discovery page | 1 credit |
-| Email unlock | 1 credit |
 | Campaign analysis | 10 credits |
 | Bulk export | 50 credits |
 
-Credit gate decorator: `@requires_credits("action_type")`
+Decorator: `@requires_credits("action_type")`
 
 ## Subscription Plans
 
-| Plan | Price | Team | Monthly Profiles | Topup Discount |
-|------|-------|------|-----------------|----------------|
-| Free | $0 | 1 | 5 | 0% |
-| Standard | $199 | 2 | 500 | 0% |
-| Premium | $499 | 5 | 2,000 | 20% |
+| Plan | Price | Team Size | Monthly Profiles |
+|------|-------|-----------|-----------------|
+| Free | $0 | 1 | 5 |
+| Standard | $199 | 2 | 500 |
+| Premium | $499 | 5 | 2,000 |
 
-## Key API Route Prefixes
+## Creator Analytics
 
-- `/auth/` - Authentication (Supabase)
-- `/credits/` or `/api/v1/credits/` - Credit management
-- `/instagram/` - Profile and post analytics
-- `/api/v1/search/creator/` - Creator analytics
-- `/api/v1/discovery/` - Profile discovery and browsing
-- `/api/v1/cloudflare/` - Infrastructure monitoring
-- `/api/v1/admin/repair/` - Admin profile repair tools
-- `/api/health` - Health check
-- `/settings/` - User settings
+"Creator Analytics" refers to the `/creator-analytics/[username]` page. It serves **two audiences**:
+- **Brand users**: See analytics for unlocked creators (25 credits). No cost pricing, no internal notes.
+- **Superadmin**: Sees the same analytics page PLUS a collapsible `SuperadminIMDPanel` showing cost/sell pricing, margins, tier, status, tags, internal notes, and an edit button — if the creator exists in the master database. Superadmins bypass the unlock gate entirely (no credits spent).
 
-## AI Models
+Key files:
+- Backend: `main.py` (search endpoint), `app/services/creator_search_response_builder.py` (response builders)
+- Frontend: `src/components/analytics/ComprehensiveCreatorAnalytics.tsx`, `creator-tabs/` (4 tabs), `SuperadminIMDPanel.tsx`
 
-- **Sentiment**: `cardiffnlp/twitter-roberta-base-sentiment-latest`
-- **Language**: `papluca/xlm-roberta-base-language-detection`
-- **Classification**: `facebook/bart-large-mnli`
+## Key API Routes
 
-Models use singleton pattern with global caching. Background processing via Celery.
-
-## Discovery System
-
-Background processor auto-discovers similar profiles from `related_profiles` table. Hooks in:
-- `main.py` - after creator analytics completes
-- `comprehensive_service.py` - when related profiles are stored
-- `post_analytics_service.py` - after post analysis
-
-Config: `DISCOVERY_ENABLED`, max 3 concurrent, 1000/day rate limit, min 1K followers.
+- `/api/v1/auth/` — Authentication, dashboard, unlocked profiles
+- `/api/v1/credits/` — Credit wallet, pricing
+- `/api/v1/search/creator/{username}` — Creator analytics (5 sections)
+- `/api/v1/discovery/` — Profile browsing
+- `/api/v1/campaigns/proposals` — Brand proposal views
+- `/api/v1/campaigns/proposals/{id}/influencers` — Selection + deliverables
+- `/api/v1/teams/` — Team management
+- `/api/v1/admin/` — Superadmin operations
+- `/health` — Health check
 
 ## User Accounts
 
 - **Brand**: `client@analyticsfollowing.com` (Premium, 5K credits)
+- **Brand**: `gabe@logitech.com` (Standard)
 - **Admin**: `zain@following.ae` (Admin, 100K credits)
 
 ## Conventions
 
-- All functions use type hints
-- Async/await throughout
-- Comprehensive error handling with logging
-- Circuit breakers on all external dependencies
-- Cache expensive operations (>100ms)
-- RLS on every table; functions use `SECURITY DEFINER` with `SET search_path`
-
-## Pending Work
-
-- Stripe payment processing (infrastructure ready, not live)
-- Auth leaked password protection (requires Supabase dashboard toggle)
-- 31 unused tables available for cleanup
+- Async/await throughout, type hints on all functions
+- Circuit breakers on external dependencies
+- RLS on every table; DB functions use `SECURITY DEFINER` with `SET search_path`
+- Cache operations >100ms
+- Auth: resilient auth service caches JWT validations and user sessions
+- Never expose cost pricing to brands — only sell pricing (gated by `visible_fields`)

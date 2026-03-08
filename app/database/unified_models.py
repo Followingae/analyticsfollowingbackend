@@ -724,9 +724,19 @@ class CampaignCreator(Base):
     # Creator metadata
     added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+    # Proposal data carried over on approval
+    influencer_db_id = Column(UUID(as_uuid=True), ForeignKey('influencer_database.id', ondelete='SET NULL'), nullable=True)
+    assigned_deliverables = Column(JSONB, default=list)  # From proposal: [{"type": "reel", "quantity": 2}]
+    selected_deliverables = Column(JSONB, default=list)  # Brand's selection: ["reel", "story"]
+    sell_price_snapshot = Column(JSONB, default=dict)
+    cost_price_snapshot = Column(JSONB, default=dict)
+    deliverable_total_sell = Column(Numeric(12, 2))
+    deliverable_total_cost = Column(Numeric(12, 2))
+
     # Relationships
     campaign = relationship("Campaign", back_populates="campaign_creators")
     profile = relationship("Profile", back_populates="campaign_creators")
+    influencer_db = relationship("InfluencerDatabase")
 
     __table_args__ = (
         UniqueConstraint('campaign_id', 'profile_id', name='unique_campaign_creator'),
@@ -910,13 +920,31 @@ class CampaignProposal(Base):
     proposal_type = Column(String(50), default='influencer_list')  # influencer_list | campaign_package
 
     # Status tracking
-    status = Column(String(20), nullable=False, default='draft')  # draft, sent, in_review, approved, rejected
+    status = Column(String(20), nullable=False, default='draft')
 
     # Budget & metrics
     total_budget = Column(Numeric(12, 2))
     expected_reach = Column(BigInteger)
     avg_engagement_rate = Column(Numeric(5, 2))
     estimated_impressions = Column(BigInteger)
+
+    # Visibility controls for brand view
+    visible_fields = Column(JSONB, default=lambda: {"show_sell_pricing": True, "show_analytics": True, "show_engagement": True, "show_audience": True, "show_content_analysis": True})
+
+    # Brand interaction fields
+    brand_notes = Column(Text)
+    request_more_notes = Column(Text)
+    request_more_at = Column(DateTime(timezone=True))
+    more_added_at = Column(DateTime(timezone=True))
+
+    # Financial aggregates
+    total_cost_amount = Column(Numeric(12, 2))
+    total_sell_amount = Column(Numeric(12, 2))
+    margin_percentage = Column(Numeric(5, 2))
+
+    # Presentation
+    cover_image_url = Column(Text)
+    deadline_at = Column(DateTime(timezone=True))
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -934,7 +962,7 @@ class CampaignProposal(Base):
     campaigns = relationship("Campaign", back_populates="proposal")
 
     __table_args__ = (
-        CheckConstraint("status IN ('draft', 'sent', 'in_review', 'approved', 'rejected')", name='proposal_status_check'),
+        CheckConstraint("status IN ('draft', 'sent', 'in_review', 'approved', 'rejected', 'more_requested')", name='proposal_status_check'),
         CheckConstraint("proposal_type IN ('influencer_list', 'campaign_package')", name='proposal_type_check'),
         Index('idx_proposals_user_id', 'user_id'),
         Index('idx_proposals_status', 'status'),
@@ -949,29 +977,48 @@ class ProposalInfluencer(Base):
     # Primary identification
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
     proposal_id = Column(UUID(as_uuid=True), ForeignKey('campaign_proposals.id', ondelete='CASCADE'), nullable=False, index=True)
-    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=False, index=True)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey('profiles.id', ondelete='CASCADE'), nullable=True, index=True)
+
+    # Link to master influencer database
+    influencer_db_id = Column(UUID(as_uuid=True), ForeignKey('influencer_database.id', ondelete='SET NULL'), nullable=True)
 
     # Superadmin's suggestion
-    estimated_cost = Column(Numeric(12, 2))  # Estimated cost for this influencer
+    estimated_cost = Column(Numeric(12, 2))
     suggested_by_admin = Column(Boolean, default=True)
 
+    # Price snapshots (frozen at proposal-creation time)
+    sell_price_snapshot = Column(JSONB, default=dict)
+    cost_price_snapshot = Column(JSONB, default=dict)
+    custom_sell_pricing = Column(JSONB)
+
+    # Admin internal notes
+    admin_notes = Column(Text)
+
+    # Display ordering
+    priority_order = Column(Integer, default=0)
+
     # User's selection
-    selected_by_user = Column(Boolean, default=False)  # User selected this influencer
-    selection_notes = Column(Text)  # User notes about selection/deselection
+    selected_by_user = Column(Boolean, default=False)
+    selected_deliverables = Column(JSONB, default=list)  # e.g. ["post", "reel", "story"]
+    assigned_deliverables = Column(JSONB, default=list)  # Admin-defined: [{"type": "reel", "quantity": 2}, {"type": "story", "quantity": 1}]
+    selection_notes = Column(Text)
 
     # Timestamps
     added_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    selected_at = Column(DateTime(timezone=True))  # When user selected
+    selected_at = Column(DateTime(timezone=True))
 
     # Relationships
     proposal = relationship("CampaignProposal", back_populates="proposal_influencers")
     profile = relationship("Profile")
+    influencer_db = relationship("InfluencerDatabase")
 
     __table_args__ = (
-        UniqueConstraint('proposal_id', 'profile_id', name='unique_proposal_influencer'),
+        UniqueConstraint('proposal_id', 'influencer_db_id', name='unique_proposal_influencer_v2'),
         Index('idx_proposal_influencers_proposal_id', 'proposal_id'),
         Index('idx_proposal_influencers_profile_id', 'profile_id'),
         Index('idx_proposal_influencers_selected', 'selected_by_user'),
+        Index('idx_proposal_inf_db_id', 'influencer_db_id'),
+        Index('idx_proposal_inf_priority', 'proposal_id', 'priority_order'),
     )
 
 
@@ -1730,30 +1777,31 @@ class CreditUsageTracking(Base):
     
     # Primary identification
     id = Column(BigInteger, primary_key=True, autoincrement=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
-    
+    # Auth UUID (matches credit_wallets.user_id) — no FK constraint to allow auth UUID storage
+    user_id = Column(UUID(as_uuid=True), nullable=False, index=True)
+
     # Usage details
     feature_used = Column(String(50), nullable=False, index=True)
     credits_consumed = Column(Integer, nullable=False)
-    
+
     # Context tracking
     profile_username = Column(String(100), nullable=True, index=True)
     session_identifier = Column(UUID(as_uuid=True), nullable=True, index=True)
-    
+
     # Pricing information at time of use
     cost_per_action = Column(Integer, nullable=False)
     pricing_rule_used = Column(String(100), nullable=True)
-    
+
     # Billing cycle tracking
     billing_cycle_date = Column(Date, nullable=False, index=True)
-    
+
     # Success tracking
     action_successful = Column(Boolean, default=True, nullable=False)
     error_message = Column(Text, nullable=True)
-    
+
     # Timestamps
     used_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    
+
     # Database constraints and indexes
     __table_args__ = (
         CheckConstraint('credits_consumed > 0', name='check_credits_consumed_positive'),
@@ -2139,6 +2187,15 @@ class InfluencerDatabase(Base):
     last_analytics_refresh = Column(DateTime(timezone=True))
     added_by = Column(UUID(as_uuid=True))
 
+    # Analytics pipeline tracking
+    analytics_status = Column(String(20), default='pending')
+    analytics_job_id = Column(UUID(as_uuid=True))
+    analytics_error = Column(Text)
+    analytics_completed_at = Column(DateTime(timezone=True))
+    analytics_queued_at = Column(DateTime(timezone=True))
+    analytics_progress = Column(Integer, default=0)
+    analytics_progress_message = Column(Text)
+
     # Timestamps
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
@@ -2150,6 +2207,8 @@ class InfluencerDatabase(Base):
         Index('idx_influencer_db_engagement', 'engagement_rate'),
         Index('idx_influencer_db_status', 'status'),
         Index('idx_influencer_db_username', 'username'),
+        Index('idx_imd_analytics_status', 'analytics_status'),
+        Index('idx_imd_analytics_job', 'analytics_job_id'),
     )
 
 

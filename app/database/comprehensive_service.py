@@ -524,10 +524,54 @@ class ComprehensiveDataService:
             )
             followers_count = profile_result.scalar() or 0
             print(f" DATABASE: Profile has {followers_count} followers for engagement calculation")
-            
+
+            # CRITICAL: Delete old posts NOT in current Apify batch (replace, don't accumulate)
+            # Collect shortcodes from current batch
+            batch_shortcodes = []
+            for pe in posts_edges:
+                sc = pe.get('node', {}).get('shortcode')
+                if sc:
+                    batch_shortcodes.append(sc)
+
+            if batch_shortcodes:
+                from sqlalchemy import text as sa_text
+
+                # Get instagram_post_ids of posts being deleted (for CDN cleanup)
+                old_posts_q = await db.execute(
+                    select(Post.instagram_post_id).where(
+                        Post.profile_id == profile_id,
+                        Post.shortcode.notin_(batch_shortcodes)
+                    )
+                )
+                old_post_ids = [row[0] for row in old_posts_q.fetchall() if row[0]]
+
+                if old_post_ids:
+                    logger.info(f"DATABASE: Replacing {len(old_post_ids)} old posts not in current Apify batch")
+
+                    # Clean up CDN assets for old posts (cascade deletes cdn_image_jobs)
+                    await db.execute(
+                        sa_text("""
+                            DELETE FROM cdn_image_assets
+                            WHERE source_type = 'post_thumbnail'
+                            AND source_id = CAST(:profile_id AS uuid)
+                            AND media_id = ANY(:old_ids)
+                        """).execution_options(prepare=False),
+                        {"profile_id": str(profile_id), "old_ids": old_post_ids}
+                    )
+
+                    # Delete old posts (cascade deletes comment_sentiment, campaign_posts)
+                    await db.execute(
+                        delete(Post).where(
+                            Post.profile_id == profile_id,
+                            Post.shortcode.notin_(batch_shortcodes)
+                        )
+                    )
+                    await db.flush()
+                    logger.info(f"DATABASE: Deleted {len(old_post_ids)} old posts + CDN assets")
+
             posts_created = 0
             posts_skipped = 0
-            
+
             for i, post_edge in enumerate(posts_edges, 1):
                 post_node = post_edge.get('node', {})
                 shortcode = post_node.get('shortcode')
@@ -1501,8 +1545,8 @@ class ComprehensiveDataService:
                     "posts_count": row_dict.get('posts_count', 0),
                     "is_verified": row_dict.get('is_verified', False),
                     "is_private": row_dict.get('is_private', False),
-                    "engagement_rate": float(row_dict.get('engagement_rate', 0)),
-                    "influence_score": float(row_dict.get('influence_score', 0)),
+                    "engagement_rate": float(row_dict.get('engagement_rate') or 0),
+                    "influence_score": float(row_dict.get('influence_score') or 0),
 
                     # Access information from UserProfileAccess record (30-day system)
                     "access_granted_at": row_dict['granted_at'].isoformat() if row_dict.get('granted_at') else None,
@@ -1747,7 +1791,7 @@ class ComprehensiveDataService:
             # Map auth.users.id to public.users.id for foreign key constraint
             print(f" TEAM ACCESS: Mapping Supabase user {user_id} to public users table...")
             public_user_result = await db.execute(
-                select(User.id).where(User.supabase_user_id == str(user_id))
+                select(User.id).where(or_(User.id == str(user_id), User.supabase_user_id == str(user_id)))
             )
             public_user_id = public_user_result.scalar_one_or_none()
             
@@ -1959,18 +2003,28 @@ class ComprehensiveDataService:
                 "posts": []
             }
 
-            # Get posts for content analysis if available
-            posts_data = user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
-            for post_edge in posts_data[:20]:  # Analyze up to 20 recent posts
-                post_node = post_edge.get("node", {})
-                caption_edges = post_node.get("edge_media_to_caption", {}).get("edges", [])
-                caption = ""
-                if caption_edges:
-                    caption = caption_edges[0].get("node", {}).get("text", "")
+            # Get posts for content analysis — fetch from DB (posts already stored at this point)
+            # This is more reliable than parsing raw Apify format variants
+            from sqlalchemy import text as sa_text
+            posts_result = await db.execute(
+                sa_text("SELECT caption FROM posts WHERE profile_id = :pid AND caption IS NOT NULL ORDER BY created_at DESC LIMIT 20").execution_options(prepare=False),
+                {"pid": str(profile_id)}
+            )
+            for row in posts_result.fetchall():
+                if row[0]:
+                    profile_data_for_detection["posts"].append({"caption": row[0]})
 
-                profile_data_for_detection["posts"].append({
-                    "caption": caption
-                })
+            # Fallback: also try raw Apify data if DB had no posts yet
+            if not profile_data_for_detection["posts"]:
+                posts_data = user_data.get("edge_owner_to_timeline_media", {}).get("edges", [])
+                for post_edge in posts_data[:20]:
+                    post_node = post_edge.get("node", {})
+                    caption_edges = post_node.get("edge_media_to_caption", {}).get("edges", [])
+                    caption = ""
+                    if caption_edges:
+                        caption = caption_edges[0].get("node", {}).get("text", "")
+                    if caption:
+                        profile_data_for_detection["posts"].append({"caption": caption})
 
             # Add audience data if available (this would come from separate analysis)
             # For now, we'll skip audience data since it's not in the standard Apify response

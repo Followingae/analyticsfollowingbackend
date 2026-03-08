@@ -10,14 +10,16 @@ import logging
 
 from app.models.auth import UserInDB
 from app.middleware.auth_middleware import get_current_active_user
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.services.campaign_ai_insights_service import campaign_ai_insights_service
+from app.middleware.credit_gate import requires_credits
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/campaigns", tags=["Campaign AI Insights"])
 
 
 @router.get("/{campaign_id}/ai-insights")
+@requires_credits("campaign_analysis", credits_required=10)
 async def get_campaign_ai_insights(
     campaign_id: UUID,
     current_user: UserInDB = Depends(get_current_active_user),

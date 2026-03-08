@@ -432,11 +432,15 @@ class DiscoveryService:
                     unlock_reason=unlock_reason,
                     transaction_id=transaction.id
                 )
-                
+
                 session.add(unlock_record)
+
+                # Record team and monthly usage tracking
+                await self._record_profile_usage(session, user_id)
+
                 await session.commit()
                 await session.refresh(unlock_record)
-                
+
                 return {
                     "unlocked": True,
                     "unlock_id": unlock_record.id,
@@ -449,7 +453,75 @@ class DiscoveryService:
         except Exception as e:
             logger.error(f"Error unlocking profile {profile_id} for user {user_id}: {e}")
             raise
-    
+
+    async def _record_profile_usage(
+        self,
+        db: AsyncSession,
+        user_id: UUID
+    ) -> None:
+        """
+        Record profile unlock usage in team-level and individual-level tracking.
+
+        Updates:
+        1. teams.profiles_used_this_month (read by /auth/dashboard for usage display)
+        2. monthly_usage_tracking.profiles_analyzed (individual member tracking)
+        """
+        from app.database.unified_models import TeamMember, MonthlyUsageTracking
+        from datetime import date
+
+        try:
+            team_query = select(TeamMember).where(TeamMember.user_id == user_id)
+            team_result = await db.execute(team_query)
+            team_member = team_result.scalar_one_or_none()
+
+            if not team_member:
+                logger.warning(f"[USAGE] User {user_id} has no team membership - skipping team usage tracking")
+                return
+
+            team_id = team_member.team_id
+
+            # 1. Increment team-level counter
+            await db.execute(
+                text(
+                    "UPDATE teams SET profiles_used_this_month = profiles_used_this_month + 1, "
+                    "updated_at = now() WHERE id = :team_id"
+                ),
+                {"team_id": str(team_id)}
+            )
+
+            # 2. Upsert monthly_usage_tracking for the user
+            current_month = date.today().replace(day=1)
+            usage_query = select(MonthlyUsageTracking).where(
+                and_(
+                    MonthlyUsageTracking.team_id == team_id,
+                    MonthlyUsageTracking.user_id == user_id,
+                    MonthlyUsageTracking.billing_month == current_month
+                )
+            )
+            usage_result = await db.execute(usage_query)
+            usage_record = usage_result.scalar_one_or_none()
+
+            if usage_record:
+                usage_record.profiles_analyzed += 1
+                usage_record.updated_at = datetime.utcnow()
+            else:
+                usage_record = MonthlyUsageTracking(
+                    id=uuid4(),
+                    team_id=team_id,
+                    user_id=user_id,
+                    billing_month=current_month,
+                    profiles_analyzed=1,
+                    emails_unlocked=0,
+                    posts_analyzed=0
+                )
+                db.add(usage_record)
+
+            logger.info(f"[USAGE] Recorded profile usage for user {user_id} in team {team_id}")
+
+        except Exception as e:
+            logger.error(f"[USAGE] Failed to record profile usage for user {user_id}: {e}")
+            # Don't raise -- usage tracking failure should not block the unlock
+
     async def get_user_unlocked_profiles(
         self,
         user_id: UUID,

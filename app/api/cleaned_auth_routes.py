@@ -23,7 +23,7 @@ from app.services.resilient_auth_service import resilient_auth_service
 from app.middleware.auth_middleware import (
     get_current_user, get_current_active_user, require_admin, security
 )
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import User
 from app.database.comprehensive_service import comprehensive_service
 
@@ -400,12 +400,12 @@ async def get_current_user_profile(
                        timezone, language, updated_at
                 FROM users
                 WHERE supabase_user_id = :user_id
-            """), {"user_id": current_user.id})
-            
+            """), {"user_id": current_user.supabase_user_id})
+
             user_row = result.fetchone()
-            
+
             if not user_row:
-                logger.warning(f"AUTH-ME: User not found in database: {current_user.id}")
+                logger.warning(f"AUTH-ME: User not found in database: {current_user.supabase_user_id}")
                 # Use data from current_user (from Supabase) if not in database
                 return UserResponse(
                     id=current_user.id,
@@ -595,7 +595,7 @@ async def get_user_dashboard(
                        avatar_config, company, job_title, phone_number, bio,
                        timezone, language, updated_at
                 FROM users
-                WHERE supabase_user_id = '{current_user.id}'
+                WHERE supabase_user_id = '{current_user.supabase_user_id}'
                 LIMIT 1
             """
             user_result = await db_session.execute(text(user_query))
@@ -642,7 +642,7 @@ async def get_user_dashboard(
                 FROM teams t
                 JOIN team_members tm ON t.id = tm.team_id
                 JOIN users u ON tm.user_id = u.id
-                WHERE u.supabase_user_id = '{current_user.id}'
+                WHERE u.supabase_user_id = '{current_user.supabase_user_id}'
                 LIMIT 1
             """
             team_result = await db_session.execute(text(team_query))
@@ -685,6 +685,21 @@ async def get_user_dashboard(
                 elif user_row.role == "standard":
                     limits = {"profiles": 500, "emails": 250, "posts": 125}
 
+                # For non-team users: count profile unlocks this month from user_profile_access
+                try:
+                    individual_usage_query = f"""
+                        SELECT COUNT(*) as profiles_used
+                        FROM user_profile_access
+                        WHERE user_id = '{user_row.id}'
+                        AND granted_at >= date_trunc('month', CURRENT_DATE)
+                    """
+                    individual_usage_result = await db_session.execute(text(individual_usage_query))
+                    individual_row = individual_usage_result.fetchone()
+                    if individual_row:
+                        usage = {"profiles": individual_row.profiles_used or 0, "emails": 0, "posts": 0}
+                except Exception as usage_err:
+                    logger.warning(f"Could not get individual usage: {usage_err}")
+
             subscription_info = SubscriptionInfo(
                 tier=resolved_tier,
                 limits=limits,
@@ -693,7 +708,7 @@ async def get_user_dashboard(
             )
 
             # Get dashboard statistics
-            stats = await auth_service.get_user_dashboard_stats(current_user.id, db_session)
+            stats = await auth_service.get_user_dashboard_stats(current_user.supabase_user_id, db_session)
             stats_dict = {
                 "total_searches": stats.total_searches,
                 "searches_this_month": stats.searches_this_month,
@@ -745,7 +760,7 @@ async def get_unlocked_profiles(
         page_size = min(page_size, 50)
         
         unlocked_profiles = await comprehensive_service.get_user_unlocked_profiles(
-            db, current_user.id, page, page_size
+            db, current_user.supabase_user_id, page, page_size
         )
         
         return JSONResponse(content=unlocked_profiles)
@@ -781,7 +796,7 @@ async def get_search_history(
             page_size = 100
         
         searches = await auth_service.get_user_search_history(
-            current_user.id, page, page_size
+            current_user.supabase_user_id, page, page_size
         )
         
         # Calculate pagination info

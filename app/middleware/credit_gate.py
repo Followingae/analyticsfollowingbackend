@@ -71,7 +71,7 @@ def requires_credits(
                 try:
                     from app.database.connection import get_session
                     from app.database.unified_models import UnlockedInfluencer, Profile, User
-                    from sqlalchemy import select, and_
+                    from sqlalchemy import select, and_, or_
                     
                     profile_identifier = None
                     lookup_type = None
@@ -87,8 +87,8 @@ def requires_credits(
                     
                     if profile_identifier:
                         async with get_session() as session:
-                            # CRITICAL FIX: Get the correct database user ID first
-                            user_query = select(User.id).where(User.supabase_user_id == str(user_id))
+                            # Look up app user by id or supabase_user_id
+                            user_query = select(User.id).where(or_(User.id == str(user_id), User.supabase_user_id == str(user_id)))
                             user_result = await session.execute(user_query)
                             database_user_id = user_result.scalar_one_or_none()
                             
@@ -351,24 +351,21 @@ async def _create_profile_access_records(user_id: UUID, username: str, credits_s
     """
     from app.database.connection import get_session
     from app.database.unified_models import Profile, UnlockedInfluencer, UserProfileAccess
-    from sqlalchemy import select
+    from sqlalchemy import select, or_
     from datetime import datetime, timezone, timedelta
-    
+
     async with get_session() as db:
         try:
-            # CRITICAL FIX: Handle mixed user ID requirements
-            # unlocked_influencers uses Supabase user ID (auth.users)
-            # user_profile_access uses database user ID (users table)
             supabase_user_id = user_id
-            
-            # Get database user ID for user_profile_access table
+
+            # Look up app user by id or supabase_user_id
             from app.database.unified_models import User
-            user_query = select(User.id).where(User.supabase_user_id == str(user_id))
+            user_query = select(User.id).where(or_(User.id == str(user_id), User.supabase_user_id == str(user_id)))
             user_result = await db.execute(user_query)
             database_user_id = user_result.scalar_one_or_none()
-            
+
             if not database_user_id:
-                logger.error(f"No database user found for Supabase ID {user_id}")
+                logger.error(f"No database user found for user_id={user_id}")
                 return
                 
             logger.info(f"Using Supabase ID {supabase_user_id} for unlocked_influencers, Database ID {database_user_id} for user_profile_access")

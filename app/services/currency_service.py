@@ -11,7 +11,7 @@ from sqlalchemy import select, and_
 from fastapi import HTTPException
 import logging
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import (
     TeamCurrencySettings,
     Team,

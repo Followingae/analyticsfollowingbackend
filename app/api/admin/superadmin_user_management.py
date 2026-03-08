@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel, EmailStr, Field
 import logging
 
-from app.database.connection import get_db
+from app.database.optimized_pools import get_db_optimized as get_db
 from app.database.unified_models import User, CreditWallet, CreditTransaction
 from app.models.subscription import (
     SubscriptionTier, UserRole, BillingType,
