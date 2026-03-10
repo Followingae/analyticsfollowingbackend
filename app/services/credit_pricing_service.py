@@ -628,56 +628,52 @@ class CreditPricingService:
             current_month = date.today().replace(day=1)
             
             async with get_session() as session:
-                # Get usage statistics
+                # Get usage statistics using actual schema columns
                 usage_result = await session.execute(
                     text("""
-                        SELECT 
-                            action_type,
+                        SELECT
+                            feature_used as action_type,
                             COUNT(DISTINCT user_id) as unique_users,
-                            SUM(free_actions_used) as total_free_actions,
-                            SUM(paid_actions_used) as total_paid_actions,
-                            SUM(total_credits_spent) as total_credits_spent,
-                            AVG(total_credits_spent) as avg_credits_per_user
+                            COUNT(*) as total_actions,
+                            SUM(credits_consumed) as total_credits_spent,
+                            AVG(credits_consumed) as avg_credits_per_user
                         FROM public.credit_usage_tracking
-                        WHERE month_year = :current_month
-                        GROUP BY action_type
+                        WHERE billing_cycle_date = :current_month
+                          AND action_successful = true
+                        GROUP BY feature_used
                         ORDER BY total_credits_spent DESC
                     """),
                     {"current_month": current_month}
                 )
-                
+
                 usage_data = usage_result.fetchall()
-                
+
                 # Get pricing rules for reference
                 rules = await self.get_all_pricing_rules()
                 rules_dict = {rule.action_type: rule for rule in rules}
-                
+
                 action_analytics = []
                 total_revenue = 0
-                
+
                 for row in usage_data:
                     rule = rules_dict.get(row.action_type)
                     if not rule:
                         continue
-                    
+
                     action_analytics.append({
                         "action_type": row.action_type,
                         "display_name": rule.display_name,
                         "cost_per_action": rule.cost_per_action,
                         "free_allowance": rule.free_allowance_per_month,
                         "unique_users": row.unique_users,
-                        "total_free_actions": row.total_free_actions,
-                        "total_paid_actions": row.total_paid_actions,
+                        "total_free_actions": 0,
+                        "total_paid_actions": row.total_actions,
                         "total_credits_spent": row.total_credits_spent,
                         "avg_credits_per_user": float(row.avg_credits_per_user or 0),
-                        "conversion_rate": (
-                            row.total_paid_actions / (row.total_free_actions + row.total_paid_actions)
-                            if (row.total_free_actions + row.total_paid_actions) > 0
-                            else 0
-                        )
+                        "conversion_rate": 1.0
                     })
-                    
-                    total_revenue += row.total_credits_spent
+
+                    total_revenue += (row.total_credits_spent or 0)
                 
                 analytics = {
                     "period": current_month.isoformat(),

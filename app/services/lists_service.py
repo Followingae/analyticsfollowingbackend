@@ -200,20 +200,24 @@ class ListsService:
             lists = result.scalars().all()
             
             # Convert to response models
+            # Helper to exclude ORM internals and relationship attrs from __dict__
+            def _clean(obj, exclude=()):
+                return {k: v for k, v in obj.__dict__.items() if not k.startswith('_') and k not in exclude}
+
             if include_items:
                 list_data = [
                     UserListResponse(
-                        **list_obj.__dict__,
+                        **_clean(list_obj, exclude=('list_items',)),
                         items=[
                             UserListItemResponse(
-                                **item.__dict__,
-                                profile=ProfileSummary(**item.profile.__dict__)
+                                **_clean(item, exclude=('profile',)),
+                                profile=ProfileSummary(**_clean(item.profile))
                             ) for item in sorted(list_obj.list_items, key=lambda x: x.position)
                         ]
                     ) for list_obj in lists
                 ]
             else:
-                list_data = [UserListSummary(**list_obj.__dict__) for list_obj in lists]
+                list_data = [UserListSummary(**_clean(list_obj, exclude=('list_items',))) for list_obj in lists]
             
             # Calculate pagination
             total_pages = (total_items + page_size - 1) // page_size
@@ -272,12 +276,18 @@ class ListsService:
                 items = sorted(items, key=lambda x: x.profile.username.lower())
             
             # Convert to response model
+            # Exclude ORM internals and 'profile' relationship to avoid duplicate kwarg
+            def _item_dict(item):
+                return {k: v for k, v in item.__dict__.items() if k != 'profile' and not k.startswith('_')}
+            def _obj_dict(obj):
+                return {k: v for k, v in obj.__dict__.items() if k not in ('list_items',) and not k.startswith('_')}
+
             return UserListResponse(
-                **list_obj.__dict__,
+                **_obj_dict(list_obj),
                 items=[
                     UserListItemResponse(
-                        **item.__dict__,
-                        profile=ProfileSummary(**item.profile.__dict__) if include_profiles else None
+                        **_item_dict(item),
+                        profile=ProfileSummary(**{k: v for k, v in item.profile.__dict__.items() if not k.startswith('_')}) if include_profiles else None
                     ) for item in items
                 ]
             )
@@ -455,8 +465,8 @@ class ListsService:
             await db.refresh(new_item)
             
             return UserListItemResponse(
-                **new_item.__dict__,
-                profile=ProfileSummary(**profile.__dict__)
+                **{k: v for k, v in new_item.__dict__.items() if not k.startswith('_') and k != 'profile'},
+                profile=ProfileSummary(**{k: v for k, v in profile.__dict__.items() if not k.startswith('_')})
             )
             
         except Exception as e:
@@ -498,8 +508,8 @@ class ListsService:
             await db.refresh(item)
             
             return UserListItemResponse(
-                **item.__dict__,
-                profile=ProfileSummary(**item.profile.__dict__)
+                **{k: v for k, v in item.__dict__.items() if not k.startswith('_') and k != 'profile'},
+                profile=ProfileSummary(**{k: v for k, v in item.profile.__dict__.items() if not k.startswith('_')})
             )
             
         except Exception as e:

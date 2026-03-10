@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import text
+from sqlalchemy import text, select, or_
 import httpx
 import io
 from fastapi.staticfiles import StaticFiles
@@ -438,6 +438,10 @@ app.include_router(transaction_monitoring_router)
 from app.api.campaign_routes_ai_insights import router as campaign_ai_router
 app.include_router(campaign_ai_router, prefix="/api/v1")
 
+# Include UGC Campaign routes (models, concepts, videos)
+from app.api.ugc_routes import router as ugc_router
+app.include_router(ugc_router, prefix="/api/v1")
+
 # Include Health and Metrics endpoints
 from app.api.endpoints.health import router as health_router
 app.include_router(health_router, prefix="/api")
@@ -855,8 +859,10 @@ async def bulletproof_creator_search(
             _role_str = getattr(_role, 'value', str(_role))
             is_superadmin = _role_str in ('super_admin', 'superadmin')
 
-            # Map auth user to app user
-            user_query = select(User).where(User.supabase_user_id == str(current_user.id))
+            # Map auth user to app user (current_user.id is users.id PK)
+            user_query = select(User).where(
+                or_(User.id == str(current_user.id), User.supabase_user_id == str(current_user.id))
+            )
             user_result = await db.execute(user_query)
             app_user = user_result.scalar_one_or_none()
 
@@ -914,7 +920,9 @@ async def bulletproof_creator_search(
             # Determine user tier for quota management
             try:
                 from app.database.unified_models import User as AppUser
-                user_q = select(AppUser).where(AppUser.supabase_user_id == str(current_user.id))
+                user_q = select(AppUser).where(
+                    or_(AppUser.id == str(current_user.id), AppUser.supabase_user_id == str(current_user.id))
+                )
                 user_r = await db.execute(user_q)
                 app_user = user_r.scalar_one_or_none()
                 user_tier = getattr(app_user, 'subscription_tier', 'free') or 'free'

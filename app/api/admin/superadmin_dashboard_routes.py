@@ -11,6 +11,7 @@ from uuid import UUID
 from datetime import datetime, date, timedelta, timezone
 import psutil
 import asyncio
+import json
 import logging
 from pydantic import BaseModel, Field, EmailStr
 
@@ -1196,6 +1197,24 @@ async def create_user(
         logger.info(f"ADMIN CREATE: Starting user creation for {user_data.email}")
 
         # ===== STEP 1: Validate Inputs =====
+        # Password strength validation
+        pw_errors = []
+        if len(user_data.password) < 8:
+            pw_errors.append("at least 8 characters")
+        if not any(c.islower() for c in user_data.password):
+            pw_errors.append("a lowercase letter")
+        if not any(c.isupper() for c in user_data.password):
+            pw_errors.append("an uppercase letter")
+        if not any(c.isdigit() for c in user_data.password):
+            pw_errors.append("a number")
+        if not any(c in r"""!@#$%^&*()_+-=[]{};':"\|<>?,./`~""" for c in user_data.password):
+            pw_errors.append("a special character")
+        if pw_errors:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Password must contain: {', '.join(pw_errors)}"
+            )
+
         existing_user = await db.execute(select(User).where(User.email == user_data.email))
         if existing_user.scalar_one_or_none():
             raise HTTPException(
@@ -1253,135 +1272,171 @@ async def create_user(
 
         # ===== STEP 3: Create Database User =====
         logger.info(f"ADMIN CREATE: Creating database user record")
-        new_user = User(
-            id=uuid4(),
-            supabase_user_id=supabase_user_id,  # Link to Supabase
-            email=user_data.email,
-            full_name=user_data.full_name,
-            company=user_data.company,
-            phone_number=user_data.phone_number,
-            role=user_data.role,
-            status=user_data.status,
-            subscription_tier=user_data.subscription_tier,
-            credits=user_data.initial_credits,
-            credits_used_this_month=0,
-            email_verified=True,  # Admin-created accounts are pre-verified
-            preferences={"notifications": True, "theme": "light"}
-        )
 
-        db.add(new_user)
+        # Use canonical SUBSCRIPTION_TIER_LIMITS for credit allocation
+        from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
+        tier_key = getattr(SubscriptionTier, user_data.subscription_tier.upper(), user_data.subscription_tier)
+        tier_limits = SUBSCRIPTION_TIER_LIMITS.get(tier_key, SUBSCRIPTION_TIER_LIMITS.get(SubscriptionTier.FREE, {}))
+        canonical_credits = tier_limits.get('monthly_credits', 125)
+
+        # Use canonical credits if user didn't override, otherwise respect admin's choice
+        effective_credits = user_data.initial_credits if user_data.initial_credits > 0 else canonical_credits
+
+        # PGBouncer AUTOCOMMIT: use raw SQL for all writes (ORM db.add() silently fails)
+        from sqlalchemy import text as sa_text
+        app_user_id = uuid4()
+
+        await db.execute(
+            sa_text("""
+                INSERT INTO users (id, supabase_user_id, email, full_name, company, phone_number,
+                    role, status, subscription_tier, subscription_status, billing_type,
+                    credits, credits_used_this_month, email_verified, preferences)
+                VALUES (:id, :sub_id, :email, :name, :company, :phone,
+                    :role, :status, :tier, 'active', 'admin_managed',
+                    :credits, 0, true, :prefs)
+            """),
+            {
+                "id": str(app_user_id), "sub_id": str(supabase_user_id),
+                "email": user_data.email, "name": user_data.full_name,
+                "company": user_data.company, "phone": user_data.phone_number,
+                "role": user_data.role, "status": user_data.status,
+                "tier": user_data.subscription_tier, "credits": effective_credits,
+                "prefs": '{"notifications": true, "theme": "light"}',
+            }
+        )
         await db.commit()
-        await db.refresh(new_user)
-        logger.info(f"ADMIN CREATE: Database user created - ID: {new_user.id}")
+        logger.info(f"ADMIN CREATE: Database user created - ID: {app_user_id}")
 
         # ===== STEP 4: Create Credit Wallet & Package =====
         wallet_created = False
-        if user_data.initial_credits > 0 or user_data.credit_package_id:
-            try:
-                logger.info(f"ADMIN CREATE: Setting up credit wallet")
+        wallet_id = None
+        try:
+            logger.info(f"ADMIN CREATE: Setting up credit wallet with {effective_credits} credits")
 
-                # Map subscription tier to package ID
-                package_map = {"free": 1, "standard": 2, "premium": 3}
-                package_id = package_map.get(user_data.subscription_tier, 1)
-                if user_data.credit_package_id:
-                    package_id = user_data.credit_package_id
+            # Map subscription tier to package ID
+            package_map = {"free": 1, "standard": 2, "premium": 3}
+            package_id = package_map.get(user_data.subscription_tier, 1)
+            if user_data.credit_package_id:
+                package_id = user_data.credit_package_id
 
-                new_wallet = CreditWallet(
-                    user_id=supabase_user_id,  # Use Supabase auth ID
-                    package_id=package_id,
-                    current_balance=user_data.initial_credits,
-                    total_earned_this_cycle=user_data.initial_credits,
-                    total_purchased_this_cycle=0,
-                    total_spent_this_cycle=0,
-                    lifetime_earned=user_data.initial_credits,
-                    lifetime_spent=0,
-                    subscription_active=True,
-                    subscription_status="active",
-                    auto_refresh_enabled=True,
-                    is_locked=False,
-                    is_frozen=False
-                )
-                db.add(new_wallet)
-                await db.commit()
-                await db.refresh(new_wallet)
+            today = date.today()
+            next_month = today.replace(day=1) + timedelta(days=32)
+            next_reset = next_month.replace(day=1)
 
-                # Create initial transaction record
-                if user_data.initial_credits > 0:
-                    initial_transaction = CreditTransaction(
-                        wallet_id=new_wallet.id,
-                        user_id=supabase_user_id,  # Use Supabase auth ID
-                        amount=user_data.initial_credits,
-                        transaction_type="admin_grant",
-                        description=f"Initial {user_data.subscription_tier} subscription credits by admin",
-                        metadata={
+            # Use app UUID (users.id), NOT supabase_user_id — FK references users.id
+            wallet_result = await db.execute(
+                sa_text("""
+                    INSERT INTO credit_wallets (user_id, package_id, current_balance,
+                        total_earned_this_cycle, total_purchased_this_cycle, total_spent_this_cycle,
+                        lifetime_earned, lifetime_spent, current_billing_cycle_start,
+                        next_reset_date, subscription_active, subscription_status,
+                        auto_refresh_enabled, is_locked)
+                    VALUES (:user_id, :pkg, :balance, :earned, 0, 0, :earned, 0,
+                        :cycle_start, :reset_date, true, 'active', true, false)
+                    RETURNING id
+                """),
+                {
+                    "user_id": str(app_user_id), "pkg": package_id,
+                    "balance": effective_credits, "earned": effective_credits,
+                    "cycle_start": today, "reset_date": next_reset,
+                }
+            )
+            await db.commit()
+            wrow = wallet_result.fetchone()
+            wallet_id = wrow[0] if wrow else None
+
+            # Create initial transaction record
+            if effective_credits > 0 and wallet_id:
+                await db.execute(
+                    sa_text("""
+                        INSERT INTO credit_transactions (wallet_id, user_id, amount,
+                            transaction_type, description, transaction_metadata)
+                        VALUES (:wid, :uid, :amount, 'admin_grant', :desc, :meta)
+                    """),
+                    {
+                        "wid": wallet_id, "uid": str(app_user_id),
+                        "amount": effective_credits,
+                        "desc": f"Initial {user_data.subscription_tier} subscription credits ({effective_credits} credits) by admin {current_user.email}",
+                        "meta": json.dumps({
                             "admin_user": current_user.email,
                             "reason": "user_creation",
-                            "subscription_tier": user_data.subscription_tier
-                        }
-                    )
-                    db.add(initial_transaction)
-                    await db.commit()
-
-                wallet_created = True
-                logger.info(f"ADMIN CREATE: Credit wallet created with {user_data.initial_credits} credits")
-
-            except Exception as e:
-                logger.error(f"ADMIN CREATE: Failed to create wallet: {e}")
-                # Don't fail entire operation if wallet creation fails
-
-        # ===== STEP 5: Create Team (for brand accounts) =====
-        team_created = None
-        if user_data.create_team and user_data.team_name:
-            try:
-                logger.info(f"ADMIN CREATE: Creating team '{user_data.team_name}'")
-                from app.database.unified_models import Team, TeamMember
-
-                new_team = Team(
-                    id=uuid4(),
-                    name=user_data.team_name,
-                    created_by=supabase_user_id,  # Use Supabase auth ID, not local user ID
-                    company_name=user_data.company,
-                    subscription_tier=user_data.subscription_tier,
-                    subscription_status="active",
-                    max_team_members=user_data.max_team_members,
-                    monthly_profile_limit=user_data.monthly_profile_limit,
-                    monthly_email_limit=user_data.monthly_email_limit,
-                    monthly_posts_limit=user_data.monthly_posts_limit,
-                    profiles_used_this_month=0,
-                    emails_used_this_month=0,
-                    posts_used_this_month=0
-                )
-                db.add(new_team)
-                await db.commit()
-                await db.refresh(new_team)
-
-                # Add user as team owner using Supabase auth ID
-                team_member = TeamMember(
-                    id=uuid4(),
-                    team_id=new_team.id,
-                    user_id=supabase_user_id,  # Use Supabase auth ID here too
-                    role="owner",
-                    status="active"
-                )
-                db.add(team_member)
-                await db.commit()
-
-                team_created = {
-                    "id": str(new_team.id),
-                    "name": new_team.name,
-                    "subscription_tier": new_team.subscription_tier,
-                    "max_members": new_team.max_team_members,
-                    "limits": {
-                        "profiles": new_team.monthly_profile_limit,
-                        "emails": new_team.monthly_email_limit,
-                        "posts": new_team.monthly_posts_limit
+                            "subscription_tier": user_data.subscription_tier,
+                            "created_by_admin_id": str(getattr(current_user, 'id', ''))
+                        }),
                     }
-                }
-                logger.info(f"ADMIN CREATE: Team created successfully - ID: {new_team.id}")
+                )
+                await db.commit()
 
-            except Exception as team_error:
-                logger.error(f"ADMIN CREATE: Failed to create team: {team_error}")
-                # Don't fail entire operation if team creation fails
+            wallet_created = True
+            logger.info(f"ADMIN CREATE: Credit wallet created with {effective_credits} credits")
+
+        except Exception as e:
+            logger.error(f"ADMIN CREATE: Failed to create wallet: {e}")
+            # Don't fail entire operation if wallet creation fails
+
+        # ===== STEP 5: Create Team (ALWAYS - required for platform features) =====
+        team_created = None
+        try:
+            # Determine team name: use provided name, company, or fallback to user's name
+            team_name = user_data.team_name or user_data.company or f"{user_data.full_name}'s Team"
+            logger.info(f"ADMIN CREATE: Creating team '{team_name}'")
+
+            # Use canonical tier limits for team settings
+            team_max_members = user_data.max_team_members if user_data.max_team_members > 1 else tier_limits.get('max_team_members', 1)
+            team_profile_limit = user_data.monthly_profile_limit if user_data.monthly_profile_limit > 5 else tier_limits.get('monthly_profile_limit', 5)
+            team_email_limit = user_data.monthly_email_limit if user_data.monthly_email_limit > 0 else tier_limits.get('monthly_email_limit', 0)
+            team_posts_limit = user_data.monthly_posts_limit if user_data.monthly_posts_limit > 0 else tier_limits.get('monthly_posts_limit', 0)
+
+            team_id = uuid4()
+            await db.execute(
+                sa_text("""
+                    INSERT INTO teams (id, name, created_by, company_name, subscription_tier,
+                        subscription_status, max_team_members, monthly_profile_limit,
+                        monthly_email_limit, monthly_posts_limit,
+                        profiles_used_this_month, emails_used_this_month, posts_used_this_month)
+                    VALUES (:id, :name, :created_by, :company, :tier, 'active',
+                        :max_members, :profile_limit, :email_limit, :posts_limit, 0, 0, 0)
+                """),
+                {
+                    "id": str(team_id), "name": team_name,
+                    "created_by": str(supabase_user_id), "company": user_data.company,
+                    "tier": user_data.subscription_tier,
+                    "max_members": team_max_members, "profile_limit": team_profile_limit,
+                    "email_limit": team_email_limit, "posts_limit": team_posts_limit,
+                }
+            )
+            await db.commit()
+
+            # Add user as team owner — team_members.user_id stores supabase_user_id
+            member_id = uuid4()
+            await db.execute(
+                sa_text("""
+                    INSERT INTO team_members (id, team_id, user_id, role, status)
+                    VALUES (:id, :team_id, :user_id, 'owner', 'active')
+                """),
+                {
+                    "id": str(member_id), "team_id": str(team_id),
+                    "user_id": str(supabase_user_id),
+                }
+            )
+            await db.commit()
+
+            team_created = {
+                "id": str(team_id),
+                "name": team_name,
+                "subscription_tier": user_data.subscription_tier,
+                "max_members": team_max_members,
+                "limits": {
+                    "profiles": team_profile_limit,
+                    "emails": team_email_limit,
+                    "posts": team_posts_limit
+                }
+            }
+            logger.info(f"ADMIN CREATE: Team created successfully - ID: {team_id}")
+
+        except Exception as team_error:
+            logger.error(f"ADMIN CREATE: Failed to create team: {team_error}")
+            # Don't fail entire operation if team creation fails
 
         # ===== SUCCESS RESPONSE =====
         logger.info(f"ADMIN CREATE: User creation completed successfully for {user_data.email}")
@@ -1390,17 +1445,16 @@ async def create_user(
             "success": True,
             "message": f"Brand account created successfully for {user_data.email}",
             "user": {
-                "id": str(new_user.id),
-                "supabase_user_id": supabase_user_id,
-                "email": new_user.email,
-                "full_name": new_user.full_name,
-                "company": new_user.company,
-                "phone_number": new_user.phone_number,
-                "role": new_user.role,
-                "status": new_user.status,
-                "subscription_tier": new_user.subscription_tier,
-                "credits": new_user.credits,
-                "created_at": new_user.created_at,
+                "id": str(app_user_id),
+                "supabase_user_id": str(supabase_user_id),
+                "email": user_data.email,
+                "full_name": user_data.full_name,
+                "company": user_data.company,
+                "phone_number": user_data.phone_number,
+                "role": user_data.role,
+                "status": user_data.status,
+                "subscription_tier": user_data.subscription_tier,
+                "credits": effective_credits,
                 "created_by": current_user.email
             },
             "wallet": {

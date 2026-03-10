@@ -151,10 +151,12 @@ async def get_campaign(
     Returns complete campaign information including posts and creators.
     """
     try:
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         campaign = await campaign_service.get_campaign(
             db=db,
             campaign_id=campaign_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            is_superadmin=is_superadmin
         )
 
         if not campaign:
@@ -164,7 +166,7 @@ async def get_campaign(
             )
 
         # Get campaign stats
-        stats = await campaign_service.get_campaign_stats(db, campaign_id, current_user.id)
+        stats = await campaign_service.get_campaign_stats(db, campaign_id, current_user.id, is_superadmin=is_superadmin)
 
         return {
             "success": True,
@@ -210,12 +212,14 @@ async def list_campaigns(
     - offset: Pagination offset (default: 0)
     """
     try:
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         campaigns = await campaign_service.list_campaigns(
             db=db,
             user_id=current_user.id,
             status=status_filter,
             limit=limit,
-            offset=offset
+            offset=offset,
+            is_superadmin=is_superadmin
         )
 
         # Get summary statistics (Frontend required)
@@ -231,7 +235,8 @@ async def list_campaigns(
             stats = await campaign_service.get_campaign_stats(
                 db=db,
                 campaign_id=c.id,
-                user_id=current_user.id
+                user_id=current_user.id,
+                is_superadmin=is_superadmin
             )
 
             campaigns_data.append({
@@ -490,141 +495,6 @@ async def add_post_to_campaign(
             }
         }
 
-        # LEGACY: Synchronous mode (deprecated)
-        logger.warning(f"⚠️ Using SYNC mode for campaign {campaign_id} (DEPRECATED - backend will block)")
-
-        # STEP 1: Run Post Analytics (includes auto-trigger of Creator Analytics)
-        post_analysis = await standalone_post_analytics_service.analyze_post_by_url(
-            post_url=request.instagram_post_url,
-            db=db,
-            user_id=current_user.id
-        )
-
-        # STEP 1.5: CRITICAL FIX - Wait for FULL CREATOR ANALYTICS (Apify + CDN + AI) to complete for campaign accuracy
-        creator_username = post_analysis.get("profile", {}).get("username")
-        if creator_username:
-            logger.info(f"⏳ Starting FULL Creator Analytics pipeline for @{creator_username}...")
-
-            # Import Creator Analytics service to trigger complete pipeline
-            from app.services.creator_analytics_trigger_service import creator_analytics_trigger_service
-            from app.services.unified_background_processor import UnifiedBackgroundProcessor
-
-            # Trigger Creator Analytics (Apify + Database storage)
-            profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
-                username=creator_username,
-                db=db,
-                force_refresh=False  # Use cache if recent
-            )
-
-            if not profile or profile.followers_count == 0:
-                logger.warning(f"⚠️ Initial Creator Analytics failed for @{creator_username}, retrying with force refresh...")
-
-                # RETRY with force refresh if initial attempt failed
-                try:
-                    profile, metadata = await creator_analytics_trigger_service.trigger_full_creator_analytics(
-                        username=creator_username,
-                        db=db,
-                        force_refresh=True  # Force fresh data
-                    )
-                    if profile and profile.followers_count > 0:
-                        logger.info(f"✅ Creator Analytics retry successful for @{creator_username}")
-                    else:
-                        logger.error(f"❌ Creator Analytics retry also failed for @{creator_username}")
-                        # Continue with campaign post addition even if analytics fails
-                except Exception as retry_error:
-                    logger.error(f"❌ Creator Analytics retry exception for @{creator_username}: {retry_error}")
-                    # Continue with campaign post addition even if analytics fails
-
-            if profile and profile.followers_count > 0:
-                profile_id = str(profile.id)
-                logger.info(f"📊 Creator Analytics triggered for @{creator_username} - {profile.followers_count:,} followers")
-
-                # NOW WAIT FOR FULL COMPLETION: Apify + CDN + AI (ALL 10 MODELS)
-                logger.info(f"⏳ STARTING OPTION A: Waiting for FULL COMPLETION (CDN + AI) for @{creator_username}...")
-
-                processor = UnifiedBackgroundProcessor()
-                max_wait_time = 300  # 5 minutes timeout
-                check_interval = 5   # Check every 5 seconds
-                elapsed_time = 0
-
-                # CRITICAL: Check initial status before entering loop
-                try:
-                    initial_status = await processor.get_profile_processing_status(profile_id)
-                    logger.info(f"🔍 OPTION A INITIAL STATUS for @{creator_username}:")
-                    logger.info(f"   Overall Complete: {initial_status.get('overall_complete', 'UNKNOWN')}")
-                    logger.info(f"   Current Stage: {initial_status.get('current_stage', 'UNKNOWN')}")
-                    logger.info(f"   Apify Complete: {initial_status.get('completion_summary', {}).get('apify_complete', 'UNKNOWN')}")
-                    logger.info(f"   CDN Complete: {initial_status.get('completion_summary', {}).get('cdn_complete', 'UNKNOWN')}")
-                    logger.info(f"   AI Complete: {initial_status.get('completion_summary', {}).get('ai_complete', 'UNKNOWN')}")
-
-                    if initial_status.get('overall_complete'):
-                        logger.info(f"🎉 @{creator_username} already COMPLETE - skipping wait loop")
-                    else:
-                        logger.info(f"⏳ @{creator_username} NOT complete - entering wait loop...")
-                except Exception as status_error:
-                    logger.error(f"❌ Failed to get initial status for @{creator_username}: {status_error}")
-
-                while elapsed_time < max_wait_time:
-                    try:
-                        # Check comprehensive processing status
-                        processing_status = await processor.get_profile_processing_status(profile_id)
-
-                        if processing_status['overall_complete']:
-                            logger.info(f"🎉 FULL CREATOR ANALYTICS COMPLETE for @{creator_username}!")
-                            logger.info(f"   ✅ Apify: {processing_status['completion_summary']['apify_complete']}")
-                            logger.info(f"   ✅ CDN: {processing_status['completion_summary']['cdn_complete']}")
-                            logger.info(f"   ✅ AI: {processing_status['completion_summary']['ai_complete']}")
-                            break
-                        else:
-                            current_stage = processing_status['current_stage']
-                            logger.info(f"🔄 @{creator_username} processing... Stage: {current_stage} (waiting {elapsed_time}s)")
-
-                            # Sleep and increment counter
-                            await asyncio.sleep(check_interval)
-                            elapsed_time += check_interval
-
-                    except Exception as status_error:
-                        logger.warning(f"⚠️ Status check error for @{creator_username}: {status_error}")
-                        await asyncio.sleep(check_interval)
-                        elapsed_time += check_interval
-
-                if elapsed_time >= max_wait_time:
-                    logger.warning(f"⏰ Timeout waiting for @{creator_username} completion after {max_wait_time}s")
-                    logger.warning(f"   Campaign post will be added with current data")
-                else:
-                    logger.info(f"✅ @{creator_username} FULLY PROCESSED in {elapsed_time}s - ready for campaign!")
-            else:
-                logger.warning(f"⚠️ OPTION A SKIPPED for @{creator_username} - profile failed or has 0 followers")
-                logger.warning(f"   Profile exists: {profile is not None}")
-                logger.warning(f"   Followers count: {getattr(profile, 'followers_count', 'N/A') if profile else 'N/A'}")
-
-        # STEP 2: Add post to campaign
-        campaign_post = await campaign_service.add_post_to_campaign(
-            db=db,
-            campaign_id=campaign_id,
-            post_id=UUID(post_analysis["post_id"]),
-            instagram_post_url=request.instagram_post_url,
-            user_id=current_user.id
-        )
-
-        if not campaign_post:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Campaign not found"
-            )
-
-        return {
-            "success": True,
-            "mode": "sync",
-            "data": {
-                "campaign_post_id": str(campaign_post.id),
-                "post_analysis": post_analysis,
-                "added_at": campaign_post.added_at.isoformat()
-            },
-            "message": "Post added to campaign successfully",
-            "deprecation_notice": "⚠️ Synchronous mode is deprecated and will be removed. Please use async_mode=true for non-blocking operations."
-        }
-
     except ValueError as e:
         logger.error(f"❌ Validation error: {e}")
         raise HTTPException(
@@ -693,10 +563,12 @@ async def get_campaign_posts(
     Returns complete post analytics for each post in the campaign.
     """
     try:
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         posts = await campaign_service.get_campaign_posts(
             db=db,
             campaign_id=campaign_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            is_superadmin=is_superadmin
         )
 
         # Calculate total views across all posts
@@ -744,10 +616,12 @@ async def get_campaign_creators(
     - Audience demographics
     """
     try:
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         creators = await campaign_service.get_campaign_creators(
             db=db,
             campaign_id=campaign_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            is_superadmin=is_superadmin
         )
 
         return {
@@ -786,10 +660,12 @@ async def get_campaign_audience(
     - Aggregated country distribution
     """
     try:
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         audience = await campaign_service.get_campaign_audience_aggregation(
             db=db,
             campaign_id=campaign_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            is_superadmin=is_superadmin
         )
 
         if not audience:
@@ -837,8 +713,9 @@ async def get_campaign_analytics(
     - performance_insights: Best day, peak day, trend, growth_rate
     """
     try:
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         analytics = await campaign_service.get_campaign_analytics(
-            db, campaign_id, current_user.id, period
+            db, campaign_id, current_user.id, period, is_superadmin=is_superadmin
         )
 
         if not analytics:
@@ -1024,10 +901,12 @@ async def upload_brand_logo(
     """
     try:
         # Verify campaign ownership
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         campaign = await campaign_service.get_campaign(
             db=db,
             campaign_id=campaign_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            is_superadmin=is_superadmin
         )
 
         if not campaign:
@@ -1091,10 +970,12 @@ async def delete_brand_logo(
     """
     try:
         # Verify campaign ownership
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         campaign = await campaign_service.get_campaign(
             db=db,
             campaign_id=campaign_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            is_superadmin=is_superadmin
         )
 
         if not campaign:
@@ -1163,10 +1044,12 @@ async def export_campaign(
     """
     try:
         # Get campaign to verify ownership and get name
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
         campaign = await campaign_service.get_campaign(
             db=db,
             campaign_id=campaign_id,
-            user_id=current_user.id
+            user_id=current_user.id,
+            is_superadmin=is_superadmin
         )
 
         if not campaign:
@@ -1239,7 +1122,8 @@ async def export_campaign_async(
     from app.api.fast_handoff_api import FastHandoffResponse
     from fastapi.responses import JSONResponse
 
-    campaign = await campaign_service.get_campaign(db=db, campaign_id=campaign_id, user_id=current_user.id)
+    is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
+    campaign = await campaign_service.get_campaign(db=db, campaign_id=campaign_id, user_id=current_user.id, is_superadmin=is_superadmin)
     if not campaign:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Campaign not found")
 

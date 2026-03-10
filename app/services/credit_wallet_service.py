@@ -417,26 +417,31 @@ class CreditWalletService:
         """
         if amount <= 0:
             raise ValidationError("Amount must be positive when spending credits")
-        
-        wallet = await self.get_wallet(user_id)
-        if not wallet:
-            raise ValidationError(f"No wallet found for user {user_id}")
-        
-        if wallet.is_locked:
-            raise ValidationError("Wallet is locked - cannot spend credits")
-        
-        if wallet.current_balance < amount:
-            raise ValidationError(
-                f"Insufficient credits. Required: {amount}, Available: {wallet.current_balance}"
-            )
-        
+
         try:
             async with get_session() as session:
+                # Lock the wallet row to prevent concurrent double-spend
+                wallet_result = await session.execute(
+                    select(CreditWallet).where(CreditWallet.user_id == user_id).with_for_update()
+                )
+                wallet = wallet_result.scalar_one_or_none()
+
+                if not wallet:
+                    raise ValidationError(f"No wallet found for user {user_id}")
+
+                if wallet.is_locked:
+                    raise ValidationError("Wallet is locked - cannot spend credits")
+
+                if wallet.current_balance < amount:
+                    raise ValidationError(
+                        f"Insufficient credits. Required: {amount}, Available: {wallet.current_balance}"
+                    )
+
                 # Use the corrected database function
                 result = await session.execute(
                     text("""
                         SELECT public.update_wallet_balance(
-                            :wallet_id, :amount, 'spend', 
+                            :wallet_id, :amount, 'spend',
                             :description, :reference_id, :reference_type, :action_type
                         )
                     """),
@@ -524,8 +529,8 @@ class CreditWalletService:
         if credits_amount <= 0:
             raise Exception("Amount must be positive when spending credits")
         
-        # Get wallet within the existing transaction
-        wallet_query = select(CreditWallet).where(CreditWallet.user_id == user_id)
+        # Get wallet within the existing transaction with row lock to prevent double-spend
+        wallet_query = select(CreditWallet).where(CreditWallet.user_id == user_id).with_for_update()
         wallet_result = await db.execute(wallet_query)
         wallet = wallet_result.scalar_one_or_none()
         

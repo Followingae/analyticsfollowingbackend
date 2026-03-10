@@ -16,7 +16,7 @@ import uuid
 from app.models.auth import (
     UserCreate, UserResponse, LoginRequest, LoginResponse, UserInDB,
     UserDashboardStats, UserSearchHistoryResponse, UserDashboardResponse,
-    TeamInfo, SubscriptionInfo, BillingType, UserStatus
+    TeamInfo, SubscriptionInfo, BillingType, UserStatus, UserRole
 )
 from app.services.supabase_auth_service import supabase_auth_service as auth_service
 from app.services.resilient_auth_service import resilient_auth_service
@@ -28,6 +28,26 @@ from app.database.unified_models import User
 from app.database.comprehensive_service import comprehensive_service
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_password(password: str) -> None:
+    """Validate password strength before sending to Supabase. Raises HTTPException with clear message."""
+    errors = []
+    if len(password) < 8:
+        errors.append("at least 8 characters")
+    if not any(c.islower() for c in password):
+        errors.append("a lowercase letter")
+    if not any(c.isupper() for c in password):
+        errors.append("an uppercase letter")
+    if not any(c.isdigit() for c in password):
+        errors.append("a number")
+    if not any(c in r"""!@#$%^&*()_+-=[]{};':"\|<>?,./`~""" for c in password):
+        errors.append("a special character")
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Password must contain: {', '.join(errors)}"
+        )
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
@@ -545,6 +565,17 @@ async def get_user_dashboard(
     # PGBOUNCER WORKAROUND: Return minimal data for superadmin during PGBouncer issues
     if hasattr(current_user, 'role') and current_user.role in ["admin", "super_admin", "superadmin"]:
         from datetime import datetime, timezone
+        from uuid import UUID as _UUID
+
+        # Fetch actual wallet balance for superadmin instead of hardcoding
+        admin_credits_balance = 0
+        try:
+            from app.services.credit_wallet_service import credit_wallet_service
+            admin_wallet_balance = await credit_wallet_service.get_wallet_balance(_UUID(str(current_user.id)))
+            admin_credits_balance = admin_wallet_balance.balance if admin_wallet_balance else 0
+        except Exception as wallet_err:
+            logger.warning(f"Could not fetch superadmin wallet balance: {wallet_err}")
+
         return UserDashboardResponse(
             user=UserResponse(
                 id=current_user.id,
@@ -576,8 +607,9 @@ async def get_user_dashboard(
                 "searches_this_month": 0,
                 "favorite_profiles": [],
                 "recent_searches": [],
-                "credits_balance": 999999,
-                "credits_spent_this_month": 0
+                "credits_balance": admin_credits_balance,
+                "credits_spent_this_month": 0,
+                "is_superadmin": True
             }
         )
 
@@ -634,18 +666,17 @@ async def get_user_dashboard(
             )
 
             # Get team data if user is part of a team - optimized query
-            # PGBOUNCER FIX: Use string formatting to avoid prepared statements entirely
-            team_query = f"""
+            # NOTE: team_members.user_id stores supabase_user_id, not users.id
+            team_query = text("""
                 SELECT t.id, t.name, t.subscription_tier, t.subscription_status,
                        t.monthly_profile_limit, t.monthly_email_limit, t.monthly_posts_limit,
                        t.profiles_used_this_month, t.emails_used_this_month, t.posts_used_this_month
                 FROM teams t
                 JOIN team_members tm ON t.id = tm.team_id
-                JOIN users u ON tm.user_id = u.id
-                WHERE u.supabase_user_id = '{current_user.supabase_user_id}'
+                WHERE tm.user_id = :supabase_id AND tm.status = 'active'
                 LIMIT 1
-            """
-            team_result = await db_session.execute(text(team_query))
+            """)
+            team_result = await db_session.execute(team_query, {"supabase_id": str(current_user.supabase_user_id)})
 
             team_row = team_result.fetchone()
             team_info = None
@@ -760,7 +791,7 @@ async def get_unlocked_profiles(
         page_size = min(page_size, 50)
         
         unlocked_profiles = await comprehensive_service.get_user_unlocked_profiles(
-            db, current_user.supabase_user_id, page, page_size
+            db, current_user.id, page, page_size
         )
         
         return JSONResponse(content=unlocked_profiles)
@@ -866,10 +897,32 @@ async def create_admin_managed_user(
 
     Admin-created accounts automatically have billing_type set to 'admin_managed'.
     """
+    from sqlalchemy import text
+    from app.database.optimized_pools import get_db_optimized as get_db_for_admin
+    from app.database.unified_models import Team, TeamMember, CreditWallet
+    from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
+    from datetime import date
+
     try:
+        # Validate password strength before hitting Supabase
+        _validate_password(user_data.password)
+
         # Force admin-managed billing type for admin-created accounts
         user_data.billing_type = BillingType.ADMIN_MANAGED
         user_data.status = UserStatus.ACTIVE  # Skip pending status for admin-created accounts
+
+        # Duplicate email pre-check
+        from app.database.connection import get_session
+        async with get_session() as check_session:
+            existing = await check_session.execute(
+                text("SELECT id FROM users WHERE email = :email LIMIT 1"),
+                {"email": user_data.email}
+            )
+            if existing.fetchone():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"An account with email {user_data.email} already exists"
+                )
 
         # Ensure auth service is ready
         await auth_service.ensure_initialized()
@@ -878,37 +931,119 @@ async def create_admin_managed_user(
 
         logger.info(f"Admin {current_user.email} created managed user: {user.email}")
 
-        # Set up subscription and credits based on role/tier
+        # CRITICAL: register_user() returns Supabase auth UUID as user.id
+        # but credit_wallets.user_id FK references users.id (app UUID).
+        # Look up the actual app UUID from the database.
+        app_user_id = None
+        async with get_session() as lookup_session:
+            id_result = await lookup_session.execute(
+                text("SELECT id FROM users WHERE email = :email LIMIT 1"),
+                {"email": user_data.email}
+            )
+            id_row = id_result.fetchone()
+            if id_row:
+                app_user_id = str(id_row[0])
+            else:
+                # Fallback: try by supabase_user_id
+                id_result2 = await lookup_session.execute(
+                    text("SELECT id FROM users WHERE supabase_user_id = :sid LIMIT 1"),
+                    {"sid": str(user.id)}
+                )
+                id_row2 = id_result2.fetchone()
+                app_user_id = str(id_row2[0]) if id_row2 else str(user.id)
+
+        logger.info(f"Resolved app user ID: {app_user_id} (supabase: {user.id})")
+
+        # Determine subscription tier from role
+        subscription_tier = "free"
+        if hasattr(user, 'role'):
+            role_val = user.role.value if hasattr(user.role, 'value') else str(user.role)
+            if role_val in ['standard']:
+                subscription_tier = "standard"
+            elif role_val in ['premium', 'brand_premium']:
+                subscription_tier = "premium"
+
+        # Get canonical tier limits
+        tier_key = getattr(SubscriptionTier, subscription_tier.upper(), SubscriptionTier.FREE)
+        tier_limits = SUBSCRIPTION_TIER_LIMITS.get(tier_key, SUBSCRIPTION_TIER_LIMITS.get(SubscriptionTier.FREE, {}))
+        initial_credits = tier_limits.get('monthly_credits', 125)
+
+        # Set up subscription, team, and wallet using APP user ID (not Supabase UUID)
         subscription_info = {}
-        initial_credits = 0
         next_billing_date = None
+        team_info = None
         try:
             from app.services.user_subscription_service import UserSubscriptionService
-            from datetime import date
             subscription_service = UserSubscriptionService()
-
-            # Determine subscription tier from role
-            subscription_tier = "free"
-            if user.role in [UserRole.STANDARD]:
-                subscription_tier = "standard"
-            elif user.role in [UserRole.PREMIUM, UserRole.BRAND_PREMIUM]:
-                subscription_tier = "premium"
 
             # Set up subscription with proper credits and billing cycle
             subscription_info = await subscription_service.setup_user_subscription(
-                user_id=user.id,
+                user_id=app_user_id,
                 subscription_tier=subscription_tier,
                 billing_type="admin_managed",
                 initial_billing_date=date.today()
             )
 
-            initial_credits = subscription_info.get('credits_allocated', 0)
+            initial_credits = subscription_info.get('credits_allocated', initial_credits)
             next_billing_date = subscription_info.get('next_billing_date')
+
+            # Also set subscription_status = 'active' on the user
+            async with get_session() as update_session:
+                await update_session.execute(
+                    text("UPDATE users SET subscription_status = 'active', subscription_tier = :tier WHERE id = :uid"),
+                    {"tier": subscription_tier, "uid": app_user_id}
+                )
+                await update_session.commit()
 
             logger.info(f"Set up {subscription_tier} subscription with {initial_credits} credits for user: {user.email}")
         except Exception as e:
             logger.warning(f"Could not set up subscription for user {user.email}: {e}")
-            # Non-critical - user can still be created
+
+        # Create team (required for platform to function)
+        try:
+            async with get_session() as team_session:
+                team_name = user_data.company or f"{user_data.full_name}'s Team"
+
+                # Get supabase_user_id for team_member (team_members.user_id stores supabase UUID)
+                sub_result = await team_session.execute(
+                    text("SELECT supabase_user_id FROM users WHERE id = :uid"),
+                    {"uid": app_user_id}
+                )
+                sub_row = sub_result.fetchone()
+                supabase_uid = str(sub_row[0]) if sub_row and sub_row[0] else str(user.id)
+
+                team_id = uuid.uuid4()
+                await team_session.execute(
+                    text("""
+                        INSERT INTO teams (id, name, subscription_tier, subscription_status,
+                            max_team_members, monthly_profile_limit, monthly_email_limit, monthly_posts_limit,
+                            profiles_used_this_month, emails_used_this_month, posts_used_this_month)
+                        VALUES (:id, :name, :tier, 'active',
+                            :max_members, :profile_limit, :email_limit, :posts_limit, 0, 0, 0)
+                    """),
+                    {
+                        "id": str(team_id), "name": team_name, "tier": subscription_tier,
+                        "max_members": tier_limits.get('max_team_members', 1),
+                        "profile_limit": tier_limits.get('monthly_profile_limit', 5),
+                        "email_limit": tier_limits.get('monthly_email_limit', 0),
+                        "posts_limit": tier_limits.get('monthly_posts_limit', 0),
+                    }
+                )
+
+                member_id = uuid.uuid4()
+                await team_session.execute(
+                    text("""
+                        INSERT INTO team_members (id, team_id, user_id, role, status)
+                        VALUES (:id, :team_id, :user_id, 'owner', 'active')
+                    """),
+                    {"id": str(member_id), "team_id": str(team_id), "user_id": supabase_uid}
+                )
+
+                await team_session.commit()
+                team_info = {"id": str(team_id), "name": team_name}
+                logger.info(f"Created team '{team_name}' for admin-managed user {user.email}")
+        except Exception as e:
+            logger.warning(f"Could not create team for user {user.email}: {e}")
 
         return {
             "message": "Admin-managed user account created successfully",
@@ -916,37 +1051,25 @@ async def create_admin_managed_user(
                 "id": user.id,
                 "email": user.email,
                 "full_name": user.full_name,
-                "role": user.role.value,
-                "status": user.status.value,
-                "billing_type": user.billing_type.value,
+                "role": user.role.value if hasattr(user.role, 'value') else str(user.role),
+                "status": user.status.value if hasattr(user.status, 'value') else str(user.status),
+                "billing_type": user.billing_type.value if hasattr(user.billing_type, 'value') else str(user.billing_type),
+                "subscription_tier": subscription_tier,
                 "company": user_data.company,
                 "job_title": user_data.job_title,
                 "phone_number": user_data.phone_number,
-                "industry": user_data.industry,
-                "company_size": user_data.company_size,
-                "use_case": user_data.use_case,
-                "marketing_budget": user_data.marketing_budget,
                 "created_by_admin": current_user.email,
                 "created_at": user.created_at.isoformat() if user.created_at else None,
                 "initial_credits": initial_credits,
                 "next_billing_date": next_billing_date,
-                "company_logo_url": None,  # Will be set via separate upload endpoint
-                "documents": []  # Will be populated via separate upload endpoint
             },
             "billing_info": subscription_info,
-            "upload_info": {
-                "logo_endpoint": f"/api/v1/admin/users/{user.id}/upload-logo",
-                "documents_endpoint": f"/api/v1/admin/users/{user.id}/upload-document",
-                "supported_formats": ["image/png", "image/jpeg", "application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
-                "max_file_size": "10MB"
-            },
+            "team": team_info,
             "next_steps": [
                 "Send account details to user",
                 "User should change password on first login",
                 f"User has {initial_credits} monthly credits",
                 f"Next billing/invoice date: {next_billing_date}" if next_billing_date else "Configure billing cycle",
-                "Upload company logo (optional)",
-                "Upload documents (optional)"
             ],
             "admin_setup_complete": True,
             "email_confirmation_required": False

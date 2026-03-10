@@ -491,6 +491,56 @@ async def cancel_team_invitation(
         )
 
 # =============================================================================
+# SIMPLE TEAM ENDPOINTS (for Settings page)
+# =============================================================================
+
+@router.get("/my-team")
+async def get_my_team(
+    current_user=Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get current user's team info for the Settings page.
+    Returns team name, user role, and monthly limits.
+    """
+    from sqlalchemy import text as sa_text
+
+    try:
+        return {
+            "team_name": current_user.team_name,
+            "team_role": current_user.user_role,
+            "monthly_limits": {
+                "profile_limit": current_user.monthly_limits.get("profiles", 0),
+                "email_limit": current_user.monthly_limits.get("emails", 0),
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting my team: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get team info")
+
+
+@router.get("/my-team/usage")
+async def get_my_team_usage(
+    current_user=Depends(get_any_team_member_context),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get current user's team usage stats for the Settings page.
+    Returns profiles unlocked and emails sent this month.
+    """
+    try:
+        return {
+            "usage_this_month": {
+                "profiles_unlocked": current_user.current_usage.get("profiles", 0),
+                "emails_sent": current_user.current_usage.get("emails", 0),
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting team usage: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get team usage")
+
+
+# =============================================================================
 # TEAM STATISTICS & OVERVIEW
 # =============================================================================
 

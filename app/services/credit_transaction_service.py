@@ -176,45 +176,31 @@ class CreditTransactionService:
         credits_spent: int = 0
     ) -> None:
         """
-        Track usage of a credit-gated action
-        Updates monthly usage tracking for analytics
-        
-        Args:
-            user_id: User UUID
-            action_type: Action that was performed
-            used_free_allowance: Whether free allowance was used
-            credits_spent: Number of credits spent (0 if free)
+        Track usage of a credit-gated action.
+        Inserts one row per action into credit_usage_tracking (detail table).
         """
         current_month = date.today().replace(day=1)
-        
+
+        # Table has CHECK credits_consumed > 0, skip free-allowance actions
+        if credits_spent <= 0:
+            return
+
         try:
             async with get_session() as session:
-                # Use raw SQL to insert using actual database schema
-                query = text("""
+                await session.execute(text("""
                     INSERT INTO credit_usage_tracking
-                    (user_id, action_type, month_year, free_actions_used, paid_actions_used, total_credits_spent)
-                    VALUES (:user_id, :action_type, :month_year, :free_used, :paid_used, :credits_spent)
-                    ON CONFLICT (user_id, action_type, month_year)
-                    DO UPDATE SET
-                        free_actions_used = credit_usage_tracking.free_actions_used + :free_used,
-                        paid_actions_used = credit_usage_tracking.paid_actions_used + :paid_used,
-                        total_credits_spent = credit_usage_tracking.total_credits_spent + :credits_spent,
-                        last_updated = NOW()
-                """)
-
-                await session.execute(query, {
+                    (user_id, feature_used, credits_consumed, cost_per_action, billing_cycle_date, action_successful)
+                    VALUES (:user_id, :feature_used, :credits_consumed, :cost_per_action, :billing_cycle_date, true)
+                """), {
                     "user_id": str(user_id),
-                    "action_type": action_type,
-                    "month_year": current_month,
-                    "free_used": 1 if used_free_allowance else 0,
-                    "paid_used": 0 if used_free_allowance else 1,
-                    "credits_spent": credits_spent
+                    "feature_used": action_type,
+                    "credits_consumed": credits_spent,
+                    "cost_per_action": credits_spent,
+                    "billing_cycle_date": current_month
                 })
-                await session.commit()
-                
-                # Clear analytics cache
+
                 await self._clear_analytics_cache(user_id, current_month)
-                
+
         except Exception as e:
             logger.error(f"Error tracking usage for user {user_id}, action {action_type}: {e}")
     
@@ -247,49 +233,45 @@ class CreditTransactionService:
         
         try:
             async with get_session() as session:
-                # Use raw SQL to query the actual database schema
                 query = text("""
-                    SELECT action_type,
-                           SUM(free_actions_used) as free_used,
-                           SUM(paid_actions_used) as paid_used,
-                           SUM(total_credits_spent) as credits_spent
+                    SELECT feature_used,
+                           COUNT(*) as action_count,
+                           SUM(credits_consumed) as credits_spent
                     FROM credit_usage_tracking
                     WHERE user_id = :user_id
-                      AND month_year = :month_year
-                    GROUP BY action_type
+                      AND billing_cycle_date = :billing_cycle_date
+                      AND action_successful = true
+                    GROUP BY feature_used
                 """)
 
                 result = await session.execute(query, {
                     "user_id": str(user_id),
-                    "month_year": month_year
+                    "billing_cycle_date": month_year
                 })
                 usage_records = result.fetchall()
 
-            # Calculate totals and breakdown using actual database fields
-            total_spent = sum(record.credits_spent for record in usage_records)
+            total_spent = sum(record.credits_spent or 0 for record in usage_records)
             actions_breakdown = {}
 
-            # Process records from actual database
             for record in usage_records:
-                actions_breakdown[record.action_type] = {
-                    "free_used": record.free_used,
-                    "paid_used": record.paid_used,
-                    "credits_spent": record.credits_spent
+                actions_breakdown[record.feature_used] = {
+                    "free_used": 0,
+                    "paid_used": record.action_count or 0,
+                    "credits_spent": record.credits_spent or 0
                 }
 
-            # Get top actions by credits spent (after processing all records)
             top_actions = sorted(
                 [
                     {
                         "action_type": action_type,
                         "credits_spent": data["credits_spent"],
-                        "total_actions": data["free_used"] + data["paid_used"]
+                        "total_actions": data["paid_used"]
                     }
                     for action_type, data in actions_breakdown.items()
                 ],
                 key=lambda x: x["credits_spent"],
                 reverse=True
-            )[:5]  # Top 5 actions
+            )[:5]
 
             summary = MonthlyUsageSummary(
                 month_year=month_year,

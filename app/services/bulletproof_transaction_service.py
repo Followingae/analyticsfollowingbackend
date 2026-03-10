@@ -487,9 +487,9 @@ class BulletproofTransactionService:
         2. monthly_usage_tracking.profiles_analyzed (individual member tracking)
         """
         try:
-            # Map auth.users.id to public.users.id
+            # Map auth.users.id to public.users.id and get supabase_user_id
             user_mapping = await db.execute(
-                text("SELECT id FROM users WHERE supabase_user_id = :auth_id"),
+                text("SELECT id, supabase_user_id FROM users WHERE supabase_user_id = :auth_id"),
                 {"auth_id": str(auth_user_id)}
             )
             user_row = user_mapping.fetchone()
@@ -498,11 +498,13 @@ class BulletproofTransactionService:
                 return
 
             public_user_id = user_row[0]
+            supabase_user_id = str(user_row[1]) if user_row[1] else str(auth_user_id)
 
             # Find team membership
+            # NOTE: team_members.user_id stores supabase_user_id, not users.id
             team_result = await db.execute(
-                text("SELECT team_id FROM team_members WHERE user_id = :user_id LIMIT 1"),
-                {"user_id": str(public_user_id)}
+                text("SELECT team_id FROM team_members WHERE (user_id = :supabase_id OR user_id = :app_id) LIMIT 1"),
+                {"supabase_id": supabase_user_id, "app_id": str(public_user_id)}
             )
             team_row = team_result.fetchone()
             if not team_row:

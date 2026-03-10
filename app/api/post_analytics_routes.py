@@ -169,7 +169,7 @@ async def analyze_posts_batch(
         from app.middleware.credit_gate import check_credits_only, CreditGateException
         from uuid import UUID as UUIDType
         batch_credits = 10 * len(request.post_urls)
-        user_uuid = UUIDType(str(current_user.supabase_user_id))
+        user_uuid = UUIDType(str(current_user.id))  # Must use users.id for wallet FK
         permission = await check_credits_only(user_uuid, "posts_analytics", batch_credits)
         if not permission.can_perform:
             raise CreditGateException(

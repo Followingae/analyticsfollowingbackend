@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, desc, asc, text
 from sqlalchemy.orm import selectinload
 
-from app.database.unified_models import Profile, UserProfileAccess, Post, MonthlyUsageTracking
+from app.database.unified_models import Profile, UserProfileAccess, Post
 from app.services.credit_wallet_service import credit_wallet_service
 from app.services.cdn_sync_service import cdn_sync_service
 from app.core.config import settings
@@ -287,6 +287,7 @@ class UserDiscoveryService:
                 }
 
             actual_user_id = app_user.id
+            actual_supabase_id = str(app_user.supabase_user_id)  # team_members.user_id stores this
             logger.info(f"🔓 Resolved user {user_id} to app user {actual_user_id}")
 
             # Check if profile exists
@@ -299,6 +300,34 @@ class UserDiscoveryService:
                     "success": False,
                     "error": "profile_not_found",
                     "message": "Profile not found"
+                }
+
+            # Eagerly capture profile attributes to avoid lazy-load greenlet errors
+            # when accessing them after wallet operations modify the session state
+            profile_username = profile.username
+            profile_full_name = profile.full_name
+            profile_followers_count = profile.followers_count
+            profile_posts_count = profile.posts_count
+            profile_is_verified = profile.is_verified
+            profile_ai_primary_content_type = profile.ai_primary_content_type
+
+            # Check team profile limit before spending credits
+            # NOTE: team_members.user_id stores supabase_user_id, not users.id
+            team_check = await db.execute(text("""
+                SELECT t.monthly_profile_limit, t.profiles_used_this_month, t.id as team_id
+                FROM team_members tm
+                JOIN teams t ON t.id = tm.team_id
+                WHERE (tm.user_id = :supabase_id OR tm.user_id = :app_id) AND tm.status = 'active'
+                LIMIT 1
+            """), {"supabase_id": actual_supabase_id, "app_id": str(actual_user_id)})
+            team_row = team_check.fetchone()
+            if team_row and team_row.profiles_used_this_month >= team_row.monthly_profile_limit:
+                return {
+                    "success": False,
+                    "error": "team_limit_exceeded",
+                    "message": f"Monthly profile limit reached ({team_row.monthly_profile_limit} profiles). Upgrade your plan for more.",
+                    "profiles_used": team_row.profiles_used_this_month,
+                    "profiles_limit": team_row.monthly_profile_limit
                 }
 
             # Check if already unlocked and not expired
@@ -324,88 +353,120 @@ class UserDiscoveryService:
                         "days_remaining": days_remaining
                     },
                     "profile": {
-                        "username": profile.username,
-                        "full_name": profile.full_name,
-                        "followers_count": profile.followers_count
+                        "username": profile_username,
+                        "full_name": profile_full_name,
+                        "followers_count": profile_followers_count
                     }
                 }
 
-            # Check user credits - get existing wallet or create if needed
-            wallet = await credit_wallet_service.get_wallet(user_id)
+            # Ensure wallet exists (auto-create if needed) before atomic spend
+            # CRITICAL FIX: Use actual_user_id (users.id) for FK-safe wallet operations
+            wallet = await credit_wallet_service.get_wallet(actual_user_id)
             if not wallet:
-                wallet = await credit_wallet_service.create_wallet(user_id)
-            if wallet.current_balance < credits_to_spend:
-                return {
-                    "success": False,
-                    "error": "insufficient_credits",
-                    "message": f"Insufficient credits. Required: {credits_to_spend}, Available: {wallet.current_balance}",
-                    "credits_available": wallet.current_balance,
-                    "credits_required": credits_to_spend
-                }
+                wallet = await credit_wallet_service.create_wallet(actual_user_id)
 
-            # Spend credits using atomic method
-            spend_result = await credit_wallet_service.spend_credits_atomic(
-                db=db,
-                user_id=user_id,
-                credits_amount=credits_to_spend,
-                action_type="profile_unlock",
-                description=f"Unlocked profile @{profile.username}",
-                reference_id=str(profile_id),
-                reference_type="profile"
-            )
+            # Spend credits atomically — spend_credits_atomic does its own FOR UPDATE
+            # balance check, so no need for a separate pre-check (avoids race conditions)
+            try:
+                spend_result = await credit_wallet_service.spend_credits_atomic(
+                    db=db,
+                    user_id=actual_user_id,
+                    credits_amount=credits_to_spend,
+                    action_type="profile_unlock",
+                    description=f"Unlocked profile @{profile_username}",
+                    reference_id=str(profile_id),
+                    reference_type="profile"
+                )
+            except Exception as e:
+                error_msg = str(e)
+                if "Insufficient credits" in error_msg or "No wallet found" in error_msg:
+                    return {
+                        "success": False,
+                        "error": "insufficient_credits",
+                        "message": error_msg,
+                        "credits_required": credits_to_spend
+                    }
+                raise
 
             if not spend_result:
                 return {
                     "success": False,
                     "error": "credit_spend_failed",
-                    "message": "Failed to spend credits",
-                    "credits_available": wallet.current_balance
+                    "message": "Failed to spend credits"
                 }
 
+            # CRITICAL: Cache ORM attributes as plain Python values immediately.
+            # Subsequent raw SQL operations will expire the ORM object, and
+            # accessing attributes later triggers a sync lazy-load (greenlet error).
+            cached_balance_after = spend_result.balance_after if hasattr(spend_result, 'balance_after') else None
+            cached_transaction_id = spend_result.id if spend_result else None
+
             # Create 30-day access record
+            # NOTE: Using raw SQL because the PGBouncer session uses AUTOCOMMIT isolation
+            # and autoflush=False, which prevents ORM db.add() from persisting reliably.
             now = datetime.now(timezone.utc)
             expires_at = now + timedelta(days=30)
 
-            new_access = UserProfileAccess(
-                user_id=actual_user_id,
-                profile_id=profile_id,
-                granted_at=now,
-                expires_at=expires_at,
-                created_at=now
+            await db.execute(
+                text("""
+                    INSERT INTO user_profile_access (id, user_id, profile_id, granted_at, expires_at, created_at)
+                    VALUES (gen_random_uuid(), :user_id, :profile_id, :granted_at, :expires_at, :created_at)
+                    ON CONFLICT (user_id, profile_id) DO UPDATE SET
+                        granted_at = :granted_at,
+                        expires_at = :expires_at
+                """),
+                {
+                    "user_id": str(actual_user_id),
+                    "profile_id": str(profile_id),
+                    "granted_at": now,
+                    "expires_at": expires_at,
+                    "created_at": now
+                }
             )
 
-            db.add(new_access)
+            # Also write to unlocked_influencers for permanent record
+            await db.execute(
+                text("""
+                    INSERT INTO unlocked_influencers (user_id, profile_id, username, unlocked_at, credits_spent, transaction_id)
+                    VALUES (:user_id, :profile_id, :username, :unlocked_at, :credits_spent, :transaction_id)
+                    ON CONFLICT DO NOTHING
+                """),
+                {
+                    "user_id": str(actual_user_id),
+                    "profile_id": str(profile_id),
+                    "username": profile_username,
+                    "unlocked_at": now,
+                    "credits_spent": credits_to_spend,
+                    "transaction_id": cached_transaction_id
+                }
+            )
 
             # ============================================================
-            # CRITICAL FIX: Update team and monthly usage tracking
-            # Without this, the dashboard usage counters never increment.
+            # Update team and monthly usage tracking
             # ============================================================
-            await self._record_profile_usage(db, actual_user_id)
+            await self._record_profile_usage(db, actual_user_id, supabase_user_id=actual_supabase_id)
 
-            await db.commit()
-            await db.refresh(new_access)
-
-            logger.info(f"✅ Profile unlocked: @{profile.username} for user {user_id}")
+            logger.info(f"Profile unlocked: @{profile_username} for user {user_id}")
 
             return {
                 "success": True,
                 "unlocked": True,
                 "credits_spent": credits_to_spend,
-                "credits_remaining": wallet.current_balance - credits_to_spend,
-                "message": f"Successfully unlocked @{profile.username} for 30 days",
+                "credits_remaining": cached_balance_after,
+                "message": f"Successfully unlocked @{profile_username} for 30 days",
                 "access_info": {
-                    "granted_at": new_access.granted_at.isoformat(),
-                    "expires_at": new_access.expires_at.isoformat(),
+                    "granted_at": now.isoformat(),
+                    "expires_at": expires_at.isoformat(),
                     "days_remaining": 30
                 },
                 "profile": {
-                    "id": str(profile.id),
-                    "username": profile.username,
-                    "full_name": profile.full_name,
-                    "followers_count": profile.followers_count,
-                    "posts_count": profile.posts_count,
-                    "is_verified": profile.is_verified,
-                    "ai_primary_content_type": profile.ai_primary_content_type
+                    "id": str(profile_id),
+                    "username": profile_username,
+                    "full_name": profile_full_name,
+                    "followers_count": profile_followers_count,
+                    "posts_count": profile_posts_count,
+                    "is_verified": profile_is_verified,
+                    "ai_primary_content_type": profile_ai_primary_content_type
                 },
                 "transaction_id": str(spend_result.transaction_id) if hasattr(spend_result, 'transaction_id') else None
             }
@@ -419,10 +480,12 @@ class UserDiscoveryService:
     async def _record_profile_usage(
         self,
         db: AsyncSession,
-        app_user_id: UUID
+        app_user_id: UUID,
+        supabase_user_id: Optional[str] = None
     ) -> None:
         """
         Record profile unlock usage in both team-level and individual-level tracking.
+        Uses raw SQL for all writes (PGBouncer AUTOCOMMIT compatible).
 
         Updates:
         1. teams.profiles_used_this_month (read by /auth/dashboard for usage display)
@@ -431,17 +494,25 @@ class UserDiscoveryService:
         This must be called within an existing transaction (before commit).
         """
         from app.database.unified_models import TeamMember
-        from datetime import date
-        from uuid import uuid4
 
         try:
             # Find the user's team membership
-            team_query = select(TeamMember).where(TeamMember.user_id == app_user_id)
+            # NOTE: team_members.user_id stores supabase_user_id, not users.id
+            lookup_ids = [str(app_user_id)]
+            if supabase_user_id:
+                lookup_ids.append(supabase_user_id)
+
+            team_query = select(TeamMember).where(
+                or_(
+                    TeamMember.user_id == str(app_user_id),
+                    TeamMember.user_id == (supabase_user_id or str(app_user_id))
+                )
+            )
             team_result = await db.execute(team_query)
             team_member = team_result.scalar_one_or_none()
 
             if not team_member:
-                logger.warning(f"[USAGE] User {app_user_id} has no team membership - skipping team usage tracking")
+                logger.warning(f"[USAGE] User {app_user_id} (supabase={supabase_user_id}) has no team membership - skipping team usage tracking")
                 return
 
             team_id = team_member.team_id
@@ -456,33 +527,16 @@ class UserDiscoveryService:
             )
             logger.info(f"[USAGE] Incremented teams.profiles_used_this_month for team {team_id}")
 
-            # 2. Upsert monthly_usage_tracking record for the individual user
-            current_month = date.today().replace(day=1)
-
-            usage_query = select(MonthlyUsageTracking).where(
-                and_(
-                    MonthlyUsageTracking.team_id == team_id,
-                    MonthlyUsageTracking.user_id == app_user_id,
-                    MonthlyUsageTracking.billing_month == current_month
-                )
-            )
-            usage_result = await db.execute(usage_query)
-            usage_record = usage_result.scalar_one_or_none()
-
-            if usage_record:
-                usage_record.profiles_analyzed += 1
-                usage_record.updated_at = datetime.now(timezone.utc)
-            else:
-                usage_record = MonthlyUsageTracking(
-                    id=uuid4(),
-                    team_id=team_id,
-                    user_id=app_user_id,
-                    billing_month=current_month,
-                    profiles_analyzed=1,
-                    emails_unlocked=0,
-                    posts_analyzed=0
-                )
-                db.add(usage_record)
+            # 2. Upsert monthly_usage_tracking record for the individual user (raw SQL)
+            await db.execute(text("""
+                INSERT INTO monthly_usage_tracking (id, user_id, team_id, billing_month, profiles_analyzed, emails_unlocked, posts_analyzed)
+                VALUES (gen_random_uuid(), :user_id, :team_id, date_trunc('month', CURRENT_DATE)::date, 1, 0, 0)
+                ON CONFLICT (team_id, user_id, billing_month)
+                DO UPDATE SET profiles_analyzed = monthly_usage_tracking.profiles_analyzed + 1, updated_at = NOW()
+            """), {
+                "user_id": str(app_user_id),
+                "team_id": str(team_id)
+            })
 
             logger.info(f"[USAGE] Updated monthly_usage_tracking for user {app_user_id} in team {team_id}")
 

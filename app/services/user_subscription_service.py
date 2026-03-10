@@ -23,27 +23,19 @@ class UserSubscriptionService:
     Comprehensive subscription and billing management
     """
 
-    # Credit allocations based on subscription tier
-    TIER_CREDITS = {
-        "free": {
-            "monthly_credits": 125,  # 5 profiles * 25 credits
-            "profile_unlocks": 5,
-            "email_unlocks": 0,
-            "post_analytics": 0
-        },
-        "standard": {
-            "monthly_credits": 12500,  # 500 profiles * 25 credits
-            "profile_unlocks": 500,
-            "email_unlocks": 250,
-            "post_analytics": 125
-        },
-        "premium": {
-            "monthly_credits": 50000,  # 2000 profiles * 25 credits
-            "profile_unlocks": 2000,
-            "email_unlocks": 800,
-            "post_analytics": 300
+    @staticmethod
+    def _get_tier_config(tier: str) -> dict:
+        """Get tier configuration from canonical SUBSCRIPTION_TIER_LIMITS"""
+        from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
+        tier_key = getattr(SubscriptionTier, tier.upper(), tier)
+        tier_limits = SUBSCRIPTION_TIER_LIMITS.get(tier_key, SUBSCRIPTION_TIER_LIMITS.get(SubscriptionTier.FREE, {}))
+        return {
+            "monthly_credits": tier_limits.get('monthly_credits', 125),
+            "profile_unlocks": tier_limits.get('monthly_profile_limit', 5),
+            "email_unlocks": tier_limits.get('monthly_email_limit', 0),
+            "post_analytics": tier_limits.get('monthly_posts_limit', 0),
+            "max_team_members": tier_limits.get('max_team_members', 1),
         }
-    }
 
     def __init__(self):
         self.wallet_service = CreditWalletService()
@@ -71,48 +63,62 @@ class UserSubscriptionService:
             if initial_billing_date is None:
                 initial_billing_date = date.today()
 
-            # Get tier configuration
-            tier_config = self.TIER_CREDITS.get(subscription_tier.lower(), self.TIER_CREDITS["free"])
+            # Get tier configuration from canonical source
+            tier_config = self._get_tier_config(subscription_tier)
 
             async with get_session() as session:
                 # Update user's subscription tier
                 await session.execute(
-                    update(User)
-                    .where(User.id == user_id)
-                    .values(
-                        subscription_tier=subscription_tier,
-                        billing_type=billing_type,
-                        updated_at=datetime.utcnow()
-                    )
+                    text("""UPDATE users SET subscription_tier = :tier, billing_type = :billing,
+                            updated_at = :now WHERE id = :uid"""),
+                    {"tier": subscription_tier, "billing": billing_type,
+                     "now": datetime.utcnow(), "uid": str(user_id)}
                 )
 
                 # Check if wallet exists
                 wallet_result = await session.execute(
-                    select(CreditWallet).where(CreditWallet.user_id == user_id)
+                    text("SELECT id FROM credit_wallets WHERE user_id = :uid"),
+                    {"uid": str(user_id)}
                 )
-                wallet = wallet_result.scalar_one_or_none()
+                existing_wallet = wallet_result.fetchone()
 
-                if not wallet:
-                    # Create new wallet with tier-based credits
-                    wallet = CreditWallet(
-                        user_id=user_id,
-                        current_balance=tier_config["monthly_credits"],
-                        total_earned_this_cycle=tier_config["monthly_credits"],
-                        current_billing_cycle_start=initial_billing_date,
-                        current_billing_cycle_end=initial_billing_date + timedelta(days=30),
-                        next_reset_date=initial_billing_date + timedelta(days=30),
-                        subscription_status="active",
-                        auto_refresh_enabled=True
+                cycle_end = initial_billing_date + timedelta(days=30)
+                credits = tier_config["monthly_credits"]
+
+                if not existing_wallet:
+                    # Create new wallet with tier-based credits (raw SQL for PGBouncer)
+                    await session.execute(
+                        text("""
+                            INSERT INTO credit_wallets (user_id, current_balance,
+                                total_earned_this_cycle, total_purchased_this_cycle, total_spent_this_cycle,
+                                lifetime_earned, lifetime_spent,
+                                current_billing_cycle_start, current_billing_cycle_end,
+                                next_reset_date, subscription_status, subscription_active,
+                                auto_refresh_enabled, is_locked)
+                            VALUES (:uid, :balance, :earned, 0, 0, 0, 0,
+                                :cycle_start, :cycle_end, :reset_date,
+                                'active', true, true, false)
+                        """),
+                        {"uid": str(user_id), "balance": credits, "earned": credits,
+                         "cycle_start": initial_billing_date, "cycle_end": cycle_end,
+                         "reset_date": cycle_end}
                     )
-                    session.add(wallet)
                 else:
                     # Update existing wallet
-                    wallet.current_balance = tier_config["monthly_credits"]
-                    wallet.total_earned_this_cycle = tier_config["monthly_credits"]
-                    wallet.current_billing_cycle_start = initial_billing_date
-                    wallet.current_billing_cycle_end = initial_billing_date + timedelta(days=30)
-                    wallet.next_reset_date = initial_billing_date + timedelta(days=30)
-                    wallet.updated_at = datetime.utcnow()
+                    await session.execute(
+                        text("""
+                            UPDATE credit_wallets SET current_balance = :balance,
+                                total_earned_this_cycle = :earned,
+                                current_billing_cycle_start = :cycle_start,
+                                current_billing_cycle_end = :cycle_end,
+                                next_reset_date = :reset_date, updated_at = :now
+                            WHERE user_id = :uid
+                        """),
+                        {"balance": credits, "earned": credits,
+                         "cycle_start": initial_billing_date, "cycle_end": cycle_end,
+                         "reset_date": cycle_end, "now": datetime.utcnow(),
+                         "uid": str(user_id)}
+                    )
 
                 await session.commit()
 
@@ -186,10 +192,9 @@ class UserSubscriptionService:
                 if wallet and wallet.next_reset_date:
                     days_until_billing = (wallet.next_reset_date - date.today()).days
 
-                # Get tier configuration
-                tier_config = self.TIER_CREDITS.get(
-                    user.subscription_tier.lower() if user.subscription_tier else "free",
-                    self.TIER_CREDITS["free"]
+                # Get tier configuration from canonical source
+                tier_config = self._get_tier_config(
+                    user.subscription_tier.lower() if user.subscription_tier else "free"
                 )
 
                 return {

@@ -374,6 +374,7 @@ class DiscoveryService:
     ) -> Dict[str, Any]:
         """
         Unlock a profile using credits (profile_analysis action - 25 credits)
+        Uses raw SQL for all database writes (PGBouncer AUTOCOMMIT compatibility).
         """
         try:
             async with get_session() as session:
@@ -384,27 +385,52 @@ class DiscoveryService:
                 )
                 existing_unlock_result = await session.execute(existing_unlock_query)
                 existing_unlock = existing_unlock_result.scalar_one_or_none()
-                
+
                 if existing_unlock:
                     return {
                         "already_unlocked": True,
                         "unlocked_at": existing_unlock.unlocked_at,
                         "credits_spent": existing_unlock.credits_spent
                     }
-                
+
                 # Check if profile exists and is discoverable
                 profile = await session.get(Profile, profile_id)
                 if not profile:
                     raise ValueError("Profile not found")
-                
+
                 if profile.blacklisted or profile.inactive:
                     raise ValueError("Profile is not available for unlock")
-                
+
+                # Eagerly capture profile attributes to avoid lazy-load greenlet errors
+                # when accessing them after wallet operations modify the session state
+                profile_username = profile.username
+                profile_full_name = profile.full_name
+                profile_followers_count = profile.followers_count
+                profile_following_count = profile.following_count
+                profile_posts_count = profile.posts_count
+                profile_engagement_rate = float(profile.engagement_rate) if profile.engagement_rate else None
+                profile_avg_likes = profile.avg_likes
+                profile_avg_comments = profile.avg_comments
+                profile_biography = profile.biography
+                profile_external_url = profile.external_url
+                profile_categories = profile.categories
+                profile_languages = profile.languages
+                profile_is_verified = profile.is_verified
+                profile_is_business_account = profile.is_business_account
+                profile_sell_price_usd = profile.sell_price_usd
+                profile_min_collaboration_fee = profile.min_collaboration_fee
+                profile_barter_eligible = profile.barter_eligible
+                profile_ai_primary_content_type = profile.ai_primary_content_type
+                profile_ai_content_distribution = profile.ai_content_distribution
+                profile_ai_avg_sentiment_score = float(profile.ai_avg_sentiment_score) if profile.ai_avg_sentiment_score else None
+                profile_ai_language_distribution = profile.ai_language_distribution
+                profile_ai_content_quality_score = float(profile.ai_content_quality_score) if profile.ai_content_quality_score else None
+
                 # Check credits for profile_analysis action (25 credits)
                 permission = await credit_wallet_service.can_perform_action(
                     user_id, "profile_analysis", 25
                 )
-                
+
                 if not permission.can_perform:
                     return {
                         "error": "insufficient_credits",
@@ -412,7 +438,7 @@ class DiscoveryService:
                         "credits_required": 25,
                         "wallet_balance": permission.wallet_balance
                     }
-                
+
                 # Spend credits
                 transaction = await credit_wallet_service.spend_credits(
                     user_id=user_id,
@@ -420,36 +446,71 @@ class DiscoveryService:
                     action_type="profile_analysis",
                     reference_id=str(profile_id),
                     reference_type="profile",
-                    description=f"Profile unlock: {profile.username}"
-                )
-                
-                # Create unlock record
-                unlock_record = UnlockedProfile(
-                    user_id=user_id,
-                    profile_id=profile_id,
-                    credits_spent=25,
-                    unlock_type="profile_analysis",
-                    unlock_reason=unlock_reason,
-                    transaction_id=transaction.id
+                    description=f"Profile unlock: {profile_username}"
                 )
 
-                session.add(unlock_record)
+                # Create unlock records using raw SQL (PGBouncer AUTOCOMMIT compatible)
+                now = datetime.utcnow()
+                expires_at = now + timedelta(days=30)
+
+                await session.execute(text("""
+                    INSERT INTO user_profile_access (id, user_id, profile_id, granted_at, expires_at, created_at)
+                    VALUES (gen_random_uuid(), :user_id, :profile_id, :granted_at, :expires_at, :created_at)
+                    ON CONFLICT (user_id, profile_id) DO UPDATE SET granted_at = :granted_at, expires_at = :expires_at
+                """), {
+                    "user_id": str(user_id),
+                    "profile_id": str(profile_id),
+                    "granted_at": now,
+                    "expires_at": expires_at,
+                    "created_at": now
+                })
+
+                await session.execute(text("""
+                    INSERT INTO unlocked_influencers (user_id, profile_id, username, unlocked_at, credits_spent, transaction_id)
+                    VALUES (:user_id, :profile_id, :username, :unlocked_at, :credits_spent, :transaction_id)
+                    ON CONFLICT DO NOTHING
+                """), {
+                    "user_id": str(user_id),
+                    "profile_id": str(profile_id),
+                    "username": profile_username,
+                    "unlocked_at": now,
+                    "credits_spent": 25,
+                    "transaction_id": transaction.id if transaction else None
+                })
 
                 # Record team and monthly usage tracking
                 await self._record_profile_usage(session, user_id)
 
-                await session.commit()
-                await session.refresh(unlock_record)
-
                 return {
                     "unlocked": True,
-                    "unlock_id": unlock_record.id,
                     "credits_spent": 25,
                     "transaction_id": transaction.id,
-                    "unlocked_at": unlock_record.unlocked_at,
-                    "full_data": self._get_full_data(profile)
+                    "unlocked_at": now,
+                    "full_data": {
+                        "followers_count": profile_followers_count,
+                        "following_count": profile_following_count,
+                        "posts_count": profile_posts_count,
+                        "engagement_rate": profile_engagement_rate,
+                        "avg_likes": profile_avg_likes,
+                        "avg_comments": profile_avg_comments,
+                        "full_name": profile_full_name,
+                        "biography": profile_biography,
+                        "external_url": profile_external_url,
+                        "categories": profile_categories,
+                        "languages": profile_languages,
+                        "sell_price_usd": profile_sell_price_usd,
+                        "min_collaboration_fee": profile_min_collaboration_fee,
+                        "barter_eligible": profile_barter_eligible,
+                        "ai_content_insights": {
+                            "primary_content_type": profile_ai_primary_content_type,
+                            "content_distribution": profile_ai_content_distribution,
+                            "avg_sentiment_score": profile_ai_avg_sentiment_score,
+                            "language_distribution": profile_ai_language_distribution,
+                            "content_quality_score": profile_ai_content_quality_score
+                        }
+                    }
                 }
-                
+
         except Exception as e:
             logger.error(f"Error unlocking profile {profile_id} for user {user_id}: {e}")
             raise
@@ -461,18 +522,32 @@ class DiscoveryService:
     ) -> None:
         """
         Record profile unlock usage in team-level and individual-level tracking.
+        Uses raw SQL for all writes (PGBouncer AUTOCOMMIT compatible).
 
         Updates:
         1. teams.profiles_used_this_month (read by /auth/dashboard for usage display)
         2. monthly_usage_tracking.profiles_analyzed (individual member tracking)
         """
-        from app.database.unified_models import TeamMember, MonthlyUsageTracking
-        from datetime import date
-
         try:
-            team_query = select(TeamMember).where(TeamMember.user_id == user_id)
-            team_result = await db.execute(team_query)
-            team_member = team_result.scalar_one_or_none()
+            # NOTE: team_members.user_id stores supabase_user_id, not users.id
+            # Look up supabase_user_id first, then try both for team lookup
+            supa_result = await db.execute(
+                text("SELECT supabase_user_id FROM users WHERE id = CAST(:uid AS uuid)"),
+                {"uid": str(user_id)}
+            )
+            supa_row = supa_result.fetchone()
+            supabase_id = str(supa_row[0]) if supa_row and supa_row[0] else str(user_id)
+
+            team_result = await db.execute(
+                text("SELECT team_id FROM team_members WHERE (user_id = :supa_id OR user_id = :app_id) AND status = 'active' LIMIT 1"),
+                {"supa_id": supabase_id, "app_id": str(user_id)}
+            )
+            team_row = team_result.fetchone()
+            team_member = None
+            if team_row:
+                class _TeamRef:
+                    def __init__(self, tid): self.team_id = tid
+                team_member = _TeamRef(team_row[0])
 
             if not team_member:
                 logger.warning(f"[USAGE] User {user_id} has no team membership - skipping team usage tracking")
@@ -489,32 +564,16 @@ class DiscoveryService:
                 {"team_id": str(team_id)}
             )
 
-            # 2. Upsert monthly_usage_tracking for the user
-            current_month = date.today().replace(day=1)
-            usage_query = select(MonthlyUsageTracking).where(
-                and_(
-                    MonthlyUsageTracking.team_id == team_id,
-                    MonthlyUsageTracking.user_id == user_id,
-                    MonthlyUsageTracking.billing_month == current_month
-                )
-            )
-            usage_result = await db.execute(usage_query)
-            usage_record = usage_result.scalar_one_or_none()
-
-            if usage_record:
-                usage_record.profiles_analyzed += 1
-                usage_record.updated_at = datetime.utcnow()
-            else:
-                usage_record = MonthlyUsageTracking(
-                    id=uuid4(),
-                    team_id=team_id,
-                    user_id=user_id,
-                    billing_month=current_month,
-                    profiles_analyzed=1,
-                    emails_unlocked=0,
-                    posts_analyzed=0
-                )
-                db.add(usage_record)
+            # 2. Upsert monthly_usage_tracking for the user (raw SQL)
+            await db.execute(text("""
+                INSERT INTO monthly_usage_tracking (id, user_id, team_id, billing_month, profiles_analyzed, emails_unlocked, posts_analyzed)
+                VALUES (gen_random_uuid(), :user_id, :team_id, date_trunc('month', CURRENT_DATE)::date, 1, 0, 0)
+                ON CONFLICT (team_id, user_id, billing_month)
+                DO UPDATE SET profiles_analyzed = monthly_usage_tracking.profiles_analyzed + 1, updated_at = NOW()
+            """), {
+                "user_id": str(user_id),
+                "team_id": str(team_id)
+            })
 
             logger.info(f"[USAGE] Recorded profile usage for user {user_id} in team {team_id}")
 

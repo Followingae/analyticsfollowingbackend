@@ -406,7 +406,7 @@ async def get_user_profile(
                     u.billing_type, u.company_logo_url, u.created_at,
                     cw.current_balance
                 FROM users u
-                LEFT JOIN credit_wallets cw ON cw.user_id::text = u.supabase_user_id
+                LEFT JOIN credit_wallets cw ON cw.user_id = u.id
                 WHERE u.id = :user_id
             """),
             {"user_id": current_user.id}

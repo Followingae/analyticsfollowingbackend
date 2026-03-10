@@ -38,25 +38,11 @@ async def get_credit_balance(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get user's current credit balance with subscription data"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         # Get basic balance
         balance = await credit_wallet_service.get_wallet_balance(user_id)
-
-        # Enhance with Stripe subscription data
-        try:
-            billing_summary = await stripe_subscription_service.get_billing_summary(user_id)
-
-            # Add billing cycle dates to response
-            if billing_summary['billing_cycle']['start']:
-                balance.billing_cycle_start = billing_summary['billing_cycle']['start']
-            if billing_summary['billing_cycle']['end']:
-                balance.billing_cycle_end = billing_summary['billing_cycle']['end']
-
-        except Exception as stripe_error:
-            logger.warning(f"Could not get Stripe data for user {user_id}: {stripe_error}")
-            # Continue with basic balance if Stripe fails
 
         return balance
     except Exception as e:
@@ -75,7 +61,7 @@ async def get_total_plan_credits(
     - Bonus credits from promotions
     - Total available credits (sum of all)
     """
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         total_plan_credits = await credit_wallet_service.get_total_plan_credits(user_id)
@@ -95,7 +81,7 @@ async def get_wallet_summary(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get comprehensive wallet summary"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         summary = await credit_wallet_service.get_wallet_summary(user_id)
@@ -115,7 +101,7 @@ async def get_credit_dashboard(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get complete credit dashboard data"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         # Get wallet summary
@@ -168,7 +154,7 @@ async def get_transaction_history(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get paginated transaction history with filters"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         # Parse transaction types
@@ -202,7 +188,7 @@ async def search_transactions(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Advanced transaction search"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         # Parse filters
@@ -245,7 +231,7 @@ async def get_credits_in_out_summary(
     - Net credits and current balance
     - Optional monthly breakdown for charts
     """
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         summary_data = await credit_transaction_service.get_credits_in_out_summary(
@@ -272,7 +258,7 @@ async def get_monthly_usage(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get monthly usage summary"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         # Parse month_year if provided
@@ -307,7 +293,7 @@ async def get_spending_analytics(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get comprehensive spending analytics"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         analytics = await credit_transaction_service.get_spending_analytics(user_id, months)
@@ -329,7 +315,7 @@ async def check_action_permission(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Check if user can perform a credit-gated action"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         permission = await check_credits_only(user_id, action_type, credits_required)
@@ -377,7 +363,7 @@ async def calculate_bulk_pricing(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Calculate bulk pricing for multiple actions"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         if user_id_for_allowances:
@@ -423,7 +409,7 @@ async def get_allowance_status(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get free allowance status for all actions"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         # Parse month_year if provided
@@ -459,16 +445,44 @@ async def estimate_credit_purchase(
     credits_amount: int = Body(..., ge=1, description="Number of credits to purchase"),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    """Estimate cost for credit purchase (prepare for Stripe)"""
+    """Estimate cost for credit purchase based on available top-up packages"""
     try:
-        # TODO: Implement actual pricing logic when Stripe is integrated
-        # For now, return placeholder pricing
-        price_per_credit = 0.01  # $0.01 per credit
-        total_price_usd = credits_amount * price_per_credit
-        
+        from app.models.teams import CREDIT_TOPUP_PACKAGES
+
+        # Find the best matching package for the requested credit amount
+        matching_packages = []
+        for pkg_key, pkg in CREDIT_TOPUP_PACKAGES.items():
+            if not pkg.get("is_active", False):
+                continue
+            matching_packages.append({
+                "package_id": pkg_key,
+                "name": pkg["name"],
+                "credits": pkg["credits"],
+                "base_price_usd": pkg["base_price_usd"],
+                "price_per_credit_cents": round(pkg["base_price_usd"] / pkg["credits"] * 100, 2),
+            })
+
+        if not matching_packages:
+            return {
+                "credits_amount": credits_amount,
+                "packages": [],
+                "estimated": False,
+                "message": "Credit top-up pricing is not currently configured. Please contact support."
+            }
+
+        # Sort by credits ascending
+        matching_packages.sort(key=lambda p: p["credits"])
+
+        # Find the best package (smallest that covers the requested amount, or the largest)
+        best_package = matching_packages[-1]  # default to largest
+        for pkg in matching_packages:
+            if pkg["credits"] >= credits_amount:
+                best_package = pkg
+                break
+
         # Get user's currency for proper formatting
-        user_currency = await currency_service.get_user_currency(str(current_user.supabase_user_id))
-        total_price_cents = int(total_price_usd * 100)  # Convert to cents
+        user_currency = await currency_service.get_user_currency(str(current_user.id))
+        total_price_cents = int(best_package["base_price_usd"] * 100)
         formatted_total = await currency_service.format_amount(
             total_price_cents,
             currency_info=user_currency
@@ -476,14 +490,20 @@ async def estimate_credit_purchase(
 
         return {
             "credits_amount": credits_amount,
-            "price_per_credit_cents": int(price_per_credit * 100),
-            "total_price_cents": total_price_cents,
-            "total_price_formatted": formatted_total,
+            "recommended_package": {
+                "package_id": best_package["package_id"],
+                "name": best_package["name"],
+                "credits": best_package["credits"],
+                "price_cents": total_price_cents,
+                "price_formatted": formatted_total,
+                "price_per_credit_cents": best_package["price_per_credit_cents"],
+            },
+            "available_packages": matching_packages,
             "currency_info": user_currency,
             "estimated": True,
-            "message": "Pricing estimation - Stripe integration pending"
+            "message": "Pricing based on available top-up packages"
         }
-        
+
     except Exception as e:
         logger.error(f"Error estimating credit purchase: {e}")
         raise HTTPException(status_code=500, detail="Error estimating purchase cost")
@@ -494,17 +514,39 @@ async def get_top_up_history(
     limit: int = Query(20, ge=1, le=100),
     current_user: UserInDB = Depends(get_current_active_user)
 ):
-    """Get credit purchase history (placeholder for future Stripe integration)"""
+    """Get credit purchase/top-up history from transaction records"""
+    user_id = UUID(str(current_user.id))
+
     try:
-        # TODO: Implement when credit top-up orders are integrated
+        # Query transactions with top-up related types
+        top_up_types = ["top_up", "admin_credit", "purchase", "credit_addition", "bonus"]
+        transactions = await credit_transaction_service.get_transaction_history(
+            user_id=user_id,
+            limit=limit,
+            transaction_types=top_up_types
+        )
+
+        orders = [
+            {
+                "id": str(t.id),
+                "type": t.transaction_type,
+                "action": t.action_type,
+                "credits": t.amount,
+                "description": t.description,
+                "balance_after": t.balance_after,
+                "date": t.created_at.isoformat() if t.created_at else None
+            }
+            for t in transactions
+        ]
+
         return {
-            "orders": [],
-            "total_orders": 0,
-            "message": "Top-up history - Stripe integration pending"
+            "orders": orders,
+            "total_orders": len(orders),
+            "message": f"Found {len(orders)} top-up transactions"
         }
-        
+
     except Exception as e:
-        logger.error(f"Error getting top-up history: {e}")
+        logger.error(f"Error getting top-up history for user {user_id}: {e}")
         raise HTTPException(status_code=500, detail="Error retrieving purchase history")
 
 
@@ -543,7 +585,7 @@ async def create_wallet(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Create credit wallet for user (if they don't have one)"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
     
     try:
         # Check if user already has a wallet
@@ -583,7 +625,7 @@ async def get_billing_dashboard(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get comprehensive billing dashboard - Supports both Stripe and Manual payments"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         # Get credit data
@@ -676,7 +718,7 @@ async def upgrade_subscription(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Upgrade user's subscription to a higher tier"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         if tier not in ['standard', 'premium']:
@@ -702,7 +744,7 @@ async def downgrade_subscription(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Downgrade user's subscription (takes effect at period end)"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         if tier not in ['free', 'standard']:
@@ -727,7 +769,7 @@ async def cancel_subscription(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Cancel user's subscription"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         subscription = await stripe_subscription_service.cancel_subscription(user_id, at_period_end)
@@ -751,7 +793,7 @@ async def get_topup_options(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Get available credit topup options - Supports both Stripe and Manual payments"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         # Check if user has Stripe payment method
@@ -827,7 +869,7 @@ async def create_topup_payment_link(
     current_user: UserInDB = Depends(get_current_active_user)
 ):
     """Create a payment link for credit topup"""
-    user_id = UUID(str(current_user.supabase_user_id))
+    user_id = UUID(str(current_user.id))
 
     try:
         if topup_type not in ['starter', 'professional', 'enterprise']:

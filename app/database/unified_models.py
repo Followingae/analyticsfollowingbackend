@@ -652,6 +652,7 @@ class Campaign(Base):
     brand_name = Column(String(255), nullable=False)
     brand_logo_url = Column(Text)  # CDN URL for brand logo
     status = Column(String(20), nullable=False, default='draft')  # draft, active, paused, in_review, completed, archived
+    campaign_type = Column(String(20), default='influencer')  # influencer | ugc
 
     # Budget tracking
     budget = Column(Numeric(12, 2))  # Total campaign budget
@@ -742,6 +743,138 @@ class CampaignCreator(Base):
         UniqueConstraint('campaign_id', 'profile_id', name='unique_campaign_creator'),
         Index('idx_campaign_creators_campaign_id', 'campaign_id'),
         Index('idx_campaign_creators_profile_id', 'profile_id'),
+    )
+
+
+# =============================================================================
+# UGC MODULE - UGC Content Creator & Campaign Management
+# =============================================================================
+
+class UGCModel(Base):
+    """UGC content creators / talent pool"""
+    __tablename__ = "ugc_models"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    full_name = Column(String(255), nullable=False)
+    email = Column(String(255))
+    phone = Column(String(50))
+    instagram_url = Column(String(500))
+    portfolio_url = Column(String(500))
+    profile_photo_url = Column(String(500))
+    ethnicity = Column(String(100))
+    nationality = Column(String(100))
+    gender = Column(String(20))
+    age_range = Column(String(20))
+    languages = Column(JSONB, default=list)
+    specialties = Column(JSONB, default=list)
+    day_rate_usd_cents = Column(Integer)
+    previous_brands = Column(JSONB, default=list)
+    rating = Column(Numeric(3, 2))
+    status = Column(String(20), default='active')
+    notes = Column(Text)
+    created_by = Column(UUID(as_uuid=True))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'inactive', 'blacklisted')", name='ugc_models_status_check'),
+        Index('idx_ugc_models_status', 'status'),
+    )
+
+
+class CampaignUGCModel(Base):
+    """Models assigned to a specific UGC campaign"""
+    __tablename__ = "campaign_ugc_models"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    model_id = Column(UUID(as_uuid=True), ForeignKey('ugc_models.id', ondelete='CASCADE'), nullable=False, index=True)
+    status = Column(String(30), default='proposed')
+    selected_by_brand = Column(Boolean, default=False)
+    brand_feedback = Column(Text)
+    assigned_concepts = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    campaign = relationship("Campaign")
+    model = relationship("UGCModel")
+
+    __table_args__ = (
+        UniqueConstraint('campaign_id', 'model_id', name='unique_campaign_ugc_model'),
+        CheckConstraint("status IN ('proposed', 'selected', 'rejected', 'confirmed')", name='campaign_ugc_models_status_check'),
+    )
+
+
+class UGCConcept(Base):
+    """Creative concepts for UGC campaigns"""
+    __tablename__ = "ugc_concepts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    concept_number = Column(Integer, nullable=False)
+    status = Column(String(30), default='draft')
+    concept_name = Column(String(255), nullable=False)
+    reference_url = Column(String(500))
+    reference_thumbnail_url = Column(String(500))
+    product_group = Column(String(255))
+    shoot_location = Column(String(255))
+    creative_direction = Column(Text)
+    primary_hook = Column(Text)
+    content_purpose = Column(Text)
+    scene_description = Column(Text)
+    on_screen_text = Column(Text)
+    script = Column(Text)
+    usability_notes = Column(Text)
+    caption_en = Column(Text)
+    caption_ar = Column(Text)
+    brand_feedback = Column(Text)
+    assigned_model_id = Column(UUID(as_uuid=True), ForeignKey('ugc_models.id', ondelete='SET NULL'), nullable=True)
+    shoot_date = Column(Date)
+    foc_products = Column(JSONB, default=list)
+    month = Column(Date)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    campaign = relationship("Campaign")
+    assigned_model = relationship("UGCModel")
+
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'proposed', 'approved', 'rejected', 'revision_requested', 'in_production', 'completed')", name='ugc_concepts_status_check'),
+        Index('idx_ugc_concepts_campaign', 'campaign_id'),
+        Index('idx_ugc_concepts_status', 'status'),
+    )
+
+
+class UGCVideo(Base):
+    """Video deliverables for UGC concepts"""
+    __tablename__ = "ugc_videos"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_lib.uuid4)
+    concept_id = Column(UUID(as_uuid=True), ForeignKey('ugc_concepts.id', ondelete='CASCADE'), nullable=True)
+    campaign_id = Column(UUID(as_uuid=True), ForeignKey('campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    video_name = Column(String(255))
+    video_url = Column(String(500))
+    thumbnail_url = Column(String(500))
+    duration_seconds = Column(Integer)
+    dimension = Column(String(20))
+    file_size_bytes = Column(BigInteger)
+    status = Column(String(30), default='pending')
+    brand_feedback = Column(Text)
+    revision_count = Column(Integer, default=0)
+    posting_status = Column(String(30), default='not_posted')
+    posted_url = Column(String(500))
+    learnings = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    concept = relationship("UGCConcept")
+    campaign = relationship("Campaign")
+
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'uploaded', 'in_review', 'revision_requested', 'approved', 'final')", name='ugc_videos_status_check'),
+        CheckConstraint("posting_status IN ('not_posted', 'scheduled', 'posted')", name='ugc_videos_posting_check'),
+        Index('idx_ugc_videos_campaign', 'campaign_id'),
+        Index('idx_ugc_videos_status', 'status'),
     )
 
 

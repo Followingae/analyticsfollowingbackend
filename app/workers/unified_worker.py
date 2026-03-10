@@ -982,12 +982,23 @@ async def _process_creator_search_async(job_id: str) -> Dict[str, Any]:
             )
 
             # STEP 5: Auto-unlock profile for the user
+            # Uses raw SQL (PGBouncer AUTOCOMMIT compatible) and or_() for dual-ID lookup
             from app.database.unified_models import User, UserProfileAccess
-            user_q = select(User).where(User.supabase_user_id == user_id)
+            from sqlalchemy import or_
+            from datetime import timedelta
+
+            user_q = select(User).where(
+                or_(User.id == str(user_id), User.supabase_user_id == str(user_id))
+            )
             user_r = await db.execute(user_q)
             app_user = user_r.scalar_one_or_none()
 
             if app_user:
+                # Cache attributes before further DB ops (avoid greenlet lazy-load)
+                app_user_id = str(app_user.id)
+                profile_id_str = str(profile.id)
+                profile_username = profile.username
+
                 existing_access_q = select(UserProfileAccess).where(
                     UserProfileAccess.user_id == app_user.id,
                     UserProfileAccess.profile_id == profile.id,
@@ -995,16 +1006,54 @@ async def _process_creator_search_async(job_id: str) -> Dict[str, Any]:
                 )
                 existing_access_r = await db.execute(existing_access_q)
                 if not existing_access_r.scalar_one_or_none():
-                    from datetime import timedelta
-                    new_access = UserProfileAccess(
-                        user_id=app_user.id,
-                        profile_id=profile.id,
-                        granted_at=datetime.now(timezone.utc),
-                        expires_at=datetime.now(timezone.utc) + timedelta(days=30)
-                    )
-                    db.add(new_access)
-                    await db.commit()
-                    logger.info(f"[CREATOR-SEARCH] Auto-unlocked {username} for user {user_id}")
+                    now = datetime.now(timezone.utc)
+                    expires_at = now + timedelta(days=30)
+
+                    # Raw SQL: user_profile_access (PGBouncer AUTOCOMMIT compatible)
+                    await db.execute(text("""
+                        INSERT INTO user_profile_access (id, user_id, profile_id, granted_at, expires_at, created_at)
+                        VALUES (gen_random_uuid(), :user_id, :profile_id, :granted_at, :expires_at, :created_at)
+                        ON CONFLICT (user_id, profile_id) DO UPDATE SET
+                            granted_at = :granted_at, expires_at = :expires_at
+                    """), {
+                        "user_id": app_user_id,
+                        "profile_id": profile_id_str,
+                        "granted_at": now,
+                        "expires_at": expires_at,
+                        "created_at": now
+                    })
+
+                    # Raw SQL: unlocked_influencers (permanent audit record)
+                    await db.execute(text("""
+                        INSERT INTO unlocked_influencers (user_id, profile_id, username, unlocked_at, credits_spent)
+                        VALUES (:user_id, :profile_id, :username, :unlocked_at, :credits_spent)
+                        ON CONFLICT DO NOTHING
+                    """), {
+                        "user_id": app_user_id,
+                        "profile_id": profile_id_str,
+                        "username": profile_username,
+                        "unlocked_at": now,
+                        "credits_spent": 25
+                    })
+
+                    # Spend credits for the auto-unlock
+                    try:
+                        from app.services.credit_wallet_service import credit_wallet_service
+                        from uuid import UUID
+                        await credit_wallet_service.spend_credits(
+                            user_id=UUID(app_user_id),
+                            amount=25,
+                            action_type="profile_unlock",
+                            reference_id=profile_id_str,
+                            reference_type="profile",
+                            description=f"Auto-unlock @{profile_username} (background search)"
+                        )
+                        logger.info(f"[CREATOR-SEARCH] Auto-unlocked + charged 25 credits: {profile_username} for user {app_user_id}")
+                    except Exception as credit_err:
+                        logger.warning(f"[CREATOR-SEARCH] Auto-unlock created but credit charge failed for {app_user_id}: {credit_err}")
+                        # Access record already created — don't fail the job
+            else:
+                logger.warning(f"[CREATOR-SEARCH] Could not find app user for {user_id} — skipping auto-unlock")
 
         # STEP 6: Store response in job result
         from app.utils.json_serializer import safe_json_response
@@ -1882,32 +1931,45 @@ async def _process_discovery_unlock_async(job_id: str) -> Dict[str, Any]:
             job_id, resolved_profile_id, username, progress_start=30
         )
 
-        # STEP 4: Create unlock / access record
+        # STEP 4: Create unlock / access records (BOTH tables)
         await job_processor.update_job_status(
             job_id, JobStatus.PROCESSING,
             progress_percent=90,
             progress_message=f"Creating unlock record for @{username}"
         )
 
-        from app.database.unified_models import UserProfileAccess
-        from sqlalchemy import select
         from datetime import timedelta
 
         async with optimized_pools.get_background_session() as db:
-            existing_q = select(UserProfileAccess).where(
-                UserProfileAccess.user_id == _UUID(user_id),
-                UserProfileAccess.profile_id == _UUID(resolved_profile_id),
-            )
-            existing_r = await db.execute(existing_q)
-            if not existing_r.scalar_one_or_none():
-                new_access = UserProfileAccess(
-                    user_id=_UUID(user_id),
-                    profile_id=_UUID(resolved_profile_id),
-                    granted_at=datetime.now(timezone.utc),
-                    expires_at=datetime.now(timezone.utc) + timedelta(days=30)
-                )
-                db.add(new_access)
-                await db.commit()
+            now = datetime.now(timezone.utc)
+            expires_at = now + timedelta(days=30)
+
+            # Insert user_profile_access using raw SQL (PGBouncer AUTOCOMMIT compatible)
+            await db.execute(text("""
+                INSERT INTO user_profile_access (id, user_id, profile_id, granted_at, expires_at, created_at)
+                VALUES (gen_random_uuid(), :user_id, :profile_id, :granted_at, :expires_at, :created_at)
+                ON CONFLICT (user_id, profile_id) DO UPDATE SET granted_at = :granted_at, expires_at = :expires_at
+            """), {
+                "user_id": user_id,
+                "profile_id": resolved_profile_id,
+                "granted_at": now,
+                "expires_at": expires_at,
+                "created_at": now
+            })
+
+            # Insert unlocked_influencers using raw SQL (PGBouncer AUTOCOMMIT compatible)
+            await db.execute(text("""
+                INSERT INTO unlocked_influencers (user_id, profile_id, username, unlocked_at, credits_spent, transaction_id)
+                VALUES (:user_id, :profile_id, :username, :unlocked_at, :credits_spent, :transaction_id)
+                ON CONFLICT DO NOTHING
+            """), {
+                "user_id": user_id,
+                "profile_id": resolved_profile_id,
+                "username": username,
+                "unlocked_at": now,
+                "credits_spent": 25,
+                "transaction_id": str(transaction.id) if transaction else None
+            })
 
         # STEP 5: Build final result
         final_result = {

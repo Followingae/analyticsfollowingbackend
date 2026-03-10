@@ -70,7 +70,8 @@ class CampaignService:
         self,
         db: AsyncSession,
         campaign_id: UUID,
-        user_id: UUID
+        user_id: UUID,
+        is_superadmin: bool = False
     ) -> Optional[Campaign]:
         """
         Get campaign by ID (with ownership check)
@@ -79,22 +80,26 @@ class CampaignService:
             db: Database session
             campaign_id: Campaign ID
             user_id: User requesting the campaign
+            is_superadmin: If True, skip user_id ownership filter
 
         Returns:
             Campaign object or None if not found/not authorized
         """
         try:
-            result = await db.execute(
-                select(Campaign)
-                .where(and_(
+            query = select(Campaign).options(
+                selectinload(Campaign.campaign_posts).selectinload(CampaignPost.post),
+                selectinload(Campaign.campaign_creators).selectinload(CampaignCreator.profile)
+            )
+
+            if is_superadmin:
+                query = query.where(Campaign.id == campaign_id)
+            else:
+                query = query.where(and_(
                     Campaign.id == campaign_id,
                     Campaign.user_id == user_id
                 ))
-                .options(
-                    selectinload(Campaign.campaign_posts).selectinload(CampaignPost.post),
-                    selectinload(Campaign.campaign_creators).selectinload(CampaignCreator.profile)
-                )
-            )
+
+            result = await db.execute(query)
             campaign = result.scalar_one_or_none()
 
             if campaign:
@@ -114,7 +119,8 @@ class CampaignService:
         user_id: UUID,
         status: Optional[str] = None,
         limit: int = 50,
-        offset: int = 0
+        offset: int = 0,
+        is_superadmin: bool = False
     ) -> List[Campaign]:
         """
         List user's campaigns with optional status filter
@@ -125,12 +131,16 @@ class CampaignService:
             status: Optional status filter (draft, active, completed)
             limit: Max results
             offset: Pagination offset
+            is_superadmin: If True, return ALL campaigns (no user_id filter)
 
         Returns:
             List of Campaign objects
         """
         try:
-            query = select(Campaign).where(Campaign.user_id == user_id)
+            query = select(Campaign)
+
+            if not is_superadmin:
+                query = query.where(Campaign.user_id == user_id)
 
             if status:
                 query = query.where(Campaign.status == status)
@@ -442,7 +452,8 @@ class CampaignService:
         self,
         db: AsyncSession,
         campaign_id: UUID,
-        user_id: UUID
+        user_id: UUID,
+        is_superadmin: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Get all posts in campaign with complete analytics
@@ -451,13 +462,14 @@ class CampaignService:
             db: Database session
             campaign_id: Campaign ID
             user_id: User ID (for ownership check)
+            is_superadmin: If True, skip user_id ownership filter
 
         Returns:
             List of post data with analytics
         """
         try:
             # Verify campaign ownership
-            campaign = await self.get_campaign(db, campaign_id, user_id)
+            campaign = await self.get_campaign(db, campaign_id, user_id, is_superadmin=is_superadmin)
             if not campaign:
                 return []
 
@@ -773,7 +785,8 @@ class CampaignService:
         self,
         db: AsyncSession,
         campaign_id: UUID,
-        user_id: UUID
+        user_id: UUID,
+        is_superadmin: bool = False
     ) -> List[Dict[str, Any]]:
         """
         Get all creators in campaign with aggregated analytics
@@ -783,13 +796,14 @@ class CampaignService:
             db: Database session
             campaign_id: Campaign ID
             user_id: User ID (for ownership check)
+            is_superadmin: If True, skip user_id ownership filter
 
         Returns:
             List of creator data with aggregated analytics (manual + collaborators)
         """
         try:
             # Verify campaign ownership
-            campaign = await self.get_campaign(db, campaign_id, user_id)
+            campaign = await self.get_campaign(db, campaign_id, user_id, is_superadmin=is_superadmin)
             if not campaign:
                 return []
 
@@ -991,7 +1005,8 @@ class CampaignService:
         self,
         db: AsyncSession,
         campaign_id: UUID,
-        user_id: UUID
+        user_id: UUID,
+        is_superadmin: bool = False
     ) -> Dict[str, Any]:
         """
         Aggregate audience demographics across all creators in campaign
@@ -1000,18 +1015,19 @@ class CampaignService:
             db: Database session
             campaign_id: Campaign ID
             user_id: User ID (for ownership check)
+            is_superadmin: If True, skip user_id ownership filter
 
         Returns:
             Aggregated audience demographics
         """
         try:
             # Verify campaign ownership
-            campaign = await self.get_campaign(db, campaign_id, user_id)
+            campaign = await self.get_campaign(db, campaign_id, user_id, is_superadmin=is_superadmin)
             if not campaign:
                 return {}
 
             # Get all creators with demographics
-            creators = await self.get_campaign_creators(db, campaign_id, user_id)
+            creators = await self.get_campaign_creators(db, campaign_id, user_id, is_superadmin=is_superadmin)
 
             # Aggregate demographics
             total_reach = 0
@@ -1121,7 +1137,8 @@ class CampaignService:
         self,
         db: AsyncSession,
         campaign_id: UUID,
-        user_id: UUID
+        user_id: UUID,
+        is_superadmin: bool = False
     ) -> Dict[str, Any]:
         """
         Get quick statistics for a single campaign (for campaigns list page)
@@ -1130,13 +1147,14 @@ class CampaignService:
             db: Database session
             campaign_id: Campaign ID
             user_id: User ID (for ownership check)
+            is_superadmin: If True, skip user_id ownership filter
 
         Returns:
             Quick stats including creators_count, posts_count, total_reach, engagement_rate
         """
         try:
             # Get campaign
-            campaign = await self.get_campaign(db, campaign_id, user_id)
+            campaign = await self.get_campaign(db, campaign_id, user_id, is_superadmin=is_superadmin)
             if not campaign:
                 return {
                     "creators_count": 0,
@@ -1574,7 +1592,8 @@ class CampaignService:
         db: AsyncSession,
         campaign_id: UUID,
         user_id: UUID,
-        period: str = 'all'  # 7d, 30d, 90d, all
+        period: str = 'all',  # 7d, 30d, 90d, all
+        is_superadmin: bool = False
     ) -> Dict[str, Any]:
         """
         Get detailed analytics for a campaign
@@ -1584,6 +1603,7 @@ class CampaignService:
             campaign_id: Campaign ID
             user_id: User ID (for authorization)
             period: Time period (7d, 30d, 90d, all)
+            is_superadmin: If True, skip user_id ownership filter
 
         Returns:
             Dictionary with daily stats, totals, and insights
@@ -1592,7 +1612,7 @@ class CampaignService:
             from datetime import datetime, timedelta, timezone
 
             # Verify ownership
-            campaign = await self.get_campaign(db, campaign_id, user_id)
+            campaign = await self.get_campaign(db, campaign_id, user_id, is_superadmin=is_superadmin)
             if not campaign:
                 raise ValueError(f"Campaign {campaign_id} not found or unauthorized")
 

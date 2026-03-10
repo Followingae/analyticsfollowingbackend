@@ -1438,9 +1438,10 @@ class ComprehensiveDataService:
             from datetime import datetime, timezone
             from sqlalchemy import text
 
-            # CRITICAL: Map from auth.users.id to public.users.id for user_profile_access
+            # CRITICAL: Map from auth.users.id OR public.users.id to public.users.id for user_profile_access
+            # Cast parameter to uuid for id comparison, and to text for supabase_user_id comparison
             user_mapping_query = text("""
-                SELECT id FROM users WHERE supabase_user_id = :auth_user_id
+                SELECT id FROM users WHERE supabase_user_id = :auth_user_id OR id = CAST(:auth_user_id AS uuid) LIMIT 1
             """)
 
             user_mapping_result = await db_session.execute(user_mapping_query, {
@@ -1567,13 +1568,16 @@ class ComprehensiveDataService:
                 profiles.append(profile_data)
             
             
+            total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 0
             return {
                 "profiles": profiles,
                 "pagination": {
                     "page": page,
+                    "current_page": page,
                     "page_size": page_size,
                     "total_count": total_count,
-                    "total_pages": (total_count + page_size - 1) // page_size,
+                    "total_items": total_count,
+                    "total_pages": total_pages,
                     "has_next": page * page_size < total_count,
                     "has_previous": page > 1
                 },

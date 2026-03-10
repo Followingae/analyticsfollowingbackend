@@ -18,15 +18,32 @@ logger = logging.getLogger(__name__)
 # ── Helper functions (moved from main.py) ──────────────────────────────
 
 def _normalize_demographics(demo_data):
-    """Normalize demographics data to proper percentages"""
+    """Normalize demographics data to proper percentages.
+
+    Handles three cases:
+    - Values are decimal fractions (sum < 2): convert to 0-100 range
+    - Values are near 100% total (80-120): already percentages, normalize to sum=100
+    - Values are raw counts or other: normalize to sum=100
+    """
     if not demo_data or not isinstance(demo_data, dict):
         return {}
-    total = sum(demo_data.values())
-    if total <= 0:
+    try:
+        numeric_data = {k: float(v) for k, v in demo_data.items() if isinstance(v, (int, float))}
+        if not numeric_data:
+            return {}
+        total = sum(numeric_data.values())
+        if total <= 0:
+            return {}
+        # Values are decimal fractions (e.g., 0.35, 0.45, 0.20) - convert to percentages
+        if total < 2:
+            return {k: round(v * 100, 1) for k, v in numeric_data.items()}
+        # Values already look like percentages (sum near 100) - normalize to exactly 100
+        if 80 <= total <= 120:
+            return {k: round((v / total) * 100, 1) for k, v in numeric_data.items()}
+        # Raw counts or other - normalize to percentages
+        return {k: round((v / total) * 100, 1) for k, v in numeric_data.items()}
+    except (TypeError, ValueError):
         return {}
-    if 0.8 <= total <= 1.2:
-        return {k: round(v * 100, 1) for k, v in demo_data.items()}
-    return {k: round((v / total) * 100, 1) for k, v in demo_data.items()}
 
 
 def _format_content_distribution(content_dist):
@@ -283,45 +300,86 @@ def build_unlocked_response(
     Build response for an already-unlocked profile (fast path).
     Returns full data with advanced AI analysis per post.
     """
-    posts_data = [
-        build_post_data_full(post, posts_cdn_urls.get(post.instagram_post_id))
-        for post in posts
-    ]
-    avg_likes, avg_comments = _compute_post_averages(posts_data)
+    try:
+        posts_data = [
+            build_post_data_full(post, posts_cdn_urls.get(post.instagram_post_id))
+            for post in posts
+        ]
+        avg_likes, avg_comments = _compute_post_averages(posts_data)
 
-    profile_dict = _build_profile_base(profile, cdn_avatar_url)
-    profile_dict.update({
-        "avg_likes": avg_likes,
-        "avg_comments": avg_comments,
-        "influence_score": getattr(profile, 'influence_score', None),
-        "content_quality_score": getattr(profile, 'content_quality_score', None),
-        "follower_growth_rate": getattr(profile, 'follower_growth_rate', None),
-        "ai_analysis": _build_ai_analysis_section(profile),
-        **_format_ai_insights(profile),
-        "posts": posts_data,
-        "last_refreshed": profile.last_refreshed.isoformat() if profile.last_refreshed else None,
-        "data_quality_score": profile.data_quality_score,
-        "created_at": profile.created_at.isoformat() if profile.created_at else None,
-        "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
-    })
+        profile_dict = _build_profile_base(profile, cdn_avatar_url)
+        profile_dict.update({
+            "avg_likes": avg_likes,
+            "avg_comments": avg_comments,
+            "influence_score": getattr(profile, 'influence_score', None),
+            "content_quality_score": getattr(profile, 'content_quality_score', None),
+            "follower_growth_rate": getattr(profile, 'follower_growth_rate', None),
+            "ai_analysis": _build_ai_analysis_section(profile),
+            **_format_ai_insights(profile),
+            "posts": posts_data,
+            "last_refreshed": profile.last_refreshed.isoformat() if profile.last_refreshed else None,
+            "data_quality_score": profile.data_quality_score,
+            "created_at": profile.created_at.isoformat() if profile.created_at else None,
+            "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+        })
 
-    return {
-        "success": True,
-        "profile": profile_dict,
-        "analytics_summary": _build_analytics_summary(posts_data, profile),
-        "background_processing": {"unified_processing": False, "already_complete": True, "fast_path": True},
-        "message": f"INSTANT database return for already unlocked profile (completed in {fast_time:.3f}s)",
-        "data_source": "database_fast_path",
-        "cached": True,
-        "unlock_required": False,
-        "unlocked": True,
-        "preview_mode": False,
-        "performance": {
-            "fast_path_enabled": True,
-            "total_time_seconds": fast_time,
-            "optimization": "already_unlocked_instant_return"
+        return {
+            "success": True,
+            "profile": profile_dict,
+            "analytics_summary": _build_analytics_summary(posts_data, profile),
+            "background_processing": {"unified_processing": False, "already_complete": True, "fast_path": True},
+            "message": f"INSTANT database return for already unlocked profile (completed in {fast_time:.3f}s)",
+            "data_source": "database_fast_path",
+            "cached": True,
+            "unlock_required": False,
+            "unlocked": True,
+            "preview_mode": False,
+            "performance": {
+                "fast_path_enabled": True,
+                "total_time_seconds": fast_time,
+                "optimization": "already_unlocked_instant_return"
+            }
         }
-    }
+    except Exception as e:
+        logger.error(f"Error building unlocked response for {getattr(profile, 'username', 'unknown')}: {e}", exc_info=True)
+        # Return graceful fallback with basic profile data
+        fallback_profile = {
+            "username": getattr(profile, 'username', ''),
+            "full_name": getattr(profile, 'full_name', ''),
+            "followers_count": getattr(profile, 'followers_count', 0),
+            "following_count": getattr(profile, 'following_count', 0),
+            "posts_count": getattr(profile, 'posts_count', 0),
+            "biography": getattr(profile, 'biography', ''),
+            "profile_pic_url": getattr(profile, 'profile_pic_url', '') or '',
+            "profile_pic_url_hd": getattr(profile, 'profile_pic_url_hd', '') or '',
+            "is_verified": getattr(profile, 'is_verified', False),
+            "is_private": getattr(profile, 'is_private', False),
+            "engagement_rate": getattr(profile, 'engagement_rate', None),
+            "ai_analysis": {},
+            "audience": {},
+            "content": {},
+            "engagement": {},
+            "security": {},
+            "posts": [],
+        }
+        return {
+            "success": True,
+            "profile": fallback_profile,
+            "analytics_summary": {"total_posts_analyzed": 0, "posts_with_ai": 0, "ai_completion_rate": 0},
+            "background_processing": {"unified_processing": False, "already_complete": True, "fast_path": True},
+            "message": f"Profile data loaded with limited AI details (completed in {fast_time:.3f}s)",
+            "data_source": "database_fast_path",
+            "cached": True,
+            "unlock_required": False,
+            "unlocked": True,
+            "preview_mode": False,
+            "partial_data": True,
+            "performance": {
+                "fast_path_enabled": True,
+                "total_time_seconds": fast_time,
+                "optimization": "already_unlocked_instant_return"
+            }
+        }
 
 
 def build_preview_response(profile) -> Dict[str, Any]:

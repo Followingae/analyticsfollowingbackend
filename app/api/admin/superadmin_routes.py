@@ -253,15 +253,15 @@ async def list_users(
         result = await db.execute(select_query, params)
         users = result.fetchall()
 
-        # Get all supabase user IDs for batch wallet fetching (credit_wallets uses auth.users IDs)
-        supabase_user_ids = [user.supabase_user_id for user in users if user.supabase_user_id]
+        # Get all user IDs for batch wallet fetching (credit_wallets.user_id FK → users.id)
+        user_ids_list = [str(user.id) for user in users]
 
         # Batch fetch all wallets to avoid N+1 queries and PGBouncer issues
         wallets_dict = {}
-        if supabase_user_ids:
+        if user_ids_list:
             try:
                 # Use text query to avoid prepared statement issues with PGBouncer
-                # Note: credit_wallets.user_id references auth.users.id which is stored as supabase_user_id in our users table
+                # credit_wallets.user_id references users.id (NOT auth.users.id)
                 wallet_query = text("""
                     SELECT user_id::text as user_id, current_balance
                     FROM credit_wallets
@@ -269,7 +269,7 @@ async def list_users(
                 """)
                 wallet_result = await db.execute(
                     wallet_query,
-                    {"user_ids": supabase_user_ids}
+                    {"user_ids": user_ids_list}
                 )
                 for row in wallet_result:
                     wallets_dict[row.user_id] = row.current_balance
@@ -280,8 +280,8 @@ async def list_users(
         # Build user list
         user_list = []
         for user in users:
-            # Get wallet balance from batch fetch using supabase_user_id
-            wallet_balance = wallets_dict.get(user.supabase_user_id) if user.supabase_user_id else None
+            # Get wallet balance from batch fetch using users.id
+            wallet_balance = wallets_dict.get(str(user.id))
 
             # Determine the actual current balance
             # Use wallet balance if available, otherwise fall back to user.credits
@@ -664,9 +664,9 @@ async def add_credits(
 
         wallet_service = CreditWalletService()
 
-        # Add credits using the supabase_user_id (auth.users.id)
+        # Add credits using users.id (wallet FK → users.id)
         transaction = await wallet_service.add_credits(
-            user_id=user.supabase_user_id,  # Use supabase_user_id for wallet
+            user_id=user.id,  # Must use users.id PK for wallet FK
             amount=credits,
             transaction_type="admin_credit",
             description=f"Admin added: {reason}",
@@ -676,7 +676,7 @@ async def add_credits(
 
         if transaction:
             # Get the updated balance
-            balance = await wallet_service.get_balance(user.supabase_user_id)
+            balance = await wallet_service.get_balance(user.id)
             return {
                 "success": True,
                 "new_balance": balance.current_balance if balance else credits,
@@ -714,9 +714,9 @@ async def remove_credits(
 
         wallet_service = CreditWalletService()
 
-        # Remove credits using the supabase_user_id (auth.users.id)
+        # Remove credits using users.id (wallet FK → users.id)
         transaction = await wallet_service.spend_credits(
-            user_id=user.supabase_user_id,  # Use supabase_user_id for wallet
+            user_id=user.id,  # Must use users.id PK for wallet FK
             amount=credits,
             action_type="admin_removal",
             description=f"Admin removed: {reason}",
@@ -728,7 +728,7 @@ async def remove_credits(
             raise HTTPException(status_code=400, detail="Failed to remove credits - insufficient balance or wallet not found")
 
         # Get the updated balance
-        balance = await wallet_service.get_balance(user.supabase_user_id)
+        balance = await wallet_service.get_balance(user.id)
         return {
             "success": True,
             "new_balance": balance.current_balance if balance else 0,

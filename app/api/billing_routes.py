@@ -113,12 +113,53 @@ async def create_pre_registration_checkout(
                 detail="Full name is required and must be at least 2 characters"
             )
 
-        logger.info(f"All validations passed for {request.email} - proceeding to create Stripe session")
+        logger.info(f"All validations passed for {request.email} - proceeding to create auth account then Stripe session")
+
+        # SECURITY FIX: Create Supabase auth user BEFORE checkout so password never touches Stripe
+        from app.models.auth import UserCreate as PreRegUserCreate
+        pre_user_data = PreRegUserCreate(
+            email=request.email,
+            password=request.password,
+            full_name=request.full_name,
+            role=UserRole.PREMIUM if request.plan == 'premium' else UserRole.STANDARD,
+            billing_type=BillingType.ONLINE_PAYMENT,
+            company=request.company,
+            job_title=request.job_title,
+            phone_number=request.phone_number,
+            timezone=request.timezone or 'UTC',
+            language=request.language or 'en',
+            industry=request.industry,
+            company_size=request.company_size,
+            use_case=request.use_case,
+            marketing_budget=request.marketing_budget
+        )
+
+        try:
+            pre_user_response = await supabase_auth_service.register_user(pre_user_data)
+            pre_supabase_id = pre_user_response.get('user', {}).get('id') if isinstance(pre_user_response, dict) else getattr(pre_user_response, 'id', None)
+            logger.info(f"Pre-created auth user for {request.email} (pending payment), supabase_id: {pre_supabase_id}")
+        except Exception as auth_err:
+            logger.error(f"Failed to pre-create auth user for {request.email}: {auth_err}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to create account: {str(auth_err)}"
+            )
+
+        # Mark user as pending payment (will be activated after checkout)
+        try:
+            await db.execute(
+                update(User)
+                .where(User.email == request.email)
+                .values(status='pending_payment', subscription_tier=request.plan)
+            )
+            await db.commit()
+        except Exception:
+            pass  # Non-critical — user will be activated on verify-session
 
         # Determine price ID based on plan (using monthly subscription prices)
         price_mapping = {
-            "standard": os.getenv("STRIPE_STANDARD_MONTHLY_PRICE_ID"),  # price_1Sf1lpAubhSg1bPIiTWvBncS
-            "premium": os.getenv("STRIPE_PREMIUM_MONTHLY_PRICE_ID")      # price_1Sf1lqAubhSg1bPIJIcqgHu1
+            "standard": os.getenv("STRIPE_STANDARD_MONTHLY_PRICE_ID"),
+            "premium": os.getenv("STRIPE_PREMIUM_MONTHLY_PRICE_ID")
         }
 
         price_id = price_mapping.get(request.plan)
@@ -128,7 +169,7 @@ async def create_pre_registration_checkout(
                 detail=f"Invalid plan: {request.plan}. Choose 'standard' or 'premium'"
             )
 
-        # Create Stripe checkout session with metadata
+        # Create Stripe checkout session — NO password in metadata
         session = await stripe.checkout.Session.create_async(
             payment_method_types=['card'],
             line_items=[{
@@ -138,24 +179,22 @@ async def create_pre_registration_checkout(
             mode='subscription',
             success_url=request.success_url or f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/welcome?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=request.cancel_url or f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/signup?payment=cancelled",
-            customer_email=request.email,  # Pre-fill email in Stripe checkout
+            customer_email=request.email,
             metadata={
-                # Store registration data in metadata to create account after payment
                 'registration_type': 'new_user',
                 'email': request.email,
                 'full_name': request.full_name,
-                'password': request.password,  # Note: In production, hash this or use a temporary token
                 'plan': request.plan,
                 'company': request.company or '',
                 'job_title': request.job_title or '',
                 'phone_number': request.phone_number or '',
                 'timezone': request.timezone or 'UTC',
                 'language': request.language or 'en',
-                # New personalization fields
                 'industry': request.industry or '',
                 'company_size': request.company_size or '',
                 'use_case': request.use_case or '',
-                'marketing_budget': request.marketing_budget or ''
+                'marketing_budget': request.marketing_budget or '',
+                'pre_created': 'true',  # Flag: user already exists in auth
             },
             subscription_data={
                 'metadata': {
@@ -458,59 +497,125 @@ async def verify_checkout_session(
             user = result.scalar_one_or_none()
 
             if user and user.status == 'active':
-                # Generate authentication tokens for automatic login
-                # Get the password from metadata (temporary approach)
-                password = metadata.get('password', 'Following0925_25')
-
-                try:
-                    # Authenticate the user to get tokens
-                    from app.models.auth import LoginRequest
-                    login_request = LoginRequest(email=email, password=password)
-                    auth_response = await supabase_auth_service.login_user(login_request)
-
-                    if auth_response and auth_response.access_token:
-                        return {
-                            "status": "complete",
-                            "message": "Account created successfully",
-                            "email": email,
-                            "can_login": True,
-                            "access_token": auth_response.access_token,
-                            "refresh_token": auth_response.refresh_token,
-                            "user": {
-                                "id": str(user.id),
-                                "email": user.email,
-                                "full_name": user.full_name,
-                                "role": user.role,
-                                "subscription_tier": user.subscription_tier
-                            }
-                        }
-                except Exception as e:
-                    logger.warning(f"Could not auto-login user {email}: {e}")
-
-                # Fallback response without auto-login
+                # User already active — return success (they can log in with their password)
                 return {
                     "status": "complete",
                     "message": "Account created successfully",
                     "email": email,
-                    "can_login": True
+                    "can_login": True,
+                    "user": {
+                        "id": str(user.id),
+                        "email": user.email,
+                        "full_name": user.full_name,
+                        "role": user.role,
+                        "subscription_tier": user.subscription_tier
+                    }
+                }
+            elif user and user.status == 'pending_payment' and session.payment_status == 'paid':
+                # Pre-created user, payment now complete — activate!
+                logger.info(f"Activating pre-created user {email} after successful payment")
+                plan = metadata.get('plan', 'standard')
+                full_name = user.full_name or metadata.get('full_name') or email.split('@')[0]
+
+                # Activate user
+                activate_values = {
+                    'status': 'active',
+                    'subscription_status': 'active',
+                    'subscription_tier': plan,
+                }
+                stripe_customer_id = session.customer if hasattr(session, 'customer') else session.get('customer')
+                if stripe_customer_id:
+                    activate_values['stripe_customer_id'] = stripe_customer_id
+
+                await db.execute(
+                    update(User).where(User.email == email).values(**activate_values)
+                )
+
+                # Create team and wallet
+                from app.database.unified_models import Team, TeamMember, CreditWallet
+                import uuid as uuid_mod
+                from datetime import date, timedelta
+                from app.models.teams import SUBSCRIPTION_TIER_LIMITS as ACT_LIMITS, SubscriptionTier as ACT_Tier
+
+                act_tier_key = getattr(ACT_Tier, plan.upper(), ACT_Tier.FREE)
+                act_tier_limits = ACT_LIMITS.get(act_tier_key, ACT_LIMITS.get(ACT_Tier.FREE, {}))
+                act_credits = act_tier_limits.get('monthly_credits', 125)
+
+                team_id = uuid_mod.uuid4()
+                team = Team(
+                    id=team_id,
+                    name=f"{full_name}'s Team",
+                    subscription_tier=plan,
+                    max_team_members=act_tier_limits.get('max_team_members', 2),
+                    monthly_profile_limit=act_tier_limits.get('monthly_profile_limit', 500),
+                    monthly_email_limit=act_tier_limits.get('monthly_email_limit', 250),
+                    monthly_posts_limit=act_tier_limits.get('monthly_posts_limit', 125)
+                )
+                db.add(team)
+                await db.flush()
+
+                team_member = TeamMember(
+                    id=uuid_mod.uuid4(),
+                    team_id=team_id,
+                    user_id=user.supabase_user_id or user.id,
+                    role='owner',
+                    status='active'
+                )
+                db.add(team_member)
+
+                today = date.today()
+                next_month = today.replace(day=1) + timedelta(days=32)
+                next_reset = next_month.replace(day=1)
+
+                wallet = CreditWallet(
+                    user_id=user.supabase_user_id or user.id,
+                    current_balance=act_credits,
+                    lifetime_earned=act_credits,
+                    lifetime_spent=0,
+                    total_earned_this_cycle=act_credits,
+                    total_spent_this_cycle=0,
+                    current_billing_cycle_start=today,
+                    next_reset_date=next_reset,
+                )
+                db.add(wallet)
+
+                await db.commit()
+                logger.info(f"Activated user {email} with {plan} tier, {act_credits} credits, team created")
+
+                return {
+                    "status": "complete",
+                    "message": "Account activated successfully",
+                    "email": email,
+                    "can_login": True,
+                    "user": {
+                        "id": str(user.id),
+                        "email": user.email,
+                        "full_name": user.full_name,
+                        "role": user.role,
+                        "subscription_tier": plan
+                    }
                 }
             elif not user and session.payment_status == 'paid':
-                # Payment complete but user doesn't exist - CREATE USER NOW!
-                logger.info(f"Payment complete but user not found - creating user for {email}")
+                # Legacy path: user doesn't exist yet (old flow without pre-creation)
+                logger.info(f"Payment complete but user not found - creating user for {email} (legacy path)")
 
                 # Extract user data from session metadata
                 full_name = metadata.get('full_name') or email.split('@')[0]
-                password = metadata.get('password') or 'Following0925_25'
                 plan = metadata.get('plan', 'standard')
 
                 # Determine role based on plan
                 role = UserRole.PREMIUM if plan == 'premium' else UserRole.STANDARD
 
+                # Generate secure temporary password (no password in Stripe metadata anymore)
+                import secrets
+                import string
+                legacy_password = ''.join(secrets.choice(string.ascii_letters + string.digits + '!@#$%') for _ in range(16))
+
                 # Create user via auth service
                 from app.models.auth import UserCreate
                 user_data = UserCreate(
                     email=email,
-                    password=password,
+                    password=legacy_password,
                     full_name=full_name,
                     role=role,
                     billing_type=BillingType.ONLINE_PAYMENT,
@@ -563,10 +668,10 @@ async def verify_checkout_session(
                             id=team_id,
                             name=f"{full_name}'s Team",
                             subscription_tier=plan,
-                            max_team_members=5 if plan == 'premium' else 2,
-                            monthly_profile_limit=2000 if plan == 'premium' else 500,
-                            monthly_email_limit=800 if plan == 'premium' else 250,
-                            monthly_posts_limit=300 if plan == 'premium' else 125
+                            max_team_members=vs_tier_limits.get('max_team_members', 2),
+                            monthly_profile_limit=vs_tier_limits.get('monthly_profile_limit', 500),
+                            monthly_email_limit=vs_tier_limits.get('monthly_email_limit', 250),
+                            monthly_posts_limit=vs_tier_limits.get('monthly_posts_limit', 125)
                         )
                         db.add(team)
                         await db.flush()
@@ -585,8 +690,11 @@ async def verify_checkout_session(
                         # Create credit wallet with correct field names
                         from app.database.unified_models import CreditWallet
                         from datetime import date, timedelta
+                        from app.models.teams import SUBSCRIPTION_TIER_LIMITS as VS_TIER_LIMITS, SubscriptionTier as VS_Tier
 
-                        initial_credits = 5000 if plan == 'premium' else 2000
+                        vs_tier_key = getattr(VS_Tier, plan.upper(), VS_Tier.FREE)
+                        vs_tier_limits = VS_TIER_LIMITS.get(vs_tier_key, VS_TIER_LIMITS.get(VS_Tier.FREE, {}))
+                        initial_credits = vs_tier_limits.get('monthly_credits', 125)
                         today = date.today()
                         next_month = today.replace(day=1) + timedelta(days=32)
                         next_reset = next_month.replace(day=1)
@@ -604,34 +712,19 @@ async def verify_checkout_session(
                         db.add(wallet)
 
                         await db.commit()
-                        logger.info(f"Created team and wallet for user {email}")
+                        logger.info(f"Created team and wallet for user {email} (legacy path)")
 
-                        # Try to auto-login
+                        # Legacy path: user needs to use password reset since we generated a random password
+                        # Trigger password reset email so user can set their own password
                         try:
-                            from app.models.auth import LoginRequest
-                            login_request = LoginRequest(email=email, password=password)
-                            auth_response = await supabase_auth_service.login_user(login_request)
-
-                            if auth_response and auth_response.access_token:
-                                return {
-                                    "status": "complete",
-                                    "message": "Account created successfully",
-                                    "email": email,
-                                    "can_login": True,
-                                    "access_token": auth_response.access_token,
-                                    "refresh_token": auth_response.refresh_token,
-                                    "user": {
-                                        "id": str(created_user.id),
-                                        "email": created_user.email,
-                                        "full_name": created_user.full_name,
-                                        "role": created_user.role,
-                                        "subscription_tier": plan
-                                    }
-                                }
+                            supabase_auth_service.supabase_admin.auth.admin.generate_link({
+                                "type": "recovery",
+                                "email": email,
+                            })
+                            logger.info(f"Sent password reset email to {email} (legacy path)")
                         except Exception as e:
-                            logger.warning(f"Could not auto-login newly created user {email}: {e}")
+                            logger.warning(f"Could not send password reset email to {email}: {e}")
 
-                        # Return success without auto-login
                         return {
                             "status": "complete",
                             "message": "Account created successfully",
@@ -716,6 +809,11 @@ async def register_free_tier(request: dict, db: AsyncSession = Depends(get_db)):
         )
         created_user = result.scalar_one_or_none()
 
+        # Get canonical free tier credits
+        from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
+        free_tier_limits = SUBSCRIPTION_TIER_LIMITS.get(SubscriptionTier.FREE, {})
+        free_tier_credits = free_tier_limits.get('monthly_credits', 125)
+
         # Create user if not found
         if not created_user:
             user_id = uuid.uuid4()
@@ -726,7 +824,8 @@ async def register_free_tier(request: dict, db: AsyncSession = Depends(get_db)):
                 full_name=request['full_name'],
                 role='free',
                 status='active',
-                credits=100,
+                subscription_status='active',
+                credits=free_tier_credits,
                 credits_used_this_month=0,
                 subscription_tier='free',
                 preferences={}
@@ -746,10 +845,10 @@ async def register_free_tier(request: dict, db: AsyncSession = Depends(get_db)):
                 id=team_id,
                 name=f"{request['full_name']}'s Team",
                 subscription_tier='free',
-                max_team_members=1,
-                monthly_profile_limit=5,
-                monthly_email_limit=0,
-                monthly_posts_limit=0
+                max_team_members=free_tier_limits.get('max_team_members', 1),
+                monthly_profile_limit=free_tier_limits.get('monthly_profile_limit', 5),
+                monthly_email_limit=free_tier_limits.get('monthly_email_limit', 0),
+                monthly_posts_limit=free_tier_limits.get('monthly_posts_limit', 0)
             )
             db.add(team)
             await db.flush()
@@ -769,10 +868,10 @@ async def register_free_tier(request: dict, db: AsyncSession = Depends(get_db)):
 
             wallet = CreditWallet(
                 user_id=created_user.supabase_user_id or created_user.id,  # Use supabase_user_id if available
-                current_balance=100,
-                lifetime_earned=100,
+                current_balance=free_tier_credits,
+                lifetime_earned=free_tier_credits,
                 lifetime_spent=0,
-                total_earned_this_cycle=100,
+                total_earned_this_cycle=free_tier_credits,
                 total_spent_this_cycle=0,
                 current_billing_cycle_start=today,
                 next_reset_date=next_reset,
@@ -816,7 +915,7 @@ async def get_subscription_status(
     """
     from app.database.unified_models import User, CreditWallet, Team, TeamMember
     from app.models.teams import SUBSCRIPTION_TIER_LIMITS, SubscriptionTier
-    from sqlalchemy import and_, join
+    from sqlalchemy import and_, or_, join
 
     try:
         # 1. Get user record with stripe_customer_id and subscription info
@@ -849,8 +948,9 @@ async def get_subscription_status(
         user_billing_type = user.billing_type
         user_status = user.status
         user_subscription_tier = user.subscription_tier
-        user_app_id = str(user.id)  # App UUID for team_members FK
-        user_supabase_id = user.supabase_user_id or str(user.id)
+        user_app_id = str(user.id)  # App UUID for credit_wallets FK
+        user_supabase_id = str(user.supabase_user_id)  # team_members.user_id stores supabase_user_id
+        user_wallet_id = user.id  # credit_wallets.user_id FK → users.id
 
         tier = user_subscription_tier or 'free'
 
@@ -884,8 +984,8 @@ async def get_subscription_status(
         }
 
         # Find user's team via team_members
-        # NOTE: team_members.user_id FK references users.id (app UUID),
-        # NOT auth UUID. Use user_app_id for this query.
+        # NOTE: team_members.user_id actually stores supabase_user_id (auth UUID),
+        # NOT users.id (app UUID). Try both for resilience.
         team_query = select(
             Team.profiles_used_this_month,
             Team.emails_used_this_month,
@@ -899,7 +999,10 @@ async def get_subscription_status(
             join(TeamMember, Team, TeamMember.team_id == Team.id)
         ).where(
             and_(
-                TeamMember.user_id == user_app_id,
+                or_(
+                    TeamMember.user_id == user_supabase_id,
+                    TeamMember.user_id == user_app_id
+                ),
                 TeamMember.status == "active"
             )
         )
@@ -925,10 +1028,10 @@ async def get_subscription_status(
             "total_spent_this_cycle": 0,
         }
 
-        # NOTE: credit_wallets.user_id stores auth UUID (supabase_user_id)
+        # credit_wallets.user_id FK → users.id
         wallet_result = await db.execute(
             select(CreditWallet).where(
-                CreditWallet.user_id == user_supabase_id
+                CreditWallet.user_id == user_wallet_id
             )
         )
         wallet = wallet_result.scalar_one_or_none()

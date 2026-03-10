@@ -52,7 +52,19 @@ async def add_post_to_campaign_async(
     - estimated_time: Estimated completion time
     """
     try:
-        logger.info(f"🚀 Queuing post analytics job for campaign {campaign_id}")
+        # Verify campaign ownership (or superadmin)
+        is_superadmin = getattr(current_user, 'role', '') == 'superadmin'
+        ownership_check = await db.execute(
+            text("SELECT id, user_id FROM campaigns WHERE id = :cid").execution_options(prepare=False),
+            {"cid": str(campaign_id)}
+        )
+        campaign_row = ownership_check.fetchone()
+        if not campaign_row:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        if str(campaign_row.user_id) != str(current_user.id) and not is_superadmin:
+            raise HTTPException(status_code=403, detail="Not authorized to modify this campaign")
+
+        logger.info(f"Queuing post analytics job for campaign {campaign_id}")
 
         # Create job parameters
         job_params = {

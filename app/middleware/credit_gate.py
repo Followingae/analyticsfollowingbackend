@@ -64,7 +64,9 @@ def requires_credits(
                     detail="Authentication required for credit-gated actions"
                 )
             
-            user_id = UUID(str(current_user.supabase_user_id))
+            # CRITICAL FIX: Use current_user.id (users.id PK) not supabase_user_id
+            # credit_wallets.user_id FK → users.id, so we must use the app user ID
+            user_id = UUID(str(current_user.id))
             
             # CRITICAL OPTIMIZATION: Check if profile is already unlocked (skip credit check)
             if check_unlock_status:
@@ -347,17 +349,16 @@ class CreditGateMiddleware:
 async def _create_profile_access_records(user_id: UUID, username: str, credits_spent: int, transaction_id: Optional[int] = None):
     """
     Create both unlocked_influencers and user_profile_access records
-    when a user unlocks a profile by spending credits
+    when a user unlocks a profile by spending credits.
+    Uses raw SQL for all writes (PGBouncer AUTOCOMMIT compatible).
     """
     from app.database.connection import get_session
-    from app.database.unified_models import Profile, UnlockedInfluencer, UserProfileAccess
-    from sqlalchemy import select, or_
+    from app.database.unified_models import Profile
+    from sqlalchemy import select, or_, text
     from datetime import datetime, timezone, timedelta
 
     async with get_session() as db:
         try:
-            supabase_user_id = user_id
-
             # Look up app user by id or supabase_user_id
             from app.database.unified_models import User
             user_query = select(User.id).where(or_(User.id == str(user_id), User.supabase_user_id == str(user_id)))
@@ -367,66 +368,56 @@ async def _create_profile_access_records(user_id: UUID, username: str, credits_s
             if not database_user_id:
                 logger.error(f"No database user found for user_id={user_id}")
                 return
-                
-            logger.info(f"Using Supabase ID {supabase_user_id} for unlocked_influencers, Database ID {database_user_id} for user_profile_access")
-            
+
+            logger.info(f"Creating access records for database_user_id={database_user_id}")
+
             # Get profile by username
             profile_query = select(Profile).where(Profile.username == username)
             profile_result = await db.execute(profile_query)
             profile = profile_result.scalar_one_or_none()
-            
+
             if not profile:
                 logger.error(f"Profile not found for username: {username}")
                 return
-                
-            # Check if unlocked_influencers record already exists
-            unlock_query = select(UnlockedInfluencer).where(
-                UnlockedInfluencer.user_id == supabase_user_id,
-                UnlockedInfluencer.profile_id == profile.id
-            )
-            unlock_result = await db.execute(unlock_query)
-            existing_unlock = unlock_result.scalar_one_or_none()
-            
+
+            # Capture profile.id before any further DB operations
+            profile_id_str = str(profile.id)
+
             current_time = datetime.now(timezone.utc)
-            
-            if not existing_unlock:
-                # Create unlocked_influencers record - FIXED: Use Supabase user ID
-                unlocked_record = UnlockedInfluencer(
-                    user_id=supabase_user_id,
-                    profile_id=profile.id,
-                    username=username,  # CRITICAL FIX: Include username field
-                    unlocked_at=current_time,
-                    credits_spent=credits_spent,
-                    transaction_id=transaction_id  # Link to credit transaction if available
-                )
-                db.add(unlocked_record)
-                logger.info(f"Created unlocked_influencers record for user {supabase_user_id}, profile {profile.id} ({username})")
-            
-            # Check if user_profile_access record exists
-            access_query = select(UserProfileAccess).where(
-                UserProfileAccess.user_id == database_user_id,
-                UserProfileAccess.profile_id == profile.id
-            )
-            access_result = await db.execute(access_query)
-            existing_access = access_result.scalar_one_or_none()
-            
-            if not existing_access:
-                # Create user_profile_access record (30 day access)
-                expires_at = current_time + timedelta(days=30)
-                access_record = UserProfileAccess(
-                    user_id=database_user_id,
-                    profile_id=profile.id,
-                    granted_at=current_time,
-                    expires_at=expires_at
-                )
-                db.add(access_record)
-                logger.info(f"Created user_profile_access record for user {database_user_id}, profile {profile.id}")
-            
-            await db.commit()
+            expires_at = current_time + timedelta(days=30)
+
+            # Insert user_profile_access using raw SQL (PGBouncer AUTOCOMMIT compatible)
+            await db.execute(text("""
+                INSERT INTO user_profile_access (id, user_id, profile_id, granted_at, expires_at, created_at)
+                VALUES (gen_random_uuid(), :user_id, :profile_id, :granted_at, :expires_at, :created_at)
+                ON CONFLICT (user_id, profile_id) DO UPDATE SET granted_at = :granted_at, expires_at = :expires_at
+            """), {
+                "user_id": str(database_user_id),
+                "profile_id": profile_id_str,
+                "granted_at": current_time,
+                "expires_at": expires_at,
+                "created_at": current_time
+            })
+            logger.info(f"Created user_profile_access record for user {database_user_id}, profile {profile_id_str}")
+
+            # Insert unlocked_influencers using raw SQL (PGBouncer AUTOCOMMIT compatible)
+            await db.execute(text("""
+                INSERT INTO unlocked_influencers (user_id, profile_id, username, unlocked_at, credits_spent, transaction_id)
+                VALUES (:user_id, :profile_id, :username, :unlocked_at, :credits_spent, :transaction_id)
+                ON CONFLICT DO NOTHING
+            """), {
+                "user_id": str(database_user_id),
+                "profile_id": profile_id_str,
+                "username": username,
+                "unlocked_at": current_time,
+                "credits_spent": credits_spent,
+                "transaction_id": transaction_id
+            })
+            logger.info(f"Created unlocked_influencers record for user {database_user_id}, profile {profile_id_str} ({username})")
+
             logger.info(f"Successfully created access records for user {database_user_id} -> profile {username}")
-            
+
         except Exception as e:
-            await db.rollback()
             logger.error(f"Failed to create access records: {e}")
             raise
 

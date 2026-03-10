@@ -10,7 +10,7 @@ Date: January 2025
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc
+from sqlalchemy import select, and_, func, desc, text
 from typing import Optional, List
 from uuid import UUID
 from pydantic import BaseModel
@@ -41,6 +41,7 @@ class CreateUserCampaignRequest(BaseModel):
     budget: Optional[float] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
+    campaign_type: Optional[str] = 'influencer'  # influencer | ugc
 
 class CreateSuperadminCampaignRequest(BaseModel):
     """SUPERADMIN campaign creation - full workflow"""
@@ -52,6 +53,7 @@ class CreateSuperadminCampaignRequest(BaseModel):
     budget: Optional[float] = None
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
+    campaign_type: Optional[str] = 'influencer'  # influencer | ugc
 
 class SelectInfluencerRequest(BaseModel):
     """Select influencer for campaign"""
@@ -99,44 +101,63 @@ async def create_user_campaign(
     No workflow state needed - goes straight to 'active'
     """
     try:
-        # Create campaign
-        campaign = Campaign(
-            user_id=current_user.id,
-            name=request.name,
-            brand_name=request.brand_name,
-            brand_logo_url=request.brand_logo_url,
-            description=request.description,
-            budget=request.budget,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            status='active',  # User campaigns start active
-            created_by='user'  # Mark as user-created
+        # Validate campaign_type
+        campaign_type = request.campaign_type or 'influencer'
+        if campaign_type not in ('influencer', 'ugc'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="campaign_type must be 'influencer' or 'ugc'"
+            )
+
+        import uuid as uuid_lib
+        campaign_id = str(uuid_lib.uuid4())
+
+        # Raw SQL INSERT (PGBouncer AUTOCOMMIT - ORM db.add() silently fails)
+        result = await db.execute(
+            text("""
+                INSERT INTO campaigns (id, user_id, name, brand_name, brand_logo_url, description,
+                    budget, start_date, end_date, status, created_by, campaign_type)
+                VALUES (:id, :user_id, :name, :brand_name, :brand_logo_url, :description,
+                    :budget, :start_date, :end_date, 'active', 'user', :campaign_type)
+                RETURNING id, name, brand_name, brand_logo_url, status, created_by, campaign_type, created_at
+            """).execution_options(prepare=False),
+            {
+                "id": campaign_id,
+                "user_id": str(current_user.id),
+                "name": request.name,
+                "brand_name": request.brand_name,
+                "brand_logo_url": request.brand_logo_url,
+                "description": request.description,
+                "budget": request.budget,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "campaign_type": campaign_type
+            }
         )
+        row = result.fetchone()
 
-        db.add(campaign)
-        await db.commit()
-        await db.refresh(campaign)
-
-        logger.info(f"✅ User {current_user.email} created campaign: {campaign.name}")
+        logger.info(f"User {current_user.email} created campaign: {row.name}")
 
         return {
             "success": True,
             "data": {
-                "id": str(campaign.id),
-                "name": campaign.name,
-                "brand_name": campaign.brand_name,
-                "brand_logo_url": campaign.brand_logo_url,
-                "status": campaign.status,
-                "created_by": campaign.created_by,
-                "created_at": campaign.created_at.isoformat(),
+                "id": str(row.id),
+                "name": row.name,
+                "brand_name": row.brand_name,
+                "brand_logo_url": row.brand_logo_url,
+                "status": row.status,
+                "created_by": row.created_by,
+                "campaign_type": row.campaign_type,
+                "created_at": row.created_at.isoformat(),
                 "message": "Campaign created! You can now add Instagram post links to track performance."
             },
             "message": "User campaign created successfully"
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ Error creating user campaign: {e}", exc_info=True)
-        await db.rollback()
+        logger.error(f"Error creating user campaign: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create campaign: {str(e)}"
@@ -173,63 +194,92 @@ async def create_superadmin_campaign(
                 detail="Only superadmins can create workflow campaigns"
             )
 
-        # Create campaign
-        campaign = Campaign(
-            user_id=request.user_id,  # FOR this user
-            name=request.name,
-            brand_name=request.brand_name,
-            brand_logo_url=request.brand_logo_url,
-            description=request.description,
-            budget=request.budget,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            status='draft',  # Workflow campaigns start in draft
-            created_by='superadmin'  # Mark as superadmin-created
+        # Validate campaign_type
+        campaign_type = request.campaign_type or 'influencer'
+        if campaign_type not in ('influencer', 'ugc'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="campaign_type must be 'influencer' or 'ugc'"
+            )
+
+        import uuid as uuid_lib
+
+        # Raw SQL INSERT for campaign (PGBouncer AUTOCOMMIT)
+        campaign_id = str(uuid_lib.uuid4())
+        campaign_result = await db.execute(
+            text("""
+                INSERT INTO campaigns (id, user_id, name, brand_name, brand_logo_url, description,
+                    budget, start_date, end_date, status, created_by, campaign_type)
+                VALUES (:id, :user_id, :name, :brand_name, :brand_logo_url, :description,
+                    :budget, :start_date, :end_date, 'draft', 'superadmin', :campaign_type)
+                RETURNING id, name, brand_name, status, created_by, campaign_type, created_at
+            """).execution_options(prepare=False),
+            {
+                "id": campaign_id,
+                "user_id": str(request.user_id),
+                "name": request.name,
+                "brand_name": request.brand_name,
+                "brand_logo_url": request.brand_logo_url,
+                "description": request.description,
+                "budget": request.budget,
+                "start_date": request.start_date,
+                "end_date": request.end_date,
+                "campaign_type": campaign_type
+            }
         )
+        campaign_row = campaign_result.fetchone()
 
-        db.add(campaign)
-        await db.flush()
-
-        # Create workflow state
-        workflow_state = CampaignWorkflowState(
-            campaign_id=campaign.id,
-            current_stage='influencer_selection',
-            draft_started_at=datetime.now(timezone.utc),
-            selection_started_at=datetime.now(timezone.utc)
-        )
-
-        db.add(workflow_state)
-
-        # Create notification for user
-        notification = CampaignWorkflowNotification(
-            campaign_id=campaign.id,
-            notification_type='influencer_selected',
-            recipient_id=request.user_id,
-            title=f"New Campaign: {campaign.name}",
-            message=f"A new campaign has been created for you by {current_user.full_name or current_user.email}. Please select influencers to proceed.",
-            action_url=f"/campaigns/{campaign.id}/select-influencers",
-            metadata={
-                "campaign_id": str(campaign.id),
-                "created_by_admin": current_user.email
+        # Raw SQL INSERT for workflow state
+        workflow_id = str(uuid_lib.uuid4())
+        now_utc = datetime.now(timezone.utc)
+        await db.execute(
+            text("""
+                INSERT INTO campaign_workflow_state (id, campaign_id, current_stage, draft_started_at, selection_started_at)
+                VALUES (:id, :campaign_id, 'influencer_selection', :draft_started_at, :selection_started_at)
+            """).execution_options(prepare=False),
+            {
+                "id": workflow_id,
+                "campaign_id": campaign_id,
+                "draft_started_at": now_utc,
+                "selection_started_at": now_utc
             }
         )
 
-        db.add(notification)
-        await db.commit()
-        await db.refresh(campaign)
+        # Raw SQL INSERT for notification
+        import json
+        notification_id = str(uuid_lib.uuid4())
+        admin_name = current_user.full_name or current_user.email
+        await db.execute(
+            text("""
+                INSERT INTO campaign_workflow_notifications (id, campaign_id, notification_type, recipient_id,
+                    title, message, action_url, metadata)
+                VALUES (:id, :campaign_id, 'influencer_selected', :recipient_id,
+                    :title, :message, :action_url, :metadata::jsonb)
+            """).execution_options(prepare=False),
+            {
+                "id": notification_id,
+                "campaign_id": campaign_id,
+                "recipient_id": str(request.user_id),
+                "title": f"New Campaign: {request.name}",
+                "message": f"A new campaign has been created for you by {admin_name}. Please select influencers to proceed.",
+                "action_url": f"/campaigns/{campaign_id}/select-influencers",
+                "metadata": json.dumps({"campaign_id": campaign_id, "created_by_admin": current_user.email})
+            }
+        )
 
-        logger.info(f"✅ Superadmin {current_user.email} created workflow campaign: {campaign.name} for user {request.user_id}")
+        logger.info(f"Superadmin {current_user.email} created workflow campaign: {campaign_row.name} for user {request.user_id}")
 
         return {
             "success": True,
             "data": {
-                "id": str(campaign.id),
-                "name": campaign.name,
-                "brand_name": campaign.brand_name,
-                "status": campaign.status,
-                "created_by": campaign.created_by,
-                "workflow_stage": workflow_state.current_stage,
-                "created_at": campaign.created_at.isoformat(),
+                "id": str(campaign_row.id),
+                "name": campaign_row.name,
+                "brand_name": campaign_row.brand_name,
+                "status": campaign_row.status,
+                "created_by": campaign_row.created_by,
+                "campaign_type": campaign_row.campaign_type,
+                "workflow_stage": "influencer_selection",
+                "created_at": campaign_row.created_at.isoformat(),
                 "message": "Campaign created! Awaiting influencer selection from user."
             },
             "message": "Superadmin campaign created with workflow"
@@ -238,8 +288,7 @@ async def create_superadmin_campaign(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error creating superadmin campaign: {e}", exc_info=True)
-        await db.rollback()
+        logger.error(f"Error creating superadmin campaign: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create campaign: {str(e)}"
@@ -300,52 +349,66 @@ async def select_influencer(
                 detail="Influencer already selected for this campaign"
             )
 
-        # Create selection
-        selection = CampaignInfluencerSelection(
-            campaign_id=campaign_id,
-            profile_id=request.profile_id,
-            selected_by=current_user.id,
-            selection_status='pending',
-            selection_notes=request.selection_notes,
-            estimated_cost=request.estimated_cost
+        import uuid as uuid_lib
+
+        # Raw SQL INSERT for selection (PGBouncer AUTOCOMMIT)
+        selection_id = str(uuid_lib.uuid4())
+        await db.execute(
+            text("""
+                INSERT INTO campaign_influencer_selections (id, campaign_id, profile_id, selected_by,
+                    selection_status, selection_notes, estimated_cost)
+                VALUES (:id, :campaign_id, :profile_id, :selected_by,
+                    'pending', :selection_notes, :estimated_cost)
+            """).execution_options(prepare=False),
+            {
+                "id": selection_id,
+                "campaign_id": str(campaign_id),
+                "profile_id": str(request.profile_id),
+                "selected_by": str(current_user.id),
+                "selection_notes": request.selection_notes,
+                "estimated_cost": request.estimated_cost
+            }
         )
 
-        db.add(selection)
-
-        # Update workflow state
-        result = await db.execute(
-            select(CampaignWorkflowState).where(
-                CampaignWorkflowState.campaign_id == campaign_id
-            )
-        )
-        workflow_state = result.scalar_one_or_none()
-
-        if workflow_state:
-            workflow_state.influencers_selected += 1
-            workflow_state.updated_at = datetime.now(timezone.utc)
-
-        # Notify superadmin
-        # Get superadmins (you might want to query from users table)
-        notification = CampaignWorkflowNotification(
-            campaign_id=campaign_id,
-            notification_type='influencer_selected',
-            recipient_id=current_user.id,  # For now, notify the user (update with superadmin IDs)
-            title=f"Influencer Selected: {campaign.name}",
-            message=f"{current_user.full_name or current_user.email} selected an influencer. Please review and lock selections.",
-            action_url=f"/admin/campaigns/{campaign_id}/review-selections"
+        # Update workflow state counter
+        await db.execute(
+            text("""
+                UPDATE campaign_workflow_state
+                SET influencers_selected = influencers_selected + 1,
+                    updated_at = NOW()
+                WHERE campaign_id = :campaign_id
+            """).execution_options(prepare=False),
+            {"campaign_id": str(campaign_id)}
         )
 
-        db.add(notification)
-        await db.commit()
+        # Raw SQL INSERT for notification
+        notification_id = str(uuid_lib.uuid4())
+        user_name = current_user.full_name or current_user.email
+        await db.execute(
+            text("""
+                INSERT INTO campaign_workflow_notifications (id, campaign_id, notification_type, recipient_id,
+                    title, message, action_url)
+                VALUES (:id, :campaign_id, 'influencer_selected', :recipient_id,
+                    :title, :message, :action_url)
+            """).execution_options(prepare=False),
+            {
+                "id": notification_id,
+                "campaign_id": str(campaign_id),
+                "recipient_id": str(current_user.id),
+                "title": f"Influencer Selected: {campaign.name}",
+                "message": f"{user_name} selected an influencer. Please review and lock selections.",
+                "action_url": f"/admin/campaigns/{campaign_id}/review-selections"
+            }
+        )
 
-        logger.info(f"✅ User {current_user.email} selected influencer for campaign {campaign_id}")
+        logger.info(f"User {current_user.email} selected influencer for campaign {campaign_id}")
 
         return {
             "success": True,
             "data": {
-                "selection_id": str(selection.id),
-                "profile_id": str(selection.profile_id),
-                "status": selection.selection_status,
+                "selection_id": selection_id,
+                "profile_id": str(request.profile_id),
+                "status": "pending",
                 "message": "Influencer selected! Awaiting superadmin review."
             },
             "message": "Influencer selected successfully"
